@@ -2,7 +2,7 @@
 import type { Personality, ScareType } from '../sim/types';
 
 export const STRINGS = {
-  title: '万圣节 Manor',
+  title: 'Halloween Manor',
   start: {
     headphones: 'Put on headphones.',
     begin: 'Click to begin the haunting.',
@@ -16,7 +16,11 @@ export const STRINGS = {
     unmute: 'Unmute',
     qualityHigh: 'Quality: High',
     qualityLow: 'Quality: Low',
+    /** 画质按钮上露出的短标签 */
+    qualityShort: { high: 'High', low: 'Low' },
   },
+  /** 悬停标签里的剩余冷却 */
+  cooldown: (seconds: number) => `${Math.ceil(seconds)}s`,
   noWebGL: "Your browser can't run WebGL2, so the manor stays dark. Try a recent Chrome, Edge, Firefox or Safari.",
   ready: 'Ready',
   personalityTag: { timid: 'scaredy-cat', average: '', brave: 'skeptic' } satisfies Record<Personality, string>,

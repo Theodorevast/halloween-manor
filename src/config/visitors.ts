@@ -18,10 +18,12 @@ export const FEAR = {
   max: 100,
   /** 连续这么多秒没被吓，开始回落 */
   decayDelay: 4,
-  /** 每秒回落 */
-  decayRate: 3,
+  /** 每秒回落（原为 3：回落太快，一个人被吓到一半，走出房间就清零了，几乎吓不跑人。见 tests/balance.test.ts） */
+  decayRate: 0.75,
   /** ≥ 这个值进入紧张 */
   nervous: 60,
+  /** ≥ 这个值恐惧条变血红（只影响画面） */
+  dread: 80,
   /** 一次涨了这么多以上就尖叫 */
   screamAt: 15,
   /** 尖叫持续秒数 */
@@ -34,6 +36,12 @@ export const FEAR = {
   startleTime: 0.8,
   /** 第 n 次被同一种物件吓：效果 × habituation^(n-1) */
   habituation: 0.5,
+  /**
+   * 习惯化恢复：每过这么多秒，「被这种物件吓过的次数」减 1（连续恢复）；0 = 永不恢复。
+   * 不恢复的话每个人能被吓到的总量有上限（brave 全部物件各吓一次也到不了 100），所以要恢复；
+   * 15 秒内连着用同一种物件仍然会减半，鼓励换着吓
+   */
+  habituationRecover: 15,
 };
 
 export const VISION = {

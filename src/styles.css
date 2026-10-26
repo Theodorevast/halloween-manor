@@ -1,0 +1,645 @@
+/* Halloween Manor 界面样式（开场遮罩、HUD、场景叠层）
+ *
+ * 视觉方向：这栋房子自己的印刷品。维多利亚时代的铅字反白印在夜色上——
+ *   标题页用 IM Fell English（17 世纪 Fell 铅字的数字化，自带油墨的毛边），正文用 EB Garamond；
+ *   名字和标签用真小型大写字母，安静的播报用斜体，像访客登记簿里的一行行字。
+ *   唯一的装饰母题是「标本签」：四角内凹、双线框的小标签（9 宫格 SVG border-image），
+ *   用在悬停标签（用一根细线挂在物件上）、按钮和标题页外框上；分隔线用两段楔形加菱形的膨胀线。
+ *   开场只有一个大胆的动作：一圈烛光跟着指针照亮黑底上的字。其余一律克制。
+ * 颜色：夜 #050608（场景背景）· 骨白（墨）· 灰烬（褪色的墨）· 橙（恐惧，设计文档指定）· 血红（≥ 80）·
+ *   幽绿（取自 PALETTE.possess 并降饱和，只表示「现在可以出手」）
+ */
+@import '@fontsource/im-fell-english/400.css';
+@import '@fontsource/im-fell-english/400-italic.css';
+@import '@fontsource/eb-garamond/400.css';
+@import '@fontsource/eb-garamond/400-italic.css';
+@import '@fontsource/eb-garamond/600.css';
+
+:root {
+  --night: #050608;
+  --bone: #dcd2bd;
+  --ash: #8f8778;
+  --ember: #ff7a1a;
+  --blood: #b3141c;
+  --ghost: #8fe3b1;
+  --face-display: 'IM Fell English', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+  --face-text: 'EB Garamond', Garamond, 'Palatino Linotype', Georgia, serif;
+  --ink-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 10px rgba(0, 0, 0, 0.85);
+
+  /* 标本签：四角内凹的双线框。9 宫格切片，角不会被拉伸变形 */
+  --frame-label: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='42' height='42' viewBox='0 0 42 42'><path d='M7 .5H35A7 7 0 0 0 41.5 7V35A7 7 0 0 0 35 41.5H7A7 7 0 0 0 .5 35V7A7 7 0 0 0 7 .5Z' fill='rgba(8,7,9,0.86)' stroke='rgba(220,210,189,0.55)'/><path d='M9.9 3.5H32.1A10.5 10.5 0 0 0 38.5 9.9V32.1A10.5 10.5 0 0 0 32.1 38.5H9.9A10.5 10.5 0 0 0 3.5 32.1V9.9A10.5 10.5 0 0 0 9.9 3.5Z' fill='none' stroke='rgba(220,210,189,0.22)'/></svg>");
+  --frame-btn: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'><path d='M5 .5H25A5 5 0 0 0 29.5 5V25A5 5 0 0 0 25 29.5H5A5 5 0 0 0 .5 25V5A5 5 0 0 0 5 .5Z' fill='rgba(8,7,9,0.62)' stroke='rgba(220,210,189,0.36)'/></svg>");
+  --frame-page: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60' viewBox='0 0 60 60'><path d='M10 .5H50A10 10 0 0 0 59.5 10V50A10 10 0 0 0 50 59.5H10A10 10 0 0 0 .5 50V10A10 10 0 0 0 10 .5Z' fill='none' stroke='rgba(220,210,189,0.2)'/><path d='M14.14 5H45.86A15 15 0 0 0 55 14.14V45.86A15 15 0 0 0 45.86 55H14.14A15 15 0 0 0 5 45.86V14.14A15 15 0 0 0 14.14 5Z' fill='none' stroke='rgba(220,210,189,0.1)'/></svg>");
+  /* 很淡的颗粒，让黑底像一块印版而不是一块屏幕 */
+  --grain: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .86 0 0 0 0 .82 0 0 0 0 .74 0 0 0 .09 0'/></filter><rect width='100%25' height='100%25' filter='url(%23g)'/></svg>");
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--night);
+  color: var(--bone);
+}
+
+body {
+  font-family: var(--face-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+}
+
+#overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+}
+
+#hud {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ── 开场遮罩：一张反白印刷的标题页 ─────────────────────── */
+
+.hud-start {
+  --lx: 50%;
+  --ly: 46%;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 56px 28px 112px;
+  background: var(--grain) var(--night);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: opacity 0.8s ease;
+}
+
+.hud-start::before {
+  content: '';
+  position: absolute;
+  z-index: 1;
+  inset: 18px;
+  border-image: var(--frame-page) 20 / 20px stretch;
+  pointer-events: none;
+}
+
+.hud-start.is-leaving {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hud-start.is-error {
+  cursor: default;
+}
+
+/* 烛光：中间一圈暖光，越往外越暗，把字压回黑里 */
+.hud-start-light {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle 380px at var(--lx) var(--ly), rgba(255, 217, 168, 0.075), transparent 72%),
+    radial-gradient(circle 560px at var(--lx) var(--ly), transparent 22%, rgba(5, 6, 8, 0.5) 100%);
+}
+
+.hud-start-page {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 44rem;
+  text-align: center;
+}
+
+.hud-title {
+  margin: 0;
+  font-family: var(--face-display);
+  font-weight: 400;
+  font-size: clamp(2.9rem, 10.5vw, 6.75rem);
+  line-height: 0.95;
+  letter-spacing: 0.005em;
+  color: var(--bone);
+}
+
+.hud-rule {
+  display: block;
+  width: min(15rem, 62vw);
+  height: auto;
+  margin: 1.35rem 0 1.7rem;
+  color: var(--ash);
+}
+
+.hud-headphones {
+  margin: 0 0 0.3rem;
+  font-style: italic;
+  font-size: 1.2rem;
+  color: var(--ash);
+}
+
+.hud-begin {
+  margin: 0;
+  padding: 0.15em 0.4em;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-family: var(--face-display);
+  font-size: clamp(1.6rem, 4.6vw, 2.2rem);
+  line-height: 1.2;
+  color: var(--bone);
+  cursor: pointer;
+  animation: hud-breathe 3.6s ease-in-out infinite;
+}
+
+.hud-begin:focus-visible {
+  outline: 1px solid var(--bone);
+  outline-offset: 4px;
+}
+
+@keyframes hud-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+}
+
+/* 玩法说明排成书页底部的版权行：小型大写、字距拉开 */
+.hud-hint {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  bottom: 52px;
+  margin: 0;
+  padding: 0 40px;
+  text-align: center;
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.13em;
+  font-size: 1.05rem;
+  line-height: 1.4;
+  color: #a69d8c;
+}
+
+.hud-error {
+  max-width: 30rem;
+  margin: 0;
+  font-style: italic;
+  font-size: 1.25rem;
+  line-height: 1.45;
+  color: var(--bone);
+}
+
+/* ── 游戏中的 HUD ─────────────────────────────────────── */
+
+.hud-play {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 0.9s ease 0.3s;
+}
+
+.hud-play.is-on {
+  opacity: 1;
+}
+
+.hud-counter {
+  position: absolute;
+  top: max(18px, env(safe-area-inset-top));
+  left: max(24px, env(safe-area-inset-left));
+  display: flex;
+  align-items: baseline;
+  gap: 0.4em;
+  margin: 0;
+  font-family: var(--face-display);
+  text-shadow: var(--ink-shadow);
+}
+
+.hud-counter-label {
+  font-style: italic;
+  font-size: 1.2rem;
+  color: var(--ash);
+}
+
+/* 数字用 EB Garamond 的齐线数字：IM Fell 的旧式「1」长得像罗马数字 I，11 会被读成 II */
+.hud-counter-n {
+  display: inline-block;
+  min-width: 1ch;
+  font-family: var(--face-text);
+  font-variant-numeric: lining-nums;
+  font-size: 2.1rem;
+  line-height: 1;
+  color: var(--bone);
+  transform-origin: 30% 60%;
+}
+
+/* 播报：底部对齐，新的一条从下面推上来 */
+.hud-ticker {
+  position: absolute;
+  left: max(24px, env(safe-area-inset-left));
+  bottom: max(22px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  max-width: min(30rem, calc(100vw - 300px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 1.1rem;
+  line-height: 1.35;
+}
+
+.hud-line {
+  color: var(--bone);
+  text-shadow: var(--ink-shadow);
+  transition: opacity 1.2s ease;
+}
+
+.hud-line.is-quiet {
+  font-style: italic;
+  color: var(--ash);
+}
+
+.hud-line.is-flee {
+  font-family: var(--face-display);
+  font-size: 1.22rem;
+}
+
+/* 讣告里的短剑号：这个人从今晚的名单上划掉了 */
+.hud-line.is-exit::before {
+  content: '\2020';
+  margin-right: 0.45em;
+  color: var(--ash);
+}
+
+.hud-line.is-fading {
+  opacity: 0;
+}
+
+.hud-controls {
+  position: absolute;
+  right: max(20px, env(safe-area-inset-right));
+  bottom: max(20px, env(safe-area-inset-bottom));
+  display: flex;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.hud-btn {
+  display: inline-grid;
+  grid-auto-flow: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 42px;
+  height: 42px;
+  margin: 0;
+  padding: 0 10px;
+  border: 0;
+  border-image: var(--frame-btn) 10 fill / 10px stretch;
+  background: none;
+  font: inherit;
+  color: var(--bone);
+  opacity: 0.78;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+
+.hud-btn:hover {
+  opacity: 1;
+}
+
+.hud-btn:active {
+  transform: translateY(1px);
+}
+
+.hud-btn:focus-visible {
+  opacity: 1;
+  outline: 1px solid var(--bone);
+  outline-offset: 3px;
+}
+
+.hud-btn svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+
+.hud-btn-text {
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.12em;
+  font-size: 1.05rem;
+  line-height: 1;
+  margin-top: -2px;
+}
+
+.hud-btn .hud-cross,
+.hud-btn.is-muted .hud-waves,
+.hud-btn .hud-flame-lo,
+.hud-btn.is-low .hud-flame-hi {
+  display: none;
+}
+
+.hud-btn.is-muted .hud-cross,
+.hud-btn.is-low .hud-flame-lo {
+  display: inline;
+}
+
+/* ── 场景叠层 ─────────────────────────────────────────── */
+
+.ov-plate,
+.ov-mark,
+.ov-tip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  will-change: transform;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.3s ease, visibility 0s linear 0.3s;
+}
+
+/* 叠放次序：悬停标签（玩家正盯着的）> 名牌 > 物件标记 */
+.ov-mark {
+  z-index: 1;
+}
+
+.ov-plate {
+  z-index: 2;
+}
+
+.ov-tip {
+  z-index: 3;
+}
+
+.ov-plate.is-on,
+.ov-mark.is-on,
+.ov-tip.is-on {
+  visibility: visible;
+  opacity: 1;
+  transition: opacity 0.3s ease;
+}
+
+/* 名牌：小型大写的名字 · 斜体的性格标注，下面一根细恐惧条 */
+.ov-plate-in {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+}
+
+.ov-plate-name {
+  font-size: 14px;
+  line-height: 1;
+  text-shadow: var(--ink-shadow);
+}
+
+.ov-name {
+  font-weight: 600;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.05em;
+  color: var(--bone);
+}
+
+.ov-tag {
+  font-style: italic;
+  color: var(--ash);
+}
+
+.ov-tag:not(:empty)::before {
+  content: ' \00B7  ';
+  font-style: normal;
+  white-space: pre;
+}
+
+.ov-plate.is-fleeing .ov-name {
+  color: #e2584d;
+}
+
+.ov-bar {
+  position: relative;
+  width: 48px;
+  height: 3px;
+  background: rgba(5, 6, 8, 0.8);
+  box-shadow: 0 0 0 1px rgba(220, 210, 189, 0.16), 0 0 6px rgba(0, 0, 0, 0.9);
+}
+
+.ov-bar-fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 50%;
+  transform: scaleX(0);
+  background: var(--bone);
+}
+
+.ov-bar-tick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: rgba(220, 210, 189, 0.4);
+}
+
+/* 物件标记：冷却圆环 + 眼睛（有人能看见它） */
+.ov-mark-in {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  transform: translate(-50%, -50%);
+}
+
+.ov-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.ov-mark.is-cooling .ov-ring {
+  opacity: 1;
+}
+
+.ov-ring circle {
+  fill: none;
+  stroke-width: 1.6;
+}
+
+.ov-ring-track {
+  stroke: rgba(220, 210, 189, 0.16);
+}
+
+.ov-ring-arc {
+  stroke: var(--bone);
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.9));
+}
+
+.ov-eye {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 20px;
+  height: 12px;
+  margin: -6px 0 0 -10px;
+  color: var(--ash);
+  transform: scaleY(0);
+  transition: transform 0.16s ease-out;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.95));
+}
+
+.ov-mark.is-seen .ov-eye {
+  transform: scaleY(1);
+}
+
+.ov-mark.is-ready .ov-eye {
+  color: var(--ghost);
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.95)) drop-shadow(0 0 5px rgba(125, 255, 168, 0.45));
+}
+
+/* 悬停标签：标本签，用一根细线挂在物件上 */
+.ov-tip-in {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform: translate(-50%, -100%);
+}
+
+.ov-tip-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 9px 18px 10px;
+  border-image: var(--frame-label) 14 fill / 14px stretch;
+  white-space: nowrap;
+}
+
+.ov-tip-name {
+  font-family: var(--face-display);
+  font-size: 18px;
+  line-height: 1.1;
+  color: var(--bone);
+}
+
+/* 冷却秒数用齐线等宽数字（倒数时不跳动）；「Ready」用小型大写、幽绿 */
+.ov-tip-state {
+  font-size: 15px;
+  line-height: 1.1;
+  font-variant-numeric: lining-nums tabular-nums;
+  letter-spacing: 0.04em;
+  color: var(--ash);
+}
+
+.ov-tip.is-ready .ov-tip-state {
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.14em;
+  color: var(--ghost);
+}
+
+.ov-tip-string {
+  width: 1px;
+  height: 14px;
+  background: linear-gradient(rgba(220, 210, 189, 0.5), rgba(220, 210, 189, 0.12));
+}
+
+/* ── 窄屏（手机竖屏）：播报移到按钮上方，整体收紧 ───────── */
+
+@media (max-width: 640px) {
+  .hud-start {
+    padding: 40px 22px 124px;
+  }
+
+  .hud-start::before {
+    inset: 10px;
+  }
+
+  .hud-hint {
+    bottom: 36px;
+    padding: 0 28px;
+    font-size: 0.98rem;
+  }
+
+  .hud-counter {
+    top: max(14px, env(safe-area-inset-top));
+    left: max(16px, env(safe-area-inset-left));
+  }
+
+  .hud-counter-label {
+    font-size: 1.05rem;
+  }
+
+  .hud-counter-n {
+    font-size: 1.8rem;
+  }
+
+  .hud-ticker {
+    left: max(16px, env(safe-area-inset-left));
+    right: 16px;
+    bottom: calc(max(14px, env(safe-area-inset-bottom)) + 58px);
+    max-width: none;
+    font-size: 1rem;
+  }
+
+  .hud-controls {
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(14px, env(safe-area-inset-bottom));
+  }
+}
+
+@media (pointer: coarse) {
+  .hud-btn {
+    min-width: 44px;
+    height: 44px;
+  }
+}
+
+/* ── 减弱动态：关掉呼吸、眨眼、推移这类非必要的动作，保留淡入淡出 ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-begin {
+    animation: none;
+  }
+
+  .ov-eye,
+  .ov-ring {
+    transition: none;
+  }
+
+  .hud-btn:active {
+    transform: none;
+  }
+}

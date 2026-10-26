@@ -1,0 +1,206 @@
+// 访客手里的手电。做法沿用 工具 证据板的 TORCH：两盏叠在一起的聚光——
+// 外圈宽而软（penumbra 1）、投影，亮芯窄、不投影，叠出「中间亮、四周柔和地暗下去」的光斑。
+// 不用 light.map 画光斑：three.js 的投影路径会在光锥里多出一块方形的亮区。
+// 再加一个很淡的加法混合光锥网格，假装空气里有一点灰（体积光），low 档关掉。
+//
+// 灯由 characters.ts 在模块创建时一次建好（对象池），之后只改参数、不增删：
+// three.js 的灯数量或 castShadow 一变，场景里每个材质都要重新编译，访客进出门时会卡一下。
+import * as THREE from 'three/webgpu';
+import { abs, color, normalView, pow, uniform, uv } from 'three/tsl';
+import { CELL, GRID_H, GRID_W, blocksSight, buildTiles, type Tile } from '../config/house';
+import { VISION } from '../config/visitors';
+import type { Quality } from '../engine/types';
+import { PALETTE } from './palette';
+
+/** 手电的全部手感参数（导出给 dev/characters.ts 调参用；正式代码不要在运行时改它） */
+export const TORCH = {
+  /** 外圈：比视野半角宽一点，光斑边缘正好是「看得见」的边界 */
+  halo: { angle: VISION.halfAngle * 1.1, penumbra: 1, intensity: 40 },
+  /**
+   * 亮芯：窄，偏白，不投影。不投影就会穿墙：每帧沿光束在格子地图上找最近的墙，
+   * 把它的照射距离截在墙后 wallMargin 米（墙体在格子里居中，这样刚好够到墙的背面）
+   */
+  core: { angle: VISION.halfAngle * 0.42, penumbra: 0.8, intensity: 30, wallMargin: CELL },
+  /** 衰减指数比物理的 2 小得多：手电离地只有 0.8 米，照远处地面是掠射，按平方衰减的话光斑一离开脚边就看不见了 */
+  decay: 1.1,
+  /** 光到这么远完全衰减为 0，也是阴影相机的远平面（比视野远一点） */
+  distance: VISION.range * 1.3,
+  /** 照向：lookDir 方向这么远的地面 */
+  aim: 3.5,
+  shadow: {
+    size: { high: 1024, low: 512 } as Record<Quality, number>,
+    near: 0.1,
+    // 墙面和光几乎平行时最容易出条纹（阴影痤疮）：bias 往负、再沿法线推一点
+    bias: -0.0008,
+    normalBias: { high: 0.03, low: 0.05 } as Record<Quality, number>,
+  },
+  /** 紧张：亮度闪烁的深度、光束抖动的幅度（弧度） */
+  nervous: { flicker: 0.22, jitter: 0.035 },
+  /** 假体积光：最长多少米、最亮时的不透明度 */
+  beam: { length: 3.4, opacity: 0.085, radius: Math.tan(VISION.halfAngle * 0.8) },
+};
+
+/** 每帧传给手电的位姿（房屋坐标） */
+export interface TorchPose {
+  x: number;
+  /** 光源高度（米） */
+  y: number;
+  z: number;
+  /** 照向（方向角，见 lib/angle.ts） */
+  dir: number;
+  /** 0..1：访客淡入淡出时跟着变 */
+  power: number;
+  nervous: boolean;
+}
+
+export interface Flashlight {
+  update(p: TorchPose, dt: number, time: number): void;
+  /** 空闲：灯灭、不再渲染阴影图（灯还在场景里，避免材质重编译） */
+  park(): void;
+  readonly parked: boolean;
+  setQuality(q: Quality): void;
+  dispose(): void;
+}
+
+// 光锥网格要在墙那里截断：沿格子地图走一遍，找到第一个挡视线的格子
+let tiles: Uint8Array | null = null;
+function wallDistance(x: number, z: number, dir: number, max: number): number {
+  tiles ??= buildTiles();
+  const dx = Math.cos(dir), dz = Math.sin(dir);
+  const step = CELL / 5;
+  for (let d = step; d < max; d += step) {
+    const i = Math.floor((x + dx * d) / CELL), j = Math.floor((z + dz * d) / CELL);
+    if (i < 0 || j < 0 || i >= GRID_W || j >= GRID_H) return max; // 屋外（前门外）不挡
+    if (blocksSight(tiles[j * GRID_W + i] as Tile)) return d;
+  }
+  return max;
+}
+
+// 共用几何体：单位长度的光锥（尖在原点、沿 +z 张开）、手电筒身、镜片
+let shared: { cone: THREE.BufferGeometry; body: THREE.BufferGeometry; lens: THREE.BufferGeometry; bodyMat: THREE.Material; lensMat: THREE.Material } | null = null;
+function sharedParts() {
+  if (shared) return shared;
+  const cone = new THREE.ConeGeometry(TORCH.beam.radius, 1, 24, 1, true);
+  cone.translate(0, -0.5, 0); // 尖移到原点（ConeGeometry 的尖在 +y）
+  cone.rotateX(-Math.PI / 2); // 张开方向转到 +z
+  const body = new THREE.CylinderGeometry(0.028, 0.022, 0.15, 10);
+  body.rotateX(Math.PI / 2);
+  body.translate(0, 0, -0.06);
+  const lens = new THREE.CircleGeometry(0.026, 12);
+  lens.translate(0, 0, 0.0155);
+  const bodyMat = new THREE.MeshStandardNodeMaterial({ color: PALETTE.wallTrim, roughness: 0.45, metalness: 0.6 });
+  // 镜片不受光照，直接是亮芯的颜色（泛光会把它晕开一点）
+  const lensMat = new THREE.MeshBasicNodeMaterial({ color: PALETTE.torchCore });
+  shared = { cone, body, lens, bodyMat, lensMat };
+  return shared;
+}
+
+export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flashlight {
+  const parts = sharedParts();
+  const halo = new THREE.SpotLight(PALETTE.torchHalo, 0, TORCH.distance, TORCH.halo.angle, TORCH.halo.penumbra, TORCH.decay);
+  const core = new THREE.SpotLight(PALETTE.torchCore, 0, TORCH.distance, TORCH.core.angle, TORCH.core.penumbra, TORCH.decay);
+  halo.castShadow = true;
+  halo.shadow.camera.near = TORCH.shadow.near;
+  halo.shadow.bias = TORCH.shadow.bias;
+  // 房子任务把「只投影的全高墙」放在 layer 1：让外圈的阴影相机也看见它们，光就不会从降低的墙上方漏到隔壁
+  halo.shadow.camera.layers.enable(1);
+  const target = new THREE.Object3D();
+  halo.target = target;
+  core.target = target;
+
+  // 手里的手电筒 + 假体积光，都挂在 hand 下面，hand 的 +z 指向照的方向
+  const hand = new THREE.Group();
+  const body = new THREE.Mesh(parts.body, parts.bodyMat);
+  const lens = new THREE.Mesh(parts.lens, parts.lensMat);
+  const strength = uniform(0);
+  const beamMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
+  beamMat.colorNode = color(PALETTE.torchHalo);
+  // 越靠近手越浓；侧面（光锥轮廓）几乎透明，正对镜头的中间浓一点，看起来像一团光而不是一个锥壳
+  beamMat.opacityNode = pow(uv().y, 1.8).mul(pow(abs(normalView.z), 1.4)).mul(strength);
+  const beam = new THREE.Mesh(parts.cone, beamMat);
+  beam.renderOrder = 2;
+  for (const m of [body, lens, beam]) {
+    m.castShadow = false; // 手电自己不能挡住自己的光
+    m.receiveShadow = false;
+    hand.add(m);
+  }
+  parent.add(halo, core, target, hand);
+
+  let q = quality;
+  let parked = false;
+  let nerv = 0; // 紧张程度的平滑值
+  const seed = Math.random() * 100;
+  const dirV = new THREE.Vector3();
+  const fwd = new THREE.Vector3(0, 0, 1);
+
+  const applyQuality = () => {
+    const s = TORCH.shadow.size[q];
+    halo.shadow.mapSize.set(s, s);
+    halo.shadow.normalBias = TORCH.shadow.normalBias[q];
+    beam.visible = q === 'high';
+  };
+  applyQuality();
+
+  const park = () => {
+    parked = true;
+    halo.intensity = 0;
+    core.intensity = 0;
+    halo.shadow.autoUpdate = false; // 不再每帧画这盏灯的阴影图
+    hand.visible = false;
+    strength.value = 0;
+  };
+  park();
+  // 闲置的手电也要先画一次阴影图：否则材质绑定时 three 会把还没渲染过的深度贴图当普通贴图建出来，
+  // 等访客进门、阴影图第一次渲染时，渲染目标初始化会把它销毁重建，而材质的绑定组还指着旧贴图，
+  // WebGPU 会每帧报「Destroyed texture "ShadowDepthTexture" used in a submit」（2026-10-27 集成时发现）
+  halo.shadow.needsUpdate = true;
+
+  return {
+    get parked() { return parked; },
+    update(p, dt, time) {
+      if (parked) {
+        parked = false;
+        halo.shadow.autoUpdate = true;
+        hand.visible = true;
+      }
+      nerv += ((p.nervous ? 1 : 0) - nerv) * (1 - Math.exp(-4 * dt));
+      // 紧张：手在抖，光也不稳——两个不成倍数的正弦相乘，偶尔叠出一次深一点的暗闪
+      const n = Math.max(0, Math.sin(time * 17.3 + seed) * Math.sin(time * 6.1 + seed * 2.3));
+      const dip = Math.sin(time * 1.9 + seed) > 0.94 ? 0.5 : 0;
+      const flick = 1 - nerv * TORCH.nervous.flicker * Math.min(1, n + dip);
+      const dir = p.dir + nerv * TORCH.nervous.jitter * Math.sin(time * 21 + seed * 3);
+
+      halo.intensity = TORCH.halo.intensity * p.power * flick;
+      core.intensity = TORCH.core.intensity * p.power * flick;
+      // 亮芯在最近的墙后面截断（光轴和亮芯两侧边缘各量一次，取最近的）
+      const a = TORCH.core.angle, far = TORCH.distance;
+      const wall = Math.min(wallDistance(p.x, p.z, dir, far), wallDistance(p.x, p.z, dir - a, far), wallDistance(p.x, p.z, dir + a, far));
+      core.distance = Math.min(far, wall + TORCH.core.wallMargin);
+      halo.position.set(p.x, p.y, p.z);
+      core.position.copy(halo.position);
+      const tx = p.x + Math.cos(dir) * TORCH.aim, tz = p.z + Math.sin(dir) * TORCH.aim;
+      target.position.set(tx, 0, tz);
+      target.updateMatrixWorld();
+
+      hand.position.copy(halo.position);
+      dirV.set(tx - p.x, -p.y, tz - p.z).normalize();
+      hand.quaternion.setFromUnitVectors(fwd, dirV);
+      // 光锥在墙那里截断（按水平距离算，再折回到沿光轴的长度）
+      const horiz = Math.hypot(dirV.x, dirV.z) || 1;
+      const len = Math.min(TORCH.beam.length, wallDistance(p.x, p.z, dir, TORCH.beam.length) / horiz);
+      beam.scale.setScalar(Math.max(0.05, len));
+      strength.value = TORCH.beam.opacity * p.power * flick;
+    },
+    park,
+    setQuality(nq) {
+      q = nq;
+      applyQuality();
+    },
+    dispose() {
+      parent.remove(halo, core, target, hand);
+      halo.dispose();
+      core.dispose();
+      beamMat.dispose();
+    },
+  };
+}

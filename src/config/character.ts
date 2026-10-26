@@ -16,10 +16,11 @@ export interface CharacterSpec {
 export const CHARACTER: CharacterSpec = {
   url: `${import.meta.env.BASE_URL}assets/mascot/placeholder-fox.glb`,
   targetHeight: 1.1,
-  facingOffset: 0,
+  facingOffset: 0, // 占位狐狸正面朝 +z（dev/characters.html 的 calibrate() 和脚下箭头都确认过）
   clips: { idle: 'Survey', walk: 'Walk', run: 'Run', scared: null },
-  walkRateAt1ms: 1,
-  runRateAt1ms: 0.4,
+  // 下面两个由 dev/characters.html 的 __chars.calibrate() 量出：Walk 片段原速时脚相对身体后滑 1.37 米/秒，Run 2.15 米/秒
+  walkRateAt1ms: 0.73,
+  runRateAt1ms: 0.47,
 };
 
 /** 手电挂在角色身上的高度（米） */
