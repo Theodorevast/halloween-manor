@@ -85,7 +85,7 @@ try {
     const h = window.__haunt;
     const n = h.spawn({ pos: { x: 3.75, z: 2.75 }, lookDir: -Math.PI / 2, personality: 'average', name: 'Smoke' });
     const ok = h.trigger('portrait');
-    h.step(300);
+    h.step(1200); // 肖像 0.94 秒才砸下来（SCARES.portrait.hitAt），之前不会有人受惊
     const after = h.raw().npcs.find((x) => x.id === n.id);
     return { ok, fear: after?.fear ?? -1 };
   });
