@@ -43,6 +43,8 @@ export interface BotRun {
   maxSingleScare: number;
   /** 「先引诱、再惊吓」成功的次数：一个人听见引诱声后 LURE_LED_WINDOW 秒内被惊吓物件吓到 */
   lureLedScares: number;
+  /** 每个惊吓物件：机器人附身了几次、其中几次真的吓到了至少一个人 */
+  landing: Record<string, { fired: number; landed: number }>;
 }
 
 export interface RunOptions {
@@ -80,13 +82,25 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
   const rng = createRng(seed * 7919 + 17);
   const visitors = new Map<number, VisitorLog>();
   let maxSingleScare = 0, lureLedScares = 0;
+  const landing: Record<string, { fired: number; landed: number }> = {};
+  /** 附身了、还没吓到人的惊吓物件（同一个物件冷却比生效窗口长，不会重叠） */
+  const pendingLand = new Set<string>();
+  const fire: Fire = (id) => {
+    const ok = w.trigger(id);
+    const o = w.state.objects.find((x) => x.id === id);
+    if (ok && o && isSight(o)) {
+      (landing[id] ??= { fired: 0, landed: 0 }).fired++;
+      pendingLand.add(id);
+    }
+    return ok;
+  };
   const lastHeard = new Map<number, number>();
   const steps = Math.round(seconds / DT);
   for (let k = 0; k < steps; k++) {
     if (kind === 'skilled') {
-      if (k % SIGHT_EVERY === 0) fireLitEyes(w);
-      if (k % LURE_EVERY === 0 && lures !== 'none') fireLures(w, lures);
-    } else if (k % RANDOM_EVERY === 0) randomMove(w, rng);
+      if (k % SIGHT_EVERY === 0) fireLitEyes(w, fire);
+      if (k % LURE_EVERY === 0 && lures !== 'none') fireLures(w, lures, fire);
+    } else if (k % RANDOM_EVERY === 0) randomMove(w, rng, fire);
     for (const e of w.step(DT)) {
       if (e.type === 'spawn') {
         const n = w.state.npcs.find((m) => m.id === e.npc)!;
@@ -96,6 +110,7 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
       } else if (e.type === 'heard') {
         lastHeard.set(e.npc, w.state.time);
       } else if (e.type === 'startle' && e.object !== null) {
+        if (pendingLand.delete(e.object)) landing[e.object].landed++;
         maxSingleScare = Math.max(maxSingleScare, e.amount);
         const h = lastHeard.get(e.npc);
         if (h !== undefined && w.state.time - h <= LURE_LED_WINDOW) lureLedScares++;
@@ -104,17 +119,20 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
   }
   const list = [...visitors.values()];
   const lifetimes = list.filter((v) => v.exitedAt !== null).map((v) => v.exitedAt! - v.spawnedAt);
-  return { seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares };
+  return { seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares, landing };
 }
 
 const ready = (o: ScareObjectState) => o.cooldown === 0;
 const isSight = (o: ScareObjectState) => SCARES[o.type].kind === 'sight';
 
-function fireLitEyes(w: World) {
-  for (const o of w.state.objects) if (isSight(o) && ready(o) && o.seenBy.length > 0) w.trigger(o.id);
+/** 机器人附身用的函数（runBot 里包了一层，用来统计惊吓有没有落到人身上） */
+type Fire = (id: string) => boolean;
+
+function fireLitEyes(w: World, fire: Fire) {
+  for (const o of w.state.objects) if (isSight(o) && ready(o) && o.seenBy.length > 0) fire(o.id);
 }
 
-function fireLures(w: World, policy: LurePolicy) {
+function fireLures(w: World, policy: LurePolicy, fire: Fire) {
   const sights = w.state.objects.filter((o) => isSight(o) && ready(o));
   for (const lure of w.state.objects) {
     if (isSight(lure) || !ready(lure)) continue;
@@ -125,7 +143,7 @@ function fireLures(w: World, policy: LurePolicy) {
     );
     const predicted = policy !== 'topup' && hearers.some((n) => lureLeadsToScare(n.pos, lure.pos, sights));
     const topUp = policy !== 'predict' && hearers.some((n) => n.fear > 0);
-    if (predicted || topUp) w.trigger(lure.id);
+    if (predicted || topUp) fire(lure.id);
   }
 }
 
@@ -174,9 +192,9 @@ export function lureCoverage(objects: readonly ScareObjectState[], g: Grid = gri
   });
 }
 
-function randomMove(w: World, rng: Rng) {
+function randomMove(w: World, rng: Rng, fire: Fire) {
   const choices = w.state.objects.filter(ready);
-  if (choices.length > 0) w.trigger(rng.pick(choices).id);
+  if (choices.length > 0) fire(rng.pick(choices).id);
 }
 
 export const median = (xs: number[]) => {

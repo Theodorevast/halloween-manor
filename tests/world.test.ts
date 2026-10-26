@@ -48,6 +48,29 @@ function place(n: NpcState, pos: Vec2, lookAt: Vec2) {
   n.lookDir = angleTo(pos, lookAt);
 }
 
+/** 惊吓类物件触发后第几步惊吓才落下：第 k 步开始时已过 (k − 1) × DT 秒，取第一个 ≥ hitAt 的（hitAt 为 0 就是第一步） */
+const hitSteps = (id: string) => Math.ceil(SCARES[PROPS.find((p) => p.id === id)!.type].hitAt / DT - 1e-6) + 1;
+/** 让 hold 里的人此刻盯着物件 id（模拟「一直看着它」，去掉站着左右照带来的偏移） */
+function aim(id: string, hold: NpcState[]) {
+  for (const n of hold) n.lookDir = angleTo(n.pos, prop(id));
+}
+/** 附身之后、惊吓落下之前的蓄势（hitAt 秒）：按 DT 一步步走，hold 里的人一直盯着物件；返回期间的事件 */
+function windUp(w: World, id: string, ...hold: NpcState[]): SimEvent[] {
+  const ev: SimEvent[] = [];
+  for (let k = 1; k < hitSteps(id); k++) {
+    aim(id, hold);
+    ev.push(...w.step(DT));
+  }
+  return ev;
+}
+/** 附身之后一直推进到惊吓落下的那一步（含）；返回全部事件。落下那一步的模拟时间 = 之后的 w.state.time − DT */
+function stepToHit(w: World, id: string, ...hold: NpcState[]): SimEvent[] {
+  const ev = windUp(w, id, ...hold);
+  aim(id, hold);
+  ev.push(...w.step(DT));
+  return ev;
+}
+
 describe('World：附身与惊吓（计划测试 1–3）', () => {
   const STUDY = { x: 2.75, z: 3.75 };
 
@@ -55,7 +78,7 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
     const w = createWorld({ seed: 1, autoSpawn: false });
     const n = w.spawn({ pos: STUDY, personality: 'average', lookDir: angleTo(STUDY, prop('portrait')) });
     expect(w.trigger('portrait')).toBe(true);
-    const ev = w.step(0.1);
+    const ev = stepToHit(w, 'portrait', n);
     expect(ofType(ev, 'trigger')).toEqual([{ type: 'trigger', object: 'portrait', scareType: 'portrait' }]);
     expect(ofType(ev, 'startle')).toEqual([{ type: 'startle', npc: n.id, object: 'portrait', amount: 32, scream: true }]);
     expect(n.fear).toBe(32);
@@ -67,7 +90,8 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
     const w = createWorld({ seed: 1, autoSpawn: false });
     const n = w.spawn({ pos: STUDY, personality: 'average', lookDir: angleTo(STUDY, prop('portrait')) });
     w.trigger('portrait');
-    w.step(0.1);
+    stepToHit(w, 'portrait', n);
+    const e1 = w.state.time - DT; // 第一次惊吓落下那一步的模拟时间
     expect(w.trigger('portrait')).toBe(false);
     const portrait = obj(w, 'portrait');
     expect(portrait.cooldown).toBeGreaterThan(0);
@@ -83,12 +107,12 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
     // 17 秒里它闲逛走开了，把它请回肖像前。
     // 计划原写「这次 16（减半）」：那是习惯化不恢复时的数；现在每 habituationRecover 秒恢复一次，隔 17 秒按配置算
     place(n, STUDY, prop('portrait'));
-    const t2 = w.state.time; // 惊吓在下一步的第一小步结算，那时模拟时间就是 t2；第一次在 0
     expect(w.trigger('portrait')).toBe(true);
-    const ev2 = w.step(0.1);
+    const ev2 = stepToHit(w, 'portrait', n);
+    const e2 = w.state.time - DT;
     const s = ofType(ev2, 'startle');
     expect(s.length).toBe(1);
-    const want = SCARES.portrait.fear * habFactor(t2);
+    const want = SCARES.portrait.fear * habFactor(e2 - e1);
     expect(s[0].amount).toBeCloseTo(want, 9);
     expect(s[0].scream).toBe(want >= FEAR.screamAt);
   });
@@ -162,20 +186,20 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
     const p = { x: 9, z: 3 };
     const n = w.spawn({ pos: p, personality: 'average', lookDir: angleTo(p, prop('lamp-living')) });
     w.trigger('lamp-living');
-    expect(ofType(w.step(0.1), 'startle')[0].amount).toBe(SCARES.lamp.fear);
+    expect(ofType(stepToHit(w, 'lamp-living', n), 'startle')[0].amount).toBe(SCARES.lamp.fear);
+    const e1 = w.state.time - DT;
     run(w, 3);
     const q = front('lamp-bedroom', 1.5);
     place(n, q, prop('lamp-bedroom'));
-    const t2 = w.state.time;
     w.trigger('lamp-bedroom');
-    const second = ofType(w.step(0.1), 'startle')[0].amount;
-    expect(second).toBeCloseTo(SCARES.lamp.fear * habFactor(t2), 9);
+    const second = ofType(stepToHit(w, 'lamp-bedroom', n), 'startle')[0].amount;
+    expect(second).toBeCloseTo(SCARES.lamp.fear * habFactor(w.state.time - DT - e1), 9);
     expect(second).toBeLessThan(SCARES.lamp.fear); // 3 秒前刚被另一盏台灯吓过
     run(w, 3);
     const r = front('rocking-chair', 1.5);
     place(n, r, prop('rocking-chair'));
     w.trigger('rocking-chair');
-    expect(ofType(w.step(0.1), 'startle')[0].amount).toBe(SCARES.rockingChair.fear);
+    expect(ofType(stepToHit(w, 'rocking-chair', n), 'startle')[0].amount).toBe(SCARES.rockingChair.fear);
   });
 
   test('落地镜要站在 2.5 米内：正面 3 米外看着也吓不到', () => {
@@ -186,17 +210,104 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
     expect(ofType(run(w, 1.6), 'startle')).toEqual([]);
   });
 
+  test('惊吓在 hitAt 落下（和动画高潮同步）：落下前不吓人、落下那一步吓到；落下前转开的人不会被吓', () => {
+    for (const id of ['mirror', 'portrait']) {
+      const type = PROPS.find((p) => p.id === id)!.type;
+      const { hitAt, active } = SCARES[type];
+      expect(hitAt).toBeGreaterThan(0);
+      expect(active).toBeGreaterThan(hitAt);
+      const p = front(id, 1.5);
+
+      // 一直盯着看的人：蓄势期间没有 startle，落下那一步才被吓
+      const w = createWorld({ seed: 21, autoSpawn: false });
+      const n = w.spawn({ pos: p, personality: 'average', lookDir: angleTo(p, prop(id)) });
+      w.trigger(id);
+      const t0 = w.state.time;
+      const before = windUp(w, id, n);
+      expect(ofType(before, 'trigger').length).toBe(1);
+      expect(ofType(before, 'startle')).toEqual([]);
+      expect(n.mode).not.toBe('startled');
+      aim(id, [n]);
+      const hitTime = w.state.time; // 落下这一步开始时的模拟时间
+      expect(ofType(w.step(DT), 'startle').map((e) => [e.npc, e.object])).toEqual([[n.id, id]]);
+      expect(hitTime - t0).toBeGreaterThanOrEqual(hitAt - 1e-9);
+      expect(hitTime - t0).toBeLessThan(hitAt + DT);
+
+      // 附身时眼睛亮着（看着它），落下前一步转开并一直背对着：整个窗口都不会被吓到
+      const w2 = createWorld({ seed: 21, autoSpawn: false });
+      const m = w2.spawn({ pos: p, personality: 'average', lookDir: angleTo(p, prop(id)) });
+      w2.step(DT);
+      expect(obj(w2, id).seenBy).toEqual([m.id]);
+      w2.trigger(id);
+      const away = angleTo(p, prop(id)) + Math.PI;
+      const ev: SimEvent[] = [];
+      for (let k = 0; k <= Math.ceil(active / DT); k++) {
+        if (k >= hitSteps(id) - 2) m.lookDir = away;
+        else aim(id, [m]);
+        ev.push(...w2.step(DT));
+      }
+      expect(ofType(ev, 'startle')).toEqual([]);
+    }
+  });
+
+  test('边走边看见肖像 / 镜子的人：附身时眼睛亮着，就会停下盯着它，到 hitAt 落下时被吓到，之后照原路继续', () => {
+    // 用真实的闲逛（自动生成访客、不改朝向）：等到有人一边走一边出现在 seenBy 里，就附身
+    for (const id of ['portrait', 'mirror']) {
+      let cases = 0;
+      for (let seed = 1; seed <= 60 && cases < 3; seed++) {
+        const w = createWorld({ seed });
+        for (let k = 0; k < 60 * 150 && cases < 3; k++) {
+          w.step(DT);
+          const o = obj(w, id);
+          if (o.cooldown > 0) continue;
+          const walker = w.state.npcs.find(
+            (n) => o.seenBy.includes(n.id) && n.speed > 0 && (n.mode === 'wander' || n.mode === 'alert' || n.mode === 'entering'),
+          );
+          if (!walker) continue;
+          const mode0 = walker.mode, pos0 = { ...walker.pos }, path0 = JSON.stringify(walker.path);
+          w.trigger(id);
+          // 蓄势期间：原地停下（第一步就停，一步都没走）、模式和路径不变、没被吓
+          const wind = windUp(w, id);
+          expect(ofType(wind, 'startle').filter((e) => e.npc === walker.id)).toEqual([]);
+          expect(walker.speed).toBe(0);
+          expect(walker.pos).toEqual(pos0);
+          expect(walker.mode).toBe(mode0);
+          expect(JSON.stringify(walker.path)).toBe(path0);
+          // 落下前已经平滑地转过来正对着它（不是一下子扭过去：每步最多 transfixTurn × turnRate × dt）
+          const toProp = angleTo(walker.pos, prop(id));
+          expect(Math.abs(wrapAngle(walker.lookDir - toProp))).toBeLessThan(1e-6);
+          expect(Math.abs(wrapAngle(walker.heading - toProp))).toBeLessThan(1e-6);
+          // 落下那一步被吓到
+          const hit = w.step(DT);
+          expect(ofType(hit, 'startle').some((e) => e.npc === walker.id && e.object === id)).toBe(true);
+          expect(walker.mode).toBe('startled');
+          expect(JSON.stringify(walker.path)).toBe(path0); // 路径原样留着
+          // 受惊结束后回到原来的状态，接着走原来的路
+          run(w, FEAR.startleTime + 0.05, DT);
+          if (walker.mode !== 'fleeing') expect(walker.mode).toBe(mode0);
+          cases++;
+        }
+      }
+      expect(cases).toBe(3);
+    }
+  });
+
   test('肖像、镜子只吓站在正面的人：从侧面看着肖像不算', () => {
     const pc = PROPS.find((q) => q.id === 'portrait')!.cell;
     // 和肖像同一行（在它正侧面），手电对着它：眼睛不亮，附身也吓不到
     // （单独一个人：要是旁边有人被吓得尖叫，他会被引过去、走到肖像正面，那就是正常的被吓了）
     const w = createWorld({ seed: 4, autoSpawn: false });
     const side = cellCenter(pc[0] + 2, pc[1]);
-    w.spawn({ pos: side, personality: 'average', lookDir: angleTo(side, prop('portrait')) });
+    const a = w.spawn({ pos: side, personality: 'average', lookDir: angleTo(side, prop('portrait')) });
     w.step(DT);
     expect(obj(w, 'portrait').seenBy).toEqual([]);
     w.trigger('portrait');
-    expect(ofType(run(w, SCARES.portrait.active + 0.1), 'startle')).toEqual([]);
+    const ev: SimEvent[] = [];
+    for (let k = 0; k <= Math.ceil(SCARES.portrait.active / DT); k++) {
+      aim('portrait', [a]); // 整个生效窗口都盯着它
+      ev.push(...w.step(DT));
+    }
+    expect(ofType(ev, 'startle')).toEqual([]);
     // 对照：站在正面同样距离就会被吓到
     const w2 = createWorld({ seed: 4, autoSpawn: false });
     const before = front('portrait', 1);
@@ -204,7 +315,7 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
     w2.step(DT);
     expect(obj(w2, 'portrait').seenBy).toEqual([b.id]);
     w2.trigger('portrait');
-    expect(ofType(w2.step(0.1), 'startle').map((e) => e.npc)).toEqual([b.id]);
+    expect(ofType(stepToHit(w2, 'portrait', b), 'startle').map((e) => e.npc)).toEqual([b.id]);
   });
 
   test('facesToward：只有肖像和镜子分正反面', () => {
@@ -227,7 +338,7 @@ describe('World：吓跑与 hit-stop（计划测试 4–5）', () => {
     const w = createWorld({ seed: 5, autoSpawn: false });
     const n = w.spawn({ pos: BATH, personality: 'timid', lookDir: TO_MIRROR });
     w.trigger('mirror');
-    const s = ofType(w.step(0.1), 'startle');
+    const s = ofType(stepToHit(w, 'mirror', n), 'startle');
     expect(s).toEqual([{ type: 'startle', npc: n.id, object: 'mirror', amount: 72, scream: true }]);
     expect(n.fear).toBe(72);
     expect(n.mode).toBe('startled');
@@ -239,7 +350,8 @@ describe('World：吓跑与 hit-stop（计划测试 4–5）', () => {
     // 计划里的「20 秒后再附身镜子」凑不满：72 衰减到 24，再 +36 只有 60。这里直接给它一个之前被吓剩下的恐惧值
     n.fear = 40;
     w.trigger('mirror');
-    const ev = w.step(0.1);
+    // 镜中脸扑出（hitAt）那一步被吓、涨满、开始逃跑；hit-stop 从下一次 step 开始扣
+    const ev = stepToHit(w, 'mirror', n);
     expect(ofType(ev, 'startle')[0].amount).toBe(72);
     expect(ofType(ev, 'flee')).toEqual([{ type: 'flee', npc: n.id }]);
     expect(n.mode).toBe('fleeing');
@@ -284,7 +396,7 @@ describe('World：吓跑与 hit-stop（计划测试 4–5）', () => {
     const n = w.spawn({ pos: BATH, personality: 'timid', lookDir: TO_MIRROR });
     n.fear = 90;
     w.trigger('mirror');
-    w.step(0.1);
+    stepToHit(w, 'mirror', n);
     expect(w.state.hitStop).toBe(HIT_STOP);
     expect(w.trigger('lamp-bedroom')).toBe(true);
     const ev = w.step(0.05);
@@ -296,10 +408,13 @@ describe('World：吓跑与 hit-stop（计划测试 4–5）', () => {
     const mirror = prop('mirror');
     // 三个人都在镜子正面 2.5 米内（镜子朝东：沿 z 方向错开）
     const ps = [BATH, { x: BATH.x + 0.25, z: BATH.z - 0.75 }, { x: BATH.x + 0.25, z: BATH.z + 0.75 }];
+    // 镜子要蓄势 hitAt 秒才扑出；门一响大家就转头去看门，所以先附身镜子，
+    // 等到镜中脸扑出的前一步才放人进来、拉响门：门响和镜子落在同一步（只用公开接口，不改状态）
+    w.trigger('mirror');
+    windUp(w, 'mirror');
     const ns = ps.map((p) => w.spawn({ pos: p, personality: 'timid', lookDir: angleTo(p, mirror) }));
     w.trigger('kitchen-door');
-    w.trigger('mirror');
-    const ev = w.step(0.1);
+    const ev = w.step(DT);
     // 门：10 × 1.5 = 15；镜子：48 × 1.5 = 72；尖叫传染：5 × 1.5 = 7.5，两个同伴各一次 → 102 → 封顶 100
     expect(ofType(ev, 'heard').length).toBe(3);
     expect(ofType(ev, 'startle').filter((e) => e.object === 'mirror').map((e) => e.amount)).toEqual([72, 72, 72]);
@@ -423,7 +538,7 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     const b = w.spawn({ pos: { x: 4.25, z: 2.25 }, personality: 'average', lookDir: 0 }); // 背对肖像
     const c = w.spawn({ pos: { x: 13.25, z: 9.25 }, personality: 'average' }); // 浴室，太远
     w.trigger('portrait');
-    const ev = w.step(0.1);
+    const ev = stepToHit(w, 'portrait', a);
     const st = ofType(ev, 'startle');
     expect(st).toContainEqual({ type: 'startle', npc: a.id, object: 'portrait', amount: 32, scream: true });
     expect(st).toContainEqual({ type: 'startle', npc: b.id, object: null, amount: 5, scream: false });
@@ -462,27 +577,27 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
   });
 
   test('受惊结束后恢复原状态：闲逛的回到闲逛，进门中的回到进门', () => {
-    const w = createWorld({ seed: 13, autoSpawn: false });
-    const STUDY = { x: 2.75, z: 3.75 };
-    const a = w.spawn({ pos: STUDY, personality: 'brave', lookDir: angleTo(STUDY, prop('portrait')) });
-    // 进门中的人：调试时放在走廊里、看着厨房门里的摇椅（进门路线会寻路，不穿墙）
-    const q = front('rocking-chair', 1.5);
-    const b = w.spawn({ pos: q, mode: 'entering', personality: 'brave', lookDir: angleTo(q, prop('rocking-chair')) });
-    expect(b.mode).toBe('entering');
-    w.trigger('portrait');
-    w.trigger('rocking-chair');
-    const ev = w.step(0.1);
-    expect(ofType(ev, 'startle').map((e) => e.npc).sort()).toEqual([a.id, b.id]);
-    expect(a.mode).toBe('startled');
-    expect(b.mode).toBe('startled');
-    const posB = { ...b.pos };
-    run(w, FEAR.startleTime - 0.15);
-    expect(b.mode).toBe('startled');
-    expect(b.pos).toEqual(posB); // 僵住不动
-    expect(b.speed).toBe(0);
-    run(w, 0.1);
-    expect(a.mode).toBe('wander');
-    expect(b.mode).toBe('entering');
+    // 两种物件落下的时刻不同（hitAt），分开在两个世界里测
+    const cases = [
+      { id: 'portrait', pos: { x: 2.75, z: 3.75 }, mode: 'wander' as const },
+      // 进门中的人：调试时放在走廊里、看着厨房门里的摇椅（进门路线会寻路，不穿墙）
+      { id: 'rocking-chair', pos: front('rocking-chair', 1.5), mode: 'entering' as const },
+    ];
+    for (const c of cases) {
+      const w = createWorld({ seed: 13, autoSpawn: false });
+      const n = w.spawn({ pos: c.pos, mode: c.mode, personality: 'brave', lookDir: angleTo(c.pos, prop(c.id)) });
+      expect(n.mode).toBe(c.mode);
+      w.trigger(c.id);
+      expect(ofType(stepToHit(w, c.id, n), 'startle').map((e) => e.npc)).toEqual([n.id]);
+      expect(n.mode).toBe('startled');
+      const pos0 = { ...n.pos };
+      run(w, FEAR.startleTime - 0.15);
+      expect(n.mode).toBe('startled');
+      expect(n.pos).toEqual(pos0); // 僵住不动
+      expect(n.speed).toBe(0);
+      run(w, 0.2);
+      expect(n.mode).toBe(c.mode);
+    }
   });
 });
 
@@ -509,8 +624,12 @@ describe('World：恐惧值（计划测试 7）', () => {
     expect(n.fear).toBeCloseTo(f0, 1);
     place(n, STUDY, prop('portrait'));
     w.trigger('portrait');
-    w.step(0.1);
-    expect(n.fear).toBeCloseTo(Math.min(FEAR.max, f0 + SCARES.portrait.fear), 1);
+    windUp(w, 'portrait', n);
+    const fHit = n.fear;
+    if (SCARES.portrait.hitAt > 0) expect(fHit).toBeLessThan(f0); // 蓄势期间还在回落
+    aim('portrait', [n]);
+    w.step(DT);
+    expect(n.fear).toBeCloseTo(Math.min(FEAR.max, fHit + SCARES.portrait.fear), 9);
     expect(n.fear).toBeGreaterThanOrEqual(FEAR.nervous);
     expect(n.nervous).toBe(true);
     const f = n.fear;
@@ -674,23 +793,35 @@ describe('World：闲逛、转向、不穿墙', () => {
     expect(rooms.size).toBeGreaterThan(3);
   });
 
-  test('转向限速：身体和手电每步最多转 turnRate × dt（受惊时除外）', () => {
+  test('转向限速：身体和手电每步最多转 turnRate × dt（受惊时除外；被惊吓蓄势定住时最多 transfixTurn 倍）', () => {
     const w = createWorld({ seed: 48 });
     const prev = new Map<number, { h: number; l: number; m: string }>();
     const ids = PROPS.map((p) => p.id);
-    const limit = BEHAVIOR.turnRate * DT + 1e-9;
+    const normal = BEHAVIOR.turnRate * DT + 1e-9;
+    const transfixed = BEHAVIOR.turnRate * BEHAVIOR.transfixTurn * DT + 1e-9;
+    // 这一步开始前有没有惊吓物件在蓄势（只有这时才可能有人被定住、转得更快）
+    const anyWindingUp = () =>
+      w.state.objects.some((o) => {
+        const spec = SCARES[o.type];
+        return spec.kind === 'sight' && o.active > 0 && spec.active - o.active < spec.hitAt - 1e-9;
+      });
+    let sawFast = false;
     for (let k = 0; k < 60 * 90; k++) {
       if (k % 150 === 0) w.trigger(ids[(k / 150) % ids.length]);
+      const limit = anyWindingUp() ? transfixed : normal;
       w.step(DT);
       for (const n of w.state.npcs) {
         const p = prev.get(n.id);
         if (p && p.m !== 'startled' && n.mode !== 'startled') {
-          expect(Math.abs(wrapAngle(n.heading - p.h))).toBeLessThanOrEqual(limit);
-          expect(Math.abs(wrapAngle(n.lookDir - p.l))).toBeLessThanOrEqual(limit);
+          const dh = Math.abs(wrapAngle(n.heading - p.h)), dl = Math.abs(wrapAngle(n.lookDir - p.l));
+          expect(dh).toBeLessThanOrEqual(limit);
+          expect(dl).toBeLessThanOrEqual(limit);
+          if (Math.max(dh, dl) > normal) sawFast = true;
         }
         prev.set(n.id, { h: n.heading, l: n.lookDir, m: n.mode });
       }
     }
+    expect(sawFast).toBe(true); // 这局里确实有人被定住、转得比平时快
   });
 
   test('长时间跑：访客永远站在可走格里（门外那一段除外），恐惧值在 0–100', () => {

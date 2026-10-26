@@ -11,17 +11,24 @@ export interface ScareSpec {
   cooldown: number;
   /** 生效窗口（秒）：惊吓类在这段时间内被看见就生效；引诱类即声音持续时长 */
   active: number;
+  /**
+   * 惊吓类：触发后过多久惊吓才真正「落下」（秒），从这一刻起到 active 结束才判定谁被吓到。
+   * 取自物件动画的高潮时刻（src/view/props/*.ts 的时间轴），让访客的受惊、尖叫和画面上最吓人的瞬间同步，
+   * 而不是鬼脸还没出来人就先跳了。引诱类在触发那一步结算，不用这个值
+   */
+  hitAt: number;
   /** 触发后进入「被破坏」状态多久再复原（秒）；0 = 没有这个状态 */
   broken: number;
 }
 
 export const SCARES: Record<ScareType, ScareSpec> = {
-  musicBox: { kind: 'lure', range: 7, fear: 4, cooldown: 14, active: 4, broken: 0 },
-  door: { kind: 'lure', range: 9, fear: 10, cooldown: 10, active: 0.6, broken: 0 },
-  lamp: { kind: 'sight', range: 6, fear: 18, cooldown: 8, active: 1.5, broken: 6 },
-  rockingChair: { kind: 'sight', range: 6, fear: 22, cooldown: 10, active: 3, broken: 0 },
-  portrait: { kind: 'sight', range: 6, fear: 32, cooldown: 16, active: 1.5, broken: 10 },
-  mirror: { kind: 'sight', range: 2.5, fear: 48, cooldown: 20, active: 1.5, broken: 0 },
+  musicBox: { kind: 'lure', range: 7, fear: 4, cooldown: 14, active: 4, broken: 0, hitAt: 0 },
+  door: { kind: 'lure', range: 9, fear: 10, cooldown: 10, active: 0.6, broken: 0, hitAt: 0 },
+  // 台灯一触发就开始闪；摇椅第一次摆到头（0.25 秒，第一声嘎吱）；肖像砸到地上（0.94 秒）；镜中脸扑出（0.6 秒）
+  lamp: { kind: 'sight', range: 6, fear: 18, cooldown: 8, active: 1.5, broken: 6, hitAt: 0 },
+  rockingChair: { kind: 'sight', range: 6, fear: 22, cooldown: 10, active: 3, broken: 0, hitAt: 0.25 },
+  portrait: { kind: 'sight', range: 6, fear: 32, cooldown: 16, active: 1.8, broken: 10, hitAt: 0.94 },
+  mirror: { kind: 'sight', range: 2.5, fear: 48, cooldown: 20, active: 1.5, broken: 0, hitAt: 0.6 },
 };
 
 /** 引诱声隔着墙（声源和听者之间没有视线）时，听得见的距离乘这个系数 */

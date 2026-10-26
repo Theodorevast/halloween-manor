@@ -64,6 +64,8 @@ export const BEHAVIOR = {
   sweepPeriod: 2.6,
   /** 身体和手电转向速度（弧度/秒） */
   turnRate: 5,
+  /** 被惊吓物件的蓄势「定住」时，转向它的速度是 turnRate 的几倍：比平时快，但不是一下子扭过去 */
+  transfixTurn: 2.5,
   /** 走到路点多近算到达（米） */
   arrive: 0.15,
   /** 走出前门后再走多远消失（米） */

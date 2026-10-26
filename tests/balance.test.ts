@@ -6,6 +6,7 @@ import type { BotRun, LurePolicy, VisitorLog } from './bots';
 import { createWorld } from '../src/sim/world';
 import { FEAR, PERSONALITIES, SPAWN } from '../src/config/visitors';
 import { SCARES } from '../src/config/scares';
+import { PROPS } from '../src/config/house';
 
 /** 正常对局：5 个种子 × 5 分钟，自动生成访客 */
 const SEEDS = [1, 2, 3, 4, 5];
@@ -23,6 +24,24 @@ const avgExits = (runs: BotRun[]) => runs.reduce((a, r) => a + r.exits, 0) / run
 const totalExits = (runs: BotRun[]) => runs.reduce((a, r) => a + r.exits, 0);
 const exitedWithin = (v: VisitorLog, s: number) => v.exitedAt !== null && v.exitedAt - v.spawnedAt <= s;
 const fastLone = (runs: BotRun[]) => runs.filter((r) => r.lifetimes.length === 1 && r.lifetimes[0] <= FOCUS_LIMIT).length;
+/** 惊吓类物件的 id */
+const SIGHT_PROPS = PROPS.filter((p) => SCARES[p.type].kind === 'sight').map((p) => p.id);
+/** 把几局的「附身次数 / 吓到人的次数」按物件加起来 */
+function landingOf(runs: BotRun[]): Record<string, { fired: number; landed: number }> {
+  const t: Record<string, { fired: number; landed: number }> = {};
+  for (const id of SIGHT_PROPS) t[id] = { fired: 0, landed: 0 };
+  for (const r of runs) {
+    for (const [id, v] of Object.entries(r.landing)) {
+      t[id].fired += v.fired;
+      t[id].landed += v.landed;
+    }
+  }
+  return t;
+}
+const landingLine = (runs: BotRun[]) =>
+  Object.entries(landingOf(runs))
+    .map(([id, v]) => `${id} ${v.landed}/${v.fired}${v.fired ? ` (${Math.round((100 * v.landed) / v.fired)}%)` : ''}`)
+    .join(', ');
 
 beforeAll(() => {
   skilled = SEEDS.map((s) => runBot(s, 'skilled', { seconds: GAME_SECONDS }));
@@ -56,6 +75,9 @@ function report(): string {
     `lures: planned-only avg ${avgExits(planned).toFixed(1)} (lure-led scares ${planned.reduce((a, r) => a + r.lureLedScares, 0)}), ` +
       `no lures avg ${avgExits(noLures).toFixed(1)}; lone brave <= ${FOCUS_LIMIT} s: planned ${fastLone(lonePlanned)}/10, none ${fastLone(loneNoLures)}/10`,
     `coverage: ${lureCoverage(createWorld({ seed: 1, autoSpawn: false }).state.objects).map((c) => `${c.id} ${c.leads}/${c.hearing}`).join(', ')}`,
+    `landing (skilled, seeds ${SEEDS.join(',')}): ${landingLine(skilled)}`,
+    `landing (all skilled games: full / planned-only / no lures): ${landingLine([...skilled, ...planned, ...noLures])}`,
+    `landing (random, blind clicks): ${landingLine(random)}`,
   ].join('\n');
 }
 
@@ -96,6 +118,15 @@ describe('数值平衡（固定种子，无界面）', () => {
     expect(planned.reduce((a, r) => a + r.lureLedScares, 0) / planned.length).toBeGreaterThanOrEqual(10);
     // 完整的 skilled（预测 + 续恐惧）也明显强过不用引诱
     expect(avgExits(skilled)).toBeGreaterThanOrEqual(1.25 * avgExits(noLures));
+  });
+
+  test('目标 6：skilled 眼睛亮了才附身，每个惊吓物件至少 85% 的附身真的吓到人（蓄势时看见的人会被定住盯着它）', () => {
+    // 落不落得下只看「眼睛亮了就附身」这条规则和模拟，跟引诱怎么用无关：把三种 skilled 的局合起来，样本多一些
+    const t = landingOf([...skilled, ...planned, ...noLures]);
+    for (const id of SIGHT_PROPS) {
+      expect(t[id].fired).toBeGreaterThanOrEqual(5);
+      expect(t[id].landed / t[id].fired).toBeGreaterThanOrEqual(0.85);
+    }
   });
 
   test('目标 4：单次附身不可能把恐惧值为 0 的人直接吓跑', () => {

@@ -56,6 +56,14 @@ export function facesToward(o: Pick<ScareObjectState, 'type' | 'pos' | 'facing'>
   return (p.x - o.pos.x) * Math.cos(o.facing) + (p.z - o.pos.z) * Math.sin(o.facing) > 1e-6;
 }
 
+/**
+ * 惊吓类物件是否还在蓄势：已经触发、还没到 hitAt（惊吓落下）。这期间不判定谁被吓到，
+ * 看见它的人被「定住」盯着它（见 npc.ts 的 transfixOn），等落下那一步再正常判定
+ */
+export function windingUp(o: ScareObject): boolean {
+  return o.spec.kind === 'sight' && o.state.active > 0 && o.spec.active - o.state.active < o.spec.hitAt - 1e-9;
+}
+
 const countdown = (v: number, dt: number) => {
   const r = v - dt;
   return r <= EPS ? 0 : r;

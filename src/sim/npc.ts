@@ -7,6 +7,8 @@ import { angleOf, wrapAngle } from '../lib/angle';
 import type { Grid } from './grid';
 import { findPath } from './pathfind';
 import type { Rng } from './rng';
+import { windingUp } from './scares';
+import type { ScareObject } from './scares';
 import type { NpcState, Personality, ScareType, SimEvent, Vec2 } from './types';
 
 // 以下几个手电摆动幅度是计划里给的定值（config 里没有），集中放在这里方便调
@@ -104,6 +106,11 @@ export interface Npc {
   /** 逃跑：当前乱晃的目标偏角和保持时间 */
   jitter: number;
   jitterLeft: number;
+  /**
+   * 被定住盯着的惊吓物件（它还在蓄势）：停下脚步、身体和手电转向它，路径和各种计时都暂停，
+   * 惊吓落下后照常判定、照常恢复。不加恐惧值，NpcState 里只表现为 speed 0
+   */
+  transfixOn: ScareObject | null;
 }
 
 export interface NpcInit {
@@ -147,6 +154,7 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     resume: null,
     jitter: 0,
     jitterLeft: 0,
+    transfixOn: null,
   };
   if (o.mode === 'entering') {
     const inside = { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z };
@@ -244,6 +252,19 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
     else if (s.fear > 0 && ctx.now - npc.lastScare >= FEAR.decayDelay) s.fear = Math.max(0, s.fear - FEAR.decayRate * dt);
   }
   s.nervous = s.fear >= FEAR.nervous;
+
+  // 被惊吓物件的蓄势定住：只转向它，别的都不动（受惊、逃跑照常走下面的分支）
+  if (npc.transfixOn && !windingUp(npc.transfixOn)) npc.transfixOn = null;
+  if (npc.transfixOn && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert')) {
+    s.speed = 0;
+    const b = bearing(s.pos, npc.transfixOn.state.pos);
+    if (b !== null) {
+      const max = BEHAVIOR.turnRate * BEHAVIOR.transfixTurn * dt;
+      s.heading = turnToward(s.heading, b, max);
+      s.lookDir = turnToward(s.lookDir, b, max);
+    }
+    return;
+  }
 
   switch (s.mode) {
     case 'startled': {
@@ -412,6 +433,7 @@ function beginFlee(npc: Npc, ctx: NpcCtx) {
   npc.act = 'walk';
   npc.jitter = 0;
   npc.jitterLeft = 0;
+  npc.transfixOn = null;
   const [i, j] = cellOf(s.pos.x, s.pos.z);
   const path = inGrid(i, j) ? findPath(ctx.nav.grid, s.pos, DOOR_POINT) ?? [{ ...DOOR_POINT }] : [];
   path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });

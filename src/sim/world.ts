@@ -9,7 +9,7 @@ import { canBeScared, createNav, createNpc, exposure, hear, startle, updateNpc }
 import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
-import { createScareObjects, facesToward, tickObject, triggerObject } from './scares';
+import { createScareObjects, facesToward, tickObject, triggerObject, windingUp } from './scares';
 import { pickName, pickPersonality, Spawner } from './spawner';
 import type { NpcState, SimEvent, SpawnOptions, Vec2, World, WorldOptions, WorldState } from './types';
 
@@ -113,10 +113,18 @@ export function createWorld(opts: WorldOptions): World {
         hear(n, ctx, amount, o.state.pos, { type: 'heard', npc: n.s.id, object: o.state.id });
       }
     }
-    // 惊吓：生效窗口内，看见它的人每人吓一次
+    // 惊吓：蓄势期间（触发到 hitAt），看见它的人被定住盯着它（附身那一刻眼睛亮着的人在第一步就被定住，
+    // 这一步还没人移动过）；从落下到生效窗口结束，看见它的人每人吓一次
     for (const o of objects) {
       if (o.spec.kind !== 'sight' || o.state.active <= 0) continue;
       const range = Math.min(o.spec.range, VISION.range);
+      if (windingUp(o)) {
+        for (const n of npcs) {
+          if (n.transfixOn || !canBeScared(n)) continue;
+          if (facesToward(o.state, n.s.pos) && canSee(grid, n.s, o.state.pos, range)) n.transfixOn = o;
+        }
+        continue;
+      }
       for (const n of npcs) {
         if (!canBeScared(n) || o.scared.has(n.s.id)) continue;
         if (!facesToward(o.state, n.s.pos) || !canSee(grid, n.s, o.state.pos, range)) continue;
