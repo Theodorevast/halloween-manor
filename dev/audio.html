@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>audio sandbox</title>
+    <style>
+      body { margin: 0; padding: 20px; background: #0b0b0d; color: #d8d2c4; font: 14px/1.45 system-ui, sans-serif; }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      p { margin: 4px 0 14px; color: #8f897c; }
+      section { margin-bottom: 18px; }
+      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #8f897c; margin: 0 0 8px; }
+      button { background: #1c1b20; color: #e8e2d4; border: 1px solid #3a3740; border-radius: 4px; padding: 6px 10px; margin: 0 6px 6px 0; cursor: pointer; font: inherit; }
+      button:hover { border-color: #7dffa8; }
+      label { display: inline-flex; gap: 8px; align-items: center; margin-right: 16px; }
+      table { border-collapse: collapse; font: 12px/1.4 ui-monospace, monospace; }
+      td, th { padding: 3px 10px 3px 0; text-align: right; white-space: nowrap; }
+      td:first-child, th:first-child, td:nth-child(2), th:nth-child(2) { text-align: left; }
+      .bad { color: #ff6b5a; }
+      .ok { color: #7dffa8; }
+      #status { color: #8f897c; }
+    </style>
+  </head>
+  <body>
+    <h1>Audio sandbox</h1>
+    <p>Every button unlocks audio first. "Render all offline" renders each sound through the real bus with OfflineAudioContext and measures it.</p>
+    <section id="buttons"></section>
+    <section>
+      <h2>Ambience</h2>
+      <label>average fear <input id="fear" type="range" min="0" max="100" value="0" /> <span id="fearv">0</span></label>
+      <label><input id="mute" type="checkbox" /> muted</label>
+      <span id="status"></span>
+    </section>
+    <section>
+      <h2>Offline metrics</h2>
+      <button id="render">Render all offline</button>
+      <div id="report"></div>
+    </section>
+    <script type="module" src="./audio.ts"></script>
+  </body>
+</html>
