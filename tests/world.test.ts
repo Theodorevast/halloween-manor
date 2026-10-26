@@ -4,7 +4,8 @@ import { createRng } from '../src/sim/rng';
 import { Spawner, pickName } from '../src/sim/spawner';
 import { Grid } from '../src/sim/grid';
 import { createNpc, exposure } from '../src/sim/npc';
-import { cellOf, FRONT_DOOR, inGrid, PROPS, propCenter } from '../src/config/house';
+import { facesToward } from '../src/sim/scares';
+import { cellCenter, cellOf, FRONT_DOOR, inGrid, PROPS, propCenter } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
 import { BEHAVIOR, FEAR, HIT_STOP, NAMES, PERSONALITIES, SPAWN, SPEED } from '../src/config/visitors';
 import { angleOf, wrapAngle } from '../src/lib/angle';
@@ -12,6 +13,12 @@ import type { NpcState, SimEvent, Vec2, World } from '../src/sim/types';
 
 const DT = 1 / 60;
 const prop = (id: string) => propCenter(PROPS.find((p) => p.id === id)!);
+/** 物件正面 d 米处（按 PROPS 里的朝向）：站在这里的人在它正面 */
+const front = (id: string, d: number): Vec2 => {
+  const p = PROPS.find((q) => q.id === id)!;
+  const c = propCenter(p);
+  return { x: c.x + Math.cos(p.facing) * d, z: c.z + Math.sin(p.facing) * d };
+};
 const angleTo = (from: Vec2, to: Vec2) => angleOf(to.x - from.x, to.z - from.z);
 const obj = (w: World, id: string) => w.state.objects.find((o) => o.id === id)!;
 const npcById = (w: World, id: number) => w.state.npcs.find((n) => n.id === id);
@@ -157,35 +164,68 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
     w.trigger('lamp-living');
     expect(ofType(w.step(0.1), 'startle')[0].amount).toBe(SCARES.lamp.fear);
     run(w, 3);
-    const q = { x: 7.5, z: 9.5 };
-    place(n, q, prop('lamp-foyer'));
+    const q = front('lamp-bedroom', 1.5);
+    place(n, q, prop('lamp-bedroom'));
     const t2 = w.state.time;
-    w.trigger('lamp-foyer');
+    w.trigger('lamp-bedroom');
     const second = ofType(w.step(0.1), 'startle')[0].amount;
     expect(second).toBeCloseTo(SCARES.lamp.fear * habFactor(t2), 9);
     expect(second).toBeLessThan(SCARES.lamp.fear); // 3 秒前刚被另一盏台灯吓过
     run(w, 3);
-    const r = { x: 8, z: 3.5 };
+    const r = front('rocking-chair', 1.5);
     place(n, r, prop('rocking-chair'));
     w.trigger('rocking-chair');
     expect(ofType(w.step(0.1), 'startle')[0].amount).toBe(SCARES.rockingChair.fear);
   });
 
-  test('落地镜要站在 2.5 米内：3 米外看着也吓不到', () => {
+  test('落地镜要站在 2.5 米内：正面 3 米外看着也吓不到', () => {
     const w = createWorld({ seed: 4, autoSpawn: false });
-    const p = { x: 12.25, z: 8.75 };
-    w.spawn({ pos: p, personality: 'timid', lookDir: 0 });
+    const p = front('mirror', 3);
+    w.spawn({ pos: p, personality: 'timid', lookDir: angleTo(p, prop('mirror')) });
     w.trigger('mirror');
     expect(ofType(run(w, 1.6), 'startle')).toEqual([]);
+  });
+
+  test('肖像、镜子只吓站在正面的人：从侧面看着肖像不算', () => {
+    const pc = PROPS.find((q) => q.id === 'portrait')!.cell;
+    // 和肖像同一行（在它正侧面），手电对着它：眼睛不亮，附身也吓不到
+    // （单独一个人：要是旁边有人被吓得尖叫，他会被引过去、走到肖像正面，那就是正常的被吓了）
+    const w = createWorld({ seed: 4, autoSpawn: false });
+    const side = cellCenter(pc[0] + 2, pc[1]);
+    w.spawn({ pos: side, personality: 'average', lookDir: angleTo(side, prop('portrait')) });
+    w.step(DT);
+    expect(obj(w, 'portrait').seenBy).toEqual([]);
+    w.trigger('portrait');
+    expect(ofType(run(w, SCARES.portrait.active + 0.1), 'startle')).toEqual([]);
+    // 对照：站在正面同样距离就会被吓到
+    const w2 = createWorld({ seed: 4, autoSpawn: false });
+    const before = front('portrait', 1);
+    const b = w2.spawn({ pos: before, personality: 'average', lookDir: angleTo(before, prop('portrait')) });
+    w2.step(DT);
+    expect(obj(w2, 'portrait').seenBy).toEqual([b.id]);
+    w2.trigger('portrait');
+    expect(ofType(w2.step(0.1), 'startle').map((e) => e.npc)).toEqual([b.id]);
+  });
+
+  test('facesToward：只有肖像和镜子分正反面', () => {
+    const at = { x: 5, z: 5 };
+    expect(facesToward({ type: 'mirror', pos: at, facing: 0 }, { x: 6, z: 5 })).toBe(true);
+    expect(facesToward({ type: 'mirror', pos: at, facing: 0 }, { x: 4, z: 5 })).toBe(false);
+    expect(facesToward({ type: 'portrait', pos: at, facing: Math.PI / 2 }, { x: 5, z: 6 })).toBe(true);
+    expect(facesToward({ type: 'portrait', pos: at, facing: Math.PI / 2 }, { x: 6, z: 5 })).toBe(false); // 正侧面
+    expect(facesToward({ type: 'lamp', pos: at, facing: 0 }, { x: 4, z: 5 })).toBe(true);
+    expect(facesToward({ type: 'rockingChair', pos: at, facing: 0 }, { x: 4, z: 5 })).toBe(true);
   });
 });
 
 describe('World：吓跑与 hit-stop（计划测试 4–5）', () => {
-  const BATH = { x: 13.25, z: 8.75 };
+  // 计划里是 (13.25, 8.75)、朝东看 2 米外的镜子；镜子挪到浴室西墙、朝东之后，按 PROPS 取「镜子正面 2 米」
+  const BATH = front('mirror', 2);
+  const TO_MIRROR = angleTo(BATH, prop('mirror'));
 
   test('timid 访客面对 2 米外的落地镜：amount 72', () => {
     const w = createWorld({ seed: 5, autoSpawn: false });
-    const n = w.spawn({ pos: BATH, personality: 'timid', lookDir: 0 });
+    const n = w.spawn({ pos: BATH, personality: 'timid', lookDir: TO_MIRROR });
     w.trigger('mirror');
     const s = ofType(w.step(0.1), 'startle');
     expect(s).toEqual([{ type: 'startle', npc: n.id, object: 'mirror', amount: 72, scream: true }]);
@@ -195,7 +235,7 @@ describe('World：吓跑与 hit-stop（计划测试 4–5）', () => {
 
   test('涨满就逃跑：flee 事件、hitStop = 0.15；hit-stop 期间模拟不走；逃出前门后 exit、计数 +1、移除', () => {
     const w = createWorld({ seed: 5, autoSpawn: false });
-    const n = w.spawn({ pos: BATH, personality: 'timid', name: 'Theo', lookDir: 0 });
+    const n = w.spawn({ pos: BATH, personality: 'timid', name: 'Theo', lookDir: TO_MIRROR });
     // 计划里的「20 秒后再附身镜子」凑不满：72 衰减到 24，再 +36 只有 60。这里直接给它一个之前被吓剩下的恐惧值
     n.fear = 40;
     w.trigger('mirror');
@@ -241,20 +281,21 @@ describe('World：吓跑与 hit-stop（计划测试 4–5）', () => {
 
   test('hit-stop 期间也能附身，trigger 事件照常返回', () => {
     const w = createWorld({ seed: 5, autoSpawn: false });
-    const n = w.spawn({ pos: BATH, personality: 'timid', lookDir: 0 });
+    const n = w.spawn({ pos: BATH, personality: 'timid', lookDir: TO_MIRROR });
     n.fear = 90;
     w.trigger('mirror');
     w.step(0.1);
     expect(w.state.hitStop).toBe(HIT_STOP);
-    expect(w.trigger('lamp-foyer')).toBe(true);
+    expect(w.trigger('lamp-bedroom')).toBe(true);
     const ev = w.step(0.05);
-    expect(ofType(ev, 'trigger').map((e) => e.object)).toEqual(['lamp-foyer']);
+    expect(ofType(ev, 'trigger').map((e) => e.object)).toEqual(['lamp-bedroom']);
   });
 
   test('连环惊吓（不改状态）：门响 + 镜子 + 两个同伴的尖叫，三个 timid 访客一起涨满逃跑', () => {
     const w = createWorld({ seed: 6, autoSpawn: false });
     const mirror = prop('mirror');
-    const ps = [BATH, { x: 13.5, z: 8.0 }, { x: 13.5, z: 9.5 }];
+    // 三个人都在镜子正面 2.5 米内（镜子朝东：沿 z 方向错开）
+    const ps = [BATH, { x: BATH.x + 0.25, z: BATH.z - 0.75 }, { x: BATH.x + 0.25, z: BATH.z + 0.75 }];
     const ns = ps.map((p) => w.spawn({ pos: p, personality: 'timid', lookDir: angleTo(p, mirror) }));
     w.trigger('kitchen-door');
     w.trigger('mirror');
@@ -288,7 +329,8 @@ describe('World：吓跑与 hit-stop（计划测试 4–5）', () => {
 });
 
 describe('World：引诱与尖叫传染（计划测试 6）', () => {
-  const A_POS = { x: 4, z: 8.5 };
+  // 计划里 A 在 (4, 8.5)：八音盒挪到卧室西墙后，按 PROPS 取「八音盒正面 3 米」（同一房间）
+  const A_POS = front('music-box', 3);
   // 计划里 B 在 (13, 2.5)，但那一格是厨房餐桌；挪到旁边能走的 (13, 3.25)
   const B_POS = { x: 13, z: 3.25 };
 
@@ -308,7 +350,7 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     expect(a.screaming).toBe(0);
   });
 
-  test('警觉：走到八音盒旁，手电一直指着它；查看 3 秒后回到闲逛', () => {
+  test('警觉：走到离八音盒 investigateDist 以内、看得见它的地方停下，手电一直指着它；查看后回到闲逛', () => {
     const w = createWorld({ seed: 8, autoSpawn: false });
     const a = w.spawn({ pos: A_POS, personality: 'average' });
     const mb = prop('music-box');
@@ -327,12 +369,15 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
       } else if (arrivedAt < 0 && a.path.length === 0) {
         arrivedAt = w.state.time;
         const d = Math.hypot(a.pos.x - mb.x, a.pos.z - mb.z);
-        expect(d).toBeLessThan(0.8);
+        // 走到查看点（离声源 investigateDist 以内）的 arrive 范围里就算到了
+        expect(d).toBeLessThanOrEqual(BEHAVIOR.investigateDist + BEHAVIOR.arrive + 1e-6);
+        expect(d).toBeGreaterThan(BEHAVIOR.investigateDist - 0.5); // 不贴到声源跟前
         expect(grid.walkableAt(a.pos)).toBe(true);
+        expect(grid.lineOfSight(a.pos, mb)).toBe(true);
       }
       if (arrivedAt >= 0) {
-        // 查看时手电在声源方向 ±0.4 弧度内
-        expect(Math.abs(wrapAngle(a.lookDir - angleTo(a.pos, mb)))).toBeLessThanOrEqual(0.4 + 0.05);
+        // 查看时手电在声源方向 ±investigateSweep 弧度内扫
+        expect(Math.abs(wrapAngle(a.lookDir - angleTo(a.pos, mb)))).toBeLessThanOrEqual(BEHAVIOR.investigateSweep + 0.05);
       }
     }
     expect(arrivedAt).toBeGreaterThan(0);
@@ -420,11 +465,12 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     const w = createWorld({ seed: 13, autoSpawn: false });
     const STUDY = { x: 2.75, z: 3.75 };
     const a = w.spawn({ pos: STUDY, personality: 'brave', lookDir: angleTo(STUDY, prop('portrait')) });
-    const q = { x: 8, z: 11.4 };
-    const b = w.spawn({ pos: q, mode: 'entering', personality: 'brave', lookDir: angleTo(q, prop('lamp-foyer')) });
+    // 进门中的人：调试时放在走廊里、看着厨房门里的摇椅（进门路线会寻路，不穿墙）
+    const q = front('rocking-chair', 1.5);
+    const b = w.spawn({ pos: q, mode: 'entering', personality: 'brave', lookDir: angleTo(q, prop('rocking-chair')) });
     expect(b.mode).toBe('entering');
     w.trigger('portrait');
-    w.trigger('lamp-foyer');
+    w.trigger('rocking-chair');
     const ev = w.step(0.1);
     expect(ofType(ev, 'startle').map((e) => e.npc).sort()).toEqual([a.id, b.id]);
     expect(a.mode).toBe('startled');

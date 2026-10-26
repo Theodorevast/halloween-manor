@@ -2,7 +2,7 @@
 import { PROPS, propCenter } from '../config/house';
 import { SCARES } from '../config/scares';
 import type { ScareSpec } from '../config/scares';
-import type { ScareObjectState, SimEvent } from './types';
+import type { ScareObjectState, ScareType, SimEvent, Vec2 } from './types';
 
 /** 倒计时归零的容差：1/60 累减 16 秒会剩 1e-13 这种尾巴，不能让它多拖一步 */
 const EPS = 1e-9;
@@ -44,6 +44,16 @@ export function triggerObject(o: ScareObject): boolean {
   o.scared.clear();
   o.pendingLure = o.spec.kind === 'lure';
   return true;
+}
+
+/** 有「正面」的物件：只有站在正面那一侧的人看得见它的脸，才会被吓到、才会让眼睛图标亮 */
+const FACED: ReadonlySet<ScareType> = new Set<ScareType>(['portrait', 'mirror']);
+
+/** p 处的人能不能看到物件吓人的那一面（台灯、摇椅四面都算） */
+export function facesToward(o: Pick<ScareObjectState, 'type' | 'pos' | 'facing'>, p: Vec2): boolean {
+  if (!FACED.has(o.type)) return true;
+  // 要在正面前方至少一点点：正侧面不算（cos(π/2) 不是精确的 0，所以要有容差）
+  return (p.x - o.pos.x) * Math.cos(o.facing) + (p.z - o.pos.z) * Math.sin(o.facing) > 1e-6;
 }
 
 const countdown = (v: number, dt: number) => {

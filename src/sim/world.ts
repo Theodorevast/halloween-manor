@@ -9,7 +9,7 @@ import { canBeScared, createNav, createNpc, exposure, hear, startle, updateNpc }
 import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
-import { createScareObjects, tickObject, triggerObject } from './scares';
+import { createScareObjects, facesToward, tickObject, triggerObject } from './scares';
 import { pickName, pickPersonality, Spawner } from './spawner';
 import type { NpcState, SimEvent, SpawnOptions, Vec2, World, WorldOptions, WorldState } from './types';
 
@@ -119,7 +119,7 @@ export function createWorld(opts: WorldOptions): World {
       const range = Math.min(o.spec.range, VISION.range);
       for (const n of npcs) {
         if (!canBeScared(n) || o.scared.has(n.s.id)) continue;
-        if (!canSee(grid, n.s, o.state.pos, range)) continue;
+        if (!facesToward(o.state, n.s.pos) || !canSee(grid, n.s, o.state.pos, range)) continue;
         o.scared.add(n.s.id);
         startle(n, ctx, o.state.id, o.state.type, o.state.pos, o.spec.fear);
       }
@@ -153,7 +153,9 @@ export function createWorld(opts: WorldOptions): World {
       }
       const range = Math.min(o.spec.range, VISION.range);
       const seen: number[] = [];
-      for (const n of npcs) if (canBeScared(n) && canSee(grid, n.s, o.state.pos, range)) seen.push(n.s.id);
+      for (const n of npcs) {
+        if (canBeScared(n) && facesToward(o.state, n.s.pos) && canSee(grid, n.s, o.state.pos, range)) seen.push(n.s.id);
+      }
       o.state.seenBy = seen;
     }
   }

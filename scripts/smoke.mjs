@@ -80,10 +80,10 @@ try {
   const npcCount = await page.evaluate(() => window.__haunt.raw().npcs.length);
   check('10 秒内有访客进门', npcCount >= 1, `${npcCount} 人`);
 
-  // 书房里放一个看着肖像的人，附身肖像，恐惧值应上升
+  // 书房里放一个人，站在肖像正前方 2 米、面朝北看着它（肖像在北墙边 (3.75, 0.75)，朝南），附身肖像，恐惧值应上升
   const fear = await page.evaluate(() => {
     const h = window.__haunt;
-    const n = h.spawn({ pos: { x: 2.75, z: 3.75 }, lookDir: Math.atan2(2.25 - 3.75, 1.75 - 2.75), personality: 'average', name: 'Smoke' });
+    const n = h.spawn({ pos: { x: 3.75, z: 2.75 }, lookDir: -Math.PI / 2, personality: 'average', name: 'Smoke' });
     const ok = h.trigger('portrait');
     h.step(300);
     const after = h.raw().npcs.find((x) => x.id === n.id);

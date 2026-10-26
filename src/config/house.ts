@@ -86,7 +86,8 @@ export const FURNITURE: Furniture[] = [
   { id: 'kitchen-table', kind: 'table', rect: { x0: 25, z0: 4, x1: 28, z1: 6 }, facing: S, blocks: true },
   { id: 'hall-runner', kind: 'runner', rect: { x0: 3, z0: 11, x1: 29, z1: 13 }, facing: E, blocks: false },
   { id: 'bedroom-bed', kind: 'bed', rect: { x0: 1, z0: 18, x1: 4, z1: 22 }, facing: E, blocks: true },
-  { id: 'bedroom-nightstand', kind: 'nightstand', rect: { x0: 4, z0: 21, x1: 5, z1: 22 }, facing: N, blocks: true },
+  // 床头柜在床头（西墙）北侧，八音盒放在上面（面高 0.55 米）
+  { id: 'bedroom-nightstand', kind: 'nightstand', rect: { x0: 1, z0: 17, x1: 2, z1: 18 }, facing: E, blocks: true },
   { id: 'bedroom-wardrobe', kind: 'wardrobe', rect: { x0: 7, z0: 15, x1: 10, z1: 16 }, facing: S, blocks: true },
   { id: 'foyer-rug', kind: 'rug', rect: { x0: 14, z0: 18, x1: 18, z1: 22 }, facing: N, blocks: false },
   { id: 'foyer-coatrack', kind: 'coatRack', rect: { x0: 19, z0: 16, x1: 20, z1: 17 }, facing: W, blocks: true },
@@ -104,15 +105,22 @@ export interface PropPlacement {
   room: RoomId;
 }
 
-/** 可附身的物件。除了门（门洞里，能走），物件所在格都会标成 Tile.Prop（挡路不挡视线） */
+/**
+ * 可附身的物件。除了门（门洞里，能走），物件所在格都会标成 Tile.Prop（挡路不挡视线）。
+ * 摆放原则：
+ * - 每个引诱物件旁边配一个惊吓物件，被引过去查看的人正好看见它（先引诱、再惊吓）：
+ *   卧室八音盒 + 床边落地灯（西墙床头），厨房门 + 摇椅（门里正对门洞，从走廊往里看就在眼前）
+ * - 有正面的物件（肖像、镜子）朝南或朝东：默认镜头在东南方向看得见正面；背靠墙、面朝房间，屋里的人都在它正面
+ * - 落地镜不跟引诱物件配对：它是最重的惊吓，配上引诱就成了每 20 秒一次的「刷恐惧」，太容易（见 tests/balance.test.ts）
+ */
 export const PROPS: PropPlacement[] = [
-  { id: 'portrait', type: 'portrait', cell: [3, 4], facing: S, room: 'study' },
-  { id: 'rocking-chair', type: 'rockingChair', cell: [13, 6], facing: E, room: 'living' },
+  { id: 'portrait', type: 'portrait', cell: [7, 1], facing: S, room: 'study' },
+  { id: 'rocking-chair', type: 'rockingChair', cell: [26, 7], facing: S, room: 'kitchen' },
   { id: 'lamp-living', type: 'lamp', cell: [19, 2], facing: S, room: 'living' },
   { id: 'kitchen-door', type: 'door', cell: [25, 9], facing: S, room: 'kitchen' },
-  { id: 'music-box', type: 'musicBox', cell: [4, 21], facing: N, room: 'bedroom' },
-  { id: 'lamp-foyer', type: 'lamp', cell: [12, 16], facing: S, room: 'foyer' },
-  { id: 'mirror', type: 'mirror', cell: [30, 17], facing: W, room: 'bathroom' },
+  { id: 'music-box', type: 'musicBox', cell: [1, 17], facing: E, room: 'bedroom' },
+  { id: 'lamp-bedroom', type: 'lamp', cell: [1, 16], facing: E, room: 'bedroom' },
+  { id: 'mirror', type: 'mirror', cell: [22, 17], facing: E, room: 'bathroom' },
 ];
 
 export const cellCenter = (i: number, j: number) => ({ x: (i + 0.5) * CELL, z: (j + 0.5) * CELL });

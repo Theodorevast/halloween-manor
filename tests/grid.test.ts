@@ -1,16 +1,51 @@
 import { describe, expect, test } from 'vitest';
 import { Grid } from '../src/sim/grid';
-import { buildTiles, cellCenter, FRONT_DOOR, GRID_H, GRID_W, idx, PROPS, Tile } from '../src/config/house';
+import { buildTiles, cellCenter, FRONT_DOOR, FURNITURE, GRID_H, GRID_W, idx, PROPS, roomAt, Tile } from '../src/config/house';
 
 describe('Grid', () => {
   const g = new Grid();
+  const cellOfProp = (id: string) => PROPS.find((p) => p.id === id)!.cell;
 
   test('墙、地板、门洞、物件格', () => {
     expect(g.isWalkable(0, 0)).toBe(false);
     expect(g.isWalkable(5, 5)).toBe(true);
     expect(g.isWalkable(4, 9)).toBe(true); // 书房门洞
-    expect(g.isWalkable(3, 4)).toBe(false); // 肖像所在格
-    expect(g.isOpaque(3, 4)).toBe(false); // 物件不挡视线
+    // 计划里写的是 (3, 4)：肖像后来挪到了书房北墙前，这里按 PROPS 取
+    const [pi, pj] = cellOfProp('portrait');
+    expect(g.isWalkable(pi, pj)).toBe(false); // 肖像所在格
+    expect(g.isOpaque(pi, pj)).toBe(false); // 物件不挡视线
+  });
+
+  test('物件格都在房间里、不压在墙和家具上（门在门洞里，八音盒在床头柜上）', () => {
+    const t = buildTiles();
+    for (const p of PROPS) {
+      const [i, j] = p.cell;
+      if (p.type === 'door') {
+        expect(t[idx(i, j)]).toBe(Tile.Floor);
+        continue;
+      }
+      expect(t[idx(i, j)]).toBe(Tile.Prop);
+      const under = FURNITURE.filter((f) => f.blocks && i >= f.rect.x0 && i < f.rect.x1 && j >= f.rect.z0 && j < f.rect.z1);
+      if (p.type === 'musicBox') {
+        expect(under.map((f) => [f.kind, f.rect.x1 - f.rect.x0, f.rect.z1 - f.rect.z0])).toEqual([['nightstand', 1, 1]]);
+      } else expect(under).toEqual([]);
+      expect(roomAt(i, j)).toBe(p.room);
+      // 至少有一个相邻格能走（人能走到跟前）
+      const around = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([di, dj]) => g.isWalkable(i + di, j + dj));
+      expect(around).toBe(true);
+    }
+    // 每个房间最多 2 个物件
+    const per = new Map<string, number>();
+    for (const p of PROPS) per.set(p.room, (per.get(p.room) ?? 0) + 1);
+    for (const n of per.values()) expect(n).toBeLessThanOrEqual(2);
+  });
+
+  test('有正面的物件（肖像、镜子）朝南或朝东，正面那一格能站人', () => {
+    for (const p of PROPS.filter((q) => q.type === 'portrait' || q.type === 'mirror')) {
+      expect([0, Math.PI / 2]).toContain(p.facing);
+      const fi = p.cell[0] + Math.round(Math.cos(p.facing)), fj = p.cell[1] + Math.round(Math.sin(p.facing));
+      expect(g.isWalkable(fi, fj)).toBe(true);
+    }
   });
 
   test('家具挡路不挡视线，窗挡视线，前门能走', () => {
@@ -47,7 +82,8 @@ describe('Grid', () => {
     // 隔着书桌（家具）
     expect(g.lineOfSight({ x: 3.25, z: 2.75 }, { x: 4.75, z: 2.75 })).toBe(true);
     // 隔着肖像（物件）
-    expect(g.lineOfSight({ x: 1.25, z: 2.25 }, { x: 2.25, z: 2.25 })).toBe(true);
+    const [pi, pj] = cellOfProp('portrait');
+    expect(g.lineOfSight(cellCenter(pi - 1, pj), cellCenter(pi + 1, pj))).toBe(true);
     // 走廊 → 客厅，但不在门洞的那一列：隔着第 9 行的墙
     expect(g.lineOfSight({ x: 6, z: 6 }, { x: 6, z: 2 })).toBe(false);
   });
@@ -72,10 +108,11 @@ describe('Grid', () => {
   });
 
   test('nearestWalkable：距离相同时，按第二个参数挑离它近的', () => {
-    const mb = PROPS.find((q) => q.id === 'music-box')!; // (4, 21)，北、东、南三面都是可走格
-    const c = cellCenter(mb.cell[0], mb.cell[1]);
-    expect(g.nearestWalkable(c, { x: 2.25, z: 6 })).toEqual([4, 20]); // 从北边来
-    expect(g.nearestWalkable(c, { x: 4.5, z: 10.75 })).toEqual([5, 21]); // 从东边来
+    const [ci, cj] = cellOfProp('rocking-chair'); // 四面都是可走格，一样近
+    for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) expect(g.isWalkable(ci + di, cj + dj)).toBe(true);
+    const c = cellCenter(ci, cj);
+    expect(g.nearestWalkable(c, cellCenter(ci - 4, cj))).toEqual([ci - 1, cj]); // 从西边来
+    expect(g.nearestWalkable(c, cellCenter(ci, cj + 4))).toEqual([ci, cj + 1]); // 从南边来
   });
 
   test('nearestWalkable：屋外的点（门外）返回前门格', () => {

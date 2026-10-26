@@ -12,8 +12,6 @@ import type { NpcState, Personality, ScareType, SimEvent, Vec2 } from './types';
 // 以下几个手电摆动幅度是计划里给的定值（config 里没有），集中放在这里方便调
 /** 走路时手电在身体朝向两侧的小幅摆动（弧度），周期用 BEHAVIOR.sweepPeriod */
 const WALK_SWEEP = 0.25;
-/** 警觉到达后，手电在声源方向两侧扫的幅度（弧度） */
-const INVESTIGATE_SWEEP = 0.4;
 /** 逃跑时手电在身体朝向两侧乱晃的范围（弧度） */
 const FLEE_JITTER = 0.9;
 /** 逃跑时每隔多久换一个乱晃的目标方向（秒）：短到看起来是慌乱地乱照 */
@@ -118,7 +116,7 @@ export interface NpcInit {
   now: number;
 }
 
-export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'>): Npc {
+export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<NpcCtx, 'nav'>>): Npc {
   const s: NpcState = {
     id: o.id,
     name: o.name,
@@ -150,7 +148,12 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'>): Npc {
     jitter: 0,
     jitterLeft: 0,
   };
-  if (o.mode === 'entering') s.path = [{ x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z }];
+  if (o.mode === 'entering') {
+    const inside = { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z };
+    // 正常从门外进来，直线走进门；调试时放在屋里能走的地方，就寻路过去，不穿墙
+    const viaPath = ctx.nav && ctx.nav.grid.walkableAt(o.pos) ? findPath(ctx.nav.grid, o.pos, inside) : null;
+    s.path = viaPath ?? [inside];
+  }
   else startLook(npc, ctx, o.lookDir); // 站在原地先左右照一照
   return npc;
 }
@@ -280,7 +283,7 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
         npc.lookT += dt;
         npc.lookLeft -= dt;
         s.heading = turnToward(s.heading, toSrc, BEHAVIOR.turnRate * dt);
-        lookToward(npc, dt, toSrc + INVESTIGATE_SWEEP * Math.sin((TAU * npc.lookT) / BEHAVIOR.sweepPeriod));
+        lookToward(npc, dt, toSrc + BEHAVIOR.investigateSweep * Math.sin((TAU * npc.lookT) / BEHAVIOR.sweepPeriod));
         if (npc.lookLeft <= 0) beginWander(npc, ctx);
       }
       break;
@@ -343,20 +346,46 @@ function startLook(npc: Npc, ctx: Pick<NpcCtx, 'rng'>, base: number) {
   npc.lookBase = base;
 }
 
-/** 警觉：寻路到声源旁最近的可走格（一样近时挑自己这一侧的）；已经在那儿或寻路失败就原地查看 */
+/** 警觉：按 alertPath 走过去；已经在查看位置或寻路失败就原地查看 */
 function beginAlert(npc: Npc, ctx: NpcCtx, source: Vec2) {
   const s = npc.s;
-  const grid = ctx.nav.grid;
   s.mode = 'alert';
   s.modeTime = 0;
   npc.source = { x: source.x, z: source.z };
-  const [i, j] = grid.nearestWalkable(source, s.pos);
-  const target = cellCenter(i, j);
-  const path = Math.hypot(target.x - s.pos.x, target.z - s.pos.z) > BEHAVIOR.arrive ? findPath(grid, s.pos, target) : null;
+  const path = alertPath(ctx.nav.grid, s.pos, source);
   if (path && path.length > 0) {
     s.path = path;
     npc.act = 'walk';
   } else startInvestigate(npc);
+}
+
+/** 查看位置的采样间隔（米） */
+const ALERT_SAMPLE = 0.1;
+
+/**
+ * 警觉的路线（不含起点）：朝声源旁最近的可走格（一样近时挑自己这一侧的）走，
+ * 走到离声源 BEHAVIOR.investigateDist 以内、站在可走格上、看得见声源的第一个点就停。
+ * 已经在这样的位置返回空数组；到不了返回 null。机器人测试也用它预测访客会走到哪里
+ */
+export function alertPath(grid: Grid, from: Vec2, source: Vec2): Vec2[] | null {
+  const R2 = BEHAVIOR.investigateDist ** 2;
+  const viewSpot = (p: Vec2) =>
+    (p.x - source.x) ** 2 + (p.z - source.z) ** 2 <= R2 && grid.walkableAt(p) && grid.lineOfSight(p, source);
+  if (viewSpot(from)) return [];
+  const [i, j] = grid.nearestWalkable(source, from);
+  const path = findPath(grid, from, cellCenter(i, j));
+  if (!path) return null;
+  let a = from;
+  for (let k = 0; k < path.length; k++) {
+    const b = path[k];
+    const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / ALERT_SAMPLE));
+    for (let t = 1; t <= n; t++) {
+      const p = { x: a.x + ((b.x - a.x) * t) / n, z: a.z + ((b.z - a.z) * t) / n };
+      if (viewSpot(p)) return [...path.slice(0, k), p];
+    }
+    a = b;
+  }
+  return path;
 }
 
 /** 警觉到达后：停 BEHAVIOR.investigate 秒，手电在声源方向两侧扫 */

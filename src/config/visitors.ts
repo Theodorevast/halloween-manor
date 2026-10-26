@@ -55,6 +55,10 @@ export const BEHAVIOR = {
   lookAround: [2, 4] as [number, number],
   /** 警觉时到达声源后查看多久（秒） */
   investigate: 3,
+  /** 警觉：走到离声源这么近、并且看得见声源的地方就停下查看（米），不贴到声源跟前——站远一点才看得见周围 */
+  investigateDist: 1.5,
+  /** 警觉查看时，手电以声源方向为中心左右扫的幅度（弧度）：扫一扫声源周围 */
+  investigateSweep: 0.8,
   /** 闲逛时手电左右扫的幅度（弧度）和周期（秒） */
   sweepAmp: 0.6,
   sweepPeriod: 2.6,
