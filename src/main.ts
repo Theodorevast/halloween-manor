@@ -40,6 +40,16 @@ const audio: AudioSys = createAudio((p) => {
 });
 // 浏览器可能在切标签页后挂起音频：开场之后的每次点击都顺手恢复
 addEventListener('pointerdown', () => { if (wantBegin) void audio.unlock(); });
+// 标签页隐藏时主循环停了，模拟也停了，环境声却还在响：临时静音，回来时恢复玩家自己的静音设置
+let mutedBeforeHide = false;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    mutedBeforeHide = audio.muted;
+    audio.setMuted(true);
+  } else {
+    audio.setMuted(mutedBeforeHide);
+  }
+});
 
 const setQuality = (q: Quality) => {
   quality = q;
