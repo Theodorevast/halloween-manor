@@ -11,11 +11,14 @@
 //   ?focus=8,6  把镜头平移到房屋坐标 (x, z)；?mag=3 再放大（看局部细节）
 //   ?fog=density:2,scatter:0.05  临时改 FOG 里的数值；?amb=0.03,0.032,0.04 改雾的底色（线性）
 // Playwright：window.__fogdev.rotate(1) / .setQuality('low')
+//   扰动：.trigger('kitchen-door')（和游戏里一样走 trigger 事件，物件也跟着动）；.hold = true 停住动画的时间，
+//   .advance(0.5) 再按 1/120 秒一步精确推进（截扰动的中间态）；.emit({ type: 'reset', object: 'portrait' })；.state 是假的世界状态
 import * as THREE from 'three/webgpu';
 import { createCameraRig } from '../src/engine/camera';
 import { createRenderCore } from '../src/engine/renderer';
 import type { FrameCtx, Module, Quality } from '../src/engine/types';
-import type { WorldState } from '../src/sim/types';
+import { PROPS } from '../src/config/house';
+import type { SimEvent, WorldState } from '../src/sim/types';
 import { createFlashlight } from '../src/view/flashlight';
 import { FOG, createFogView } from '../src/view/fog';
 import { createHouseView } from '../src/view/house';
@@ -46,6 +49,7 @@ if (q.has('amb')) FOG.ambient.setRGB(...(q.get('amb')!.split(',').map(Number) as
 const modules: Module[] = [createHouseView(core, rig)];
 if (!q.has('nofog')) modules.push(createFogView(core, rig));
 modules.push(createPropsView(core));
+let hold = false;
 
 // 四支手电：书房照东墙（墙后客厅的雾不该亮）、走廊往东、门厅往北穿过门洞、厨房照西墙
 const poses = [
@@ -87,17 +91,40 @@ core.renderer.setAnimationLoop(() => {
     const dir = p.dir + (q.has('sweep') ? Math.sin(time * 0.6 + k) * 0.5 : 0);
     torches[k].update({ x: p.x, y: 0.8, z: p.z, dir, power: 1, nervous: false }, dt, time);
   });
-  const ctx: FrameCtx = { dt, time, state };
+  const ctx: FrameCtx = { dt: hold ? 0 : dt, time, state };
   for (const m of modules) m.update?.(ctx);
   core.render(rig.camera);
 });
 
+const advance = (s: number) => {
+  for (let i = 0, n = Math.round(s * 120); i < n; i++) {
+    for (const m of modules) m.update?.({ dt: 1 / 120, time, state });
+  }
+};
+const trigger = (id: string) => {
+  const p = PROPS.find((x) => x.id === id);
+  if (!p) return false;
+  const e: SimEvent = { type: 'trigger', object: id, scareType: p.type };
+  for (const m of modules) m.onEvent?.(e, state);
+  return true;
+};
+
 (window as unknown as { __fogdev: unknown }).__fogdev = {
   rotate: (d: 1 | -1) => rig.rotate(d),
   setQuality,
+  trigger,
+  /** 直接分发一个模拟事件（比如 { type: 'reset', object: 'portrait' }） */
+  emit: (e: SimEvent) => { for (const m of modules) m.onEvent?.(e, state); },
+  /** 假的世界状态：往 objects 里放物件的状态（broken 等），物件就按它对齐 */
+  state,
+  advance,
+  get hold() { return hold; },
+  set hold(v: boolean) { hold = v; },
   get quality() { return quality; },
   backend: core.backend,
   scene: core.scene,
+  /** 量 GPU 时间用（?gputime 打开时间戳查询）：renderer.resolveTimestampsAsync('render') 返回上一帧所有 pass 的总耗时 */
+  renderer: core.renderer,
   THREE,
 };
 console.log('backend', core.backend);

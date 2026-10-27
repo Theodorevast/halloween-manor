@@ -1,8 +1,9 @@
 // 肖像：画架上一幅维多利亚风格的女士像。被附身时眼睛（单独的小球）猛地转向最近的访客、瞳孔泛起幽绿，
 // 盯 0.6 秒、画框发抖，然后整幅画向前扑倒、脸朝下砸在地上，回弹一下。broken 期间一直趴着，reset 时飘回画架。
+// 画砸下去时把地上积的灰吹开：画扶回画架以后，地板上留下一块比周围干净的长方形印子，几秒里慢慢淡掉（见 PRINT）。
 import * as THREE from 'three/webgpu';
-import { color, float, mix, positionLocal, smoothstep, uniform } from 'three/tsl';
-import { C, Parts, bodyMaterial, bump, inOutCubic, inQuad, lerp, mesh, outCubic, outQuad, seg, wobble, type PropFrame, type PropRig } from './kit';
+import { abs, color, exp, float, length, max, min, mix, mx_noise_float, positionLocal, smoothstep, uniform, vec2, vec3 } from 'three/tsl';
+import { C, Parts, bodyMaterial, bump, inOutCubic, inOutSine, inQuad, lerp, mesh, outCubic, outQuad, seg, wobble, type PropFrame, type PropRig } from './kit';
 import { PALETTE } from '../palette';
 
 // 画布尺寸（米）和画框
@@ -19,6 +20,33 @@ const EYE_Y = FH / 2 + 0.1;
 const EYE_X = 0.046;
 const EYE_R = 0.017;
 const CANVAS_Z = -0.012;
+
+/**
+ * 地上的印子。原本想做「墙上一块没褪色的墙纸」，但这幅画是立在画架上的：画面离北墙约 0.45 米，
+ * 左边还挡着半扇窗（北墙的窗洞到 x = 3.5 米，画框到 3.38 米），几十年也不会在墙上晒出一块清楚的方印；
+ * 北墙在一半的镜头方向下还是降低的矮墙。所以改成地板上的印子：画脸朝下拍在积灰的地板上，
+ * 底下的空气把灰挤向四周——画扶回去以后露出一块颜色深一点、干净的长方形，四周一圈被挤出来的浅灰，
+ * 几秒里灰慢慢落回去、印子淡掉。四个镜头方向都看得见。
+ * 用乘法混合（屏幕上的地板颜色 × 系数）：系数就是反照率的比例，手电、月光照上去照样对，也不用知道地板本来什么色。
+ * 系数是线性空间的 rgb
+ */
+const PRINT = {
+  /** 干净处：灰被吹掉，露出更深、更暖的木头本色 */
+  clean: [0.55, 0.5, 0.45] as const,
+  /** 挤出来的灰：浅、偏冷灰（蓝通道抬得多，木头的暖色被冲淡） */
+  dust: [1.8, 1.95, 2.3] as const,
+  /** 灰圈：离画框边多远最浓、多宽（米）；往外吹出去的灰条最远多少米 */
+  ridgeAt: 0.03,
+  ridgeWidth: 0.045,
+  spray: 0.2,
+  /** 砸地后灰圈多久出全；扶回画架落定以后停多久开始淡、多久淡完（秒） */
+  appear: 0.2,
+  hold: 3.5,
+  fade: 5.0,
+};
+
+/** 复原（reset）时落回画架、停稳的时刻（秒，从 reset 算起；sfx.ts 的 PORTRAIT_RESET.settle 也是这个数） */
+const RESET_SETTLE = 1.05;
 
 // 时间线（秒，从 trigger 算起）
 const T = {
@@ -259,11 +287,56 @@ export function createPortrait(): PropRig {
   });
   model.add(pivot);
 
+  // 地上的印子：一块平铺在地板上的面片，盖住画倒地时的位置再往外一圈（画倒地后转轴在 FALLEN_Z，画沿 +z 躺平）
+  const printAmt = uniform(0);
+  const printMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, fog: false });
+  printMat.blending = THREE.CustomBlending;
+  printMat.blendEquation = THREE.AddEquation;
+  printMat.blendSrc = THREE.DstColorFactor; // 结果 = 系数 × 地板
+  printMat.blendDst = THREE.ZeroFactor;
+  printMat.blendSrcAlpha = THREE.ZeroFactor;
+  printMat.blendDstAlpha = THREE.OneFactor;
+  {
+    const half = vec2(FW / 2, FH / 2);
+    const p = vec2(positionLocal.x, positionLocal.z.sub(FALLEN_Z + FH / 2));
+    // 到画框边的有向距离（里面为负）
+    const q = abs(p).sub(half);
+    const d = length(max(q, 0)).add(min(max(q.x, q.y), 0));
+    const n1 = mx_noise_float(vec3(p.x.mul(9), p.y.mul(9), 2.3));
+    const n2 = mx_noise_float(vec3(p.x.mul(31), p.y.mul(31), 5.9));
+    const n3 = mx_noise_float(vec3(p.x.mul(3.5), p.y.mul(3.5), 8.1));
+    // 干净的一块：边缘略毛，里面有几处没吹干净
+    const clean = float(1).sub(smoothstep(-0.02, 0.01, d.add(n2.mul(0.008)))).mul(n1.mul(0.18).add(0.86));
+    // 灰圈 + 长短不一往外吹的灰条
+    const r = d.sub(PRINT.ridgeAt).div(PRINT.ridgeWidth);
+    const ridge = exp(r.mul(r).negate()).mul(n2.mul(0.25).add(n1.mul(0.2)).add(0.75));
+    const spray = float(1).sub(smoothstep(0, float(PRINT.spray).mul(n3.mul(0.4).add(0.6)), d)).mul(smoothstep(0, 0.02, d)).mul(n2.mul(0.3).add(0.4));
+    const dust = min(max(ridge, spray), 1);
+    const one = vec3(1, 1, 1);
+    printMat.colorNode = mix(one, vec3(...PRINT.clean), clean.mul(printAmt))
+      .mul(mix(one, vec3(...PRINT.dust), dust.mul(printAmt)));
+  }
+  const pad = PRINT.ridgeAt + PRINT.ridgeWidth * 2 + PRINT.spray;
+  const printGeo = new THREE.PlaneGeometry(FW + pad * 2, FH + pad * 2).rotateX(-Math.PI / 2).translate(0, 0.003, FALLEN_Z + FH / 2);
+  const printMesh = new THREE.Mesh(printGeo, printMat);
+  printMesh.name = 'portrait-floor-print';
+  printMesh.castShadow = false;
+  printMesh.receiveShadow = false;
+  // 在月光光斑（1）之后、雾（1.5）之前：月光照在干净的木头上也跟着变深，雾盖在印子上面
+  printMesh.renderOrder = 1.2;
+  // 系数全是 1 时看不出来；每帧按 print 决定显不显示（见 update 末尾）。
+  // 不进开场那次阻塞的预编译（deferCompile）：main.ts 在开场按钮可用之后再异步编它
+  printMesh.userData.deferCompile = true;
+  model.add(printMesh);
+
   // 动画状态
   let t = -1; // 距 trigger 的秒数；-1 = 没在表演
   let r = -1; // 距 reset 的秒数
   let fallen = false;
   let jolt = 0; // 画架被带得晃一下
+  let print = 0; // 地上印子的浓淡 0..1
+  let printFrom = 0; // 开始淡出时的浓淡
+  let sinceReset = -1; // 扶回画架以后过了多久（印子按它淡掉）；-1 = 不在淡
   const look = { yaw: 0, pitch: 0, tYaw: 0, tPitch: 0 };
   const eyeWorld = new THREE.Vector3(0, LEDGE_Y + EYE_Y, LEDGE_Z);
 
@@ -316,17 +389,20 @@ export function createPortrait(): PropRig {
       if (fallen) return; // 倒着的时候不会被再附身（冷却 16 秒 > 倒地 10 秒），以防万一
       t = 0;
       r = -1;
+      sinceReset = -1; // 上一次的印子还没淡完：停在这里，等这次砸下来再盖上
     },
     reset() {
       if (!fallen) return;
       r = 0;
+      sinceReset = 0;
+      printFrom = print;
     },
     update(f) {
       const { dt, obj } = f;
       // 兜底：错过了事件时按 state 对齐（例如中途创建视图）
       if (t < 0 && r < 0) {
-        if (!fallen && obj.broken > 0 && obj.active <= 0) { fallen = true; fallenPose(); }
-        else if (fallen && obj.broken <= 0) r = 0;
+        if (!fallen && obj.broken > 0 && obj.active <= 0) { fallen = true; fallenPose(); print = 1; }
+        else if (fallen && obj.broken <= 0) { r = 0; sinceReset = 0; printFrom = print; }
       }
 
       if (t >= 0) {
@@ -352,6 +428,8 @@ export function createPortrait(): PropRig {
           pivot.position.set(0, LEDGE_Y * (1 - inQuad(seg(t, T.fall + 0.06, T.impact))), lerp(LEDGE_Z, FALLEN_Z, outQuad(seg(t, T.fall + 0.02, T.impact))));
           jolt = bump(seg(t, T.fall, T.fall + 0.3));
         } else {
+          // 砸地：灰被挤向四周
+          print = Math.max(print, outQuad(seg(t, T.impact, T.impact + PRINT.appear)));
           // 砸地后回弹两下：画的上沿被弹起来又摔下去
           const lift = 0.11 * bump(seg(t, T.impact, T.bounce1)) + 0.03 * bump(seg(t, T.bounce1, T.bounce2));
           fallenPose(lift);
@@ -378,10 +456,20 @@ export function createPortrait(): PropRig {
           pivot.position.set(0, lerp(0, LEDGE_Y, u) + 0.06 * bump(u), lerp(FALLEN_Z, LEDGE_Z, u));
         } else {
           restPose();
-          pivot.rotation.x = LEAN - 0.03 * (1 - outCubic(seg(r, 0.92, 1.05)));
-          if (r >= 1.05) { r = -1; fallen = false; restPose(); }
+          pivot.rotation.x = LEAN - 0.03 * (1 - outCubic(seg(r, 0.92, RESET_SETTLE)));
+          if (r >= RESET_SETTLE) { r = -1; fallen = false; restPose(); }
         }
       }
+
+      // 印子：扶回画架落定（RESET_SETTLE）以后停 PRINT.hold 秒，再用 PRINT.fade 秒淡掉
+      if (sinceReset >= 0) {
+        sinceReset += dt;
+        const from = RESET_SETTLE + PRINT.hold;
+        print = printFrom * (1 - inOutSine(seg(sinceReset, from, from + PRINT.fade)));
+        if (sinceReset >= from + PRINT.fade) { sinceReset = -1; print = 0; }
+      }
+      printAmt.value = print;
+      printMesh.visible = print > 0.002;
 
       for (const e of eyes) e.rotation.set(-look.pitch, look.yaw, 0);
     },
