@@ -11,8 +11,11 @@ import type { Quality, RenderCore } from './types';
 export const TONE_MAPPING = THREE.AgXToneMapping;
 export const EXPOSURE = 1.0;
 
-/** 画质 → 像素比上限 */
-const PIXEL_RATIO: Record<Quality, number> = { high: 2, low: 1 };
+/**
+ * 画质 → 像素比上限。Low 档按 75% 分辨率渲染再放大：场景里约 14 盏灯（含闲置手电）每个像素都要算一遍，
+ * 开销基本和像素数成正比，阴影反而不是瓶颈（scripts/perf.mjs --cpu 对照实测，2026-10-27）。画面暗、边缘软，75% 看不太出糊
+ */
+const PIXEL_RATIO: Record<Quality, number> = { high: 2, low: 0.75 };
 
 /** 自动降档：开始后 [from, to] 秒这段的平均帧时间超过 slowMs 就降一次（设计文档：测 3 秒、超过 22 ms） */
 const FRAME_WATCH = { from: 1, to: 4, slowMs: 22 };

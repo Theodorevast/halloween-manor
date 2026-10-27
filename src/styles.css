@@ -183,6 +183,13 @@ body {
   outline-offset: 4px;
 }
 
+/* 还在加载：字变暗、不呼吸，点了也不开始 */
+.hud-begin:disabled {
+  color: var(--ash);
+  cursor: progress;
+  animation: none;
+}
+
 @keyframes hud-breathe {
   0%,
   100% {

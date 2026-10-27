@@ -18,6 +18,8 @@ export interface Hud extends Module {
   hideStart(): void;
   showError(msg: string): void;
   setQuality(q: Quality): void;
+  /** 渲染器和模型还没就绪时为 false：开场按钮显示加载文案、点了不开始。默认 true */
+  setReady(ready: boolean): void;
 }
 
 /** 播报最多几条、每条停留多久、淡出多久（秒）——计划 Task 7 */
@@ -135,6 +137,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
 
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   let startShown = false;
+  let ready = true;
   let begun = false;
   let errored = false;
   let playing = false;
@@ -153,7 +156,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   start.addEventListener('pointermove', onLight);
 
   const begin = () => {
-    if (!startShown || begun || errored) return;
+    if (!startShown || !ready || begun || errored) return;
     begun = true;
     // onBegin 必须在这次点击 / 按键的调用栈里同步执行：音频解锁要靠用户手势
     h.onBegin();
@@ -282,6 +285,13 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
       start.classList.add('is-error');
     },
     setQuality: setQualityUi,
+    setReady(r) {
+      ready = r;
+      const label = r ? STRINGS.start.begin : STRINGS.start.loading;
+      beginBtn.textContent = label;
+      beginBtn.setAttribute('aria-label', label);
+      beginBtn.disabled = !r;
+    },
     onEvent(e, state) {
       const l = tickerLine(e, state);
       if (l) push(l.text, l.tone);

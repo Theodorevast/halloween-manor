@@ -24,6 +24,8 @@ export interface HauntDebug {
   spawn(opts?: SpawnOptions): ReturnType<World['spawn']>;
   rotate(dir: 1 | -1): void;
   setTimeScale(n: number): void;
+  /** 物件在画布上的像素位置（离地 0.8 米处，大致是物件中部），测试用它来点中物件 */
+  screenOf(objectId: string): { x: number; y: number } | null;
 }
 
 const f1 = (n: number) => n.toFixed(1);
@@ -57,6 +59,10 @@ export function installDebug(d: DebugDeps) {
     rotate: (dir) => d.rig.rotate(dir),
     setTimeScale(n) {
       d.control.timeScale = Math.max(0, n);
+    },
+    screenOf(objectId) {
+      const o = d.world.state.objects.find((x) => x.id === objectId);
+      return o ? d.rig.toScreen(o.pos, 0.8) : null;
     },
   };
   (window as unknown as { __haunt: HauntDebug }).__haunt = api;

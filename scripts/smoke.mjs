@@ -1,6 +1,7 @@
 // 冒烟测试：构建 → vite preview → 用本机 Chrome 打开 ?debug → 点开场 → 逐项断言，截图放 shots/
 //   node scripts/smoke.mjs            先构建再测
 //   node scripts/smoke.mjs --no-build 直接测现有的 dist/
+//   node scripts/smoke.mjs --webgl    强制走 WebGL2 回退路径（地址加 ?webgl）
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright-core';
@@ -9,6 +10,7 @@ const PORT = 5738;
 const BASE = `http://127.0.0.1:${PORT}/`;
 const CHROME = process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const VITE = 'node_modules/vite/bin/vite.js';
+const WEBGL = process.argv.includes('--webgl');
 mkdirSync('shots', { recursive: true });
 
 if (!process.argv.includes('--no-build')) {
@@ -64,16 +66,18 @@ try {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) errors.push(m.text()); });
-  page.on('response', (r) => { if (r.status() >= 400 && !r.url().endsWith('/favicon.ico')) errors.push(`${r.status()} ${r.url()}`); });
+  // 正式首页带 favicon，任何 404 都算错（dev 沙盒页没有 favicon，那是 shot.mjs 的事）
+  page.on('response', (r) => { if (r.status() >= 400) errors.push(`${r.status()} ${r.url()}`); });
 
-  await page.goto(`${BASE}?debug`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}?debug${WEBGL ? '&webgl' : ''}`, { waitUntil: 'networkidle' });
   await page.locator('[data-start]').waitFor({ timeout: 15000 });
   await page.screenshot({ path: 'shots/smoke-0-start.png' });
   await page.waitForFunction(() => Boolean(window.__haunt), null, { timeout: 15000 });
   await page.locator('[data-start]').click();
   await sleep(3500);
   check('开场遮罩点击后消失', !(await page.locator('[data-start]').isVisible().catch(() => false)));
-  check('渲染后端', true, await page.evaluate(() => window.__haunt.backend));
+  const backend = await page.evaluate(() => window.__haunt.backend);
+  check('渲染后端', !WEBGL || backend === 'WebGL2', backend);
 
   // 10 秒内（快进）至少 1 个访客
   await page.evaluate(() => window.__haunt.step(8000));
@@ -91,7 +95,7 @@ try {
   });
   check('附身肖像能吓到看着它的人', fear.ok && fear.fear > 0, `trigger=${fear.ok} fear=${fear.fear}`);
   await sleep(600);
-  const shot = await page.screenshot({ path: 'shots/smoke-1-play.png' });
+  const shot = await page.screenshot({ path: `shots/smoke-1-play${WEBGL ? '-webgl' : ''}.png` });
   const lit = await litRatio(page, shot);
   check('画面不是一片黑', lit > 0.01, `亮像素 ${(lit * 100).toFixed(1)}%`);
 
@@ -101,13 +105,20 @@ try {
   console.log(await page.evaluate(() => window.__haunt.state()));
   check('没有页面报错', errors.length === 0, errors.slice(0, 5).join(' | '));
 
-  // 手机竖屏：不出横向滚动条
-  const phone = await browser.newPage({ viewport: { width: 390, height: 844 } });
-  await phone.goto(BASE, { waitUntil: 'networkidle' });
-  await sleep(1500);
-  await phone.screenshot({ path: 'shots/smoke-3-phone.png' });
+  // 手机竖屏（触屏）：不出横向滚动条；轻点开场能开始，轻点物件能附身
+  const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  await phone.goto(`${BASE}?debug${WEBGL ? '&webgl' : ''}`, { waitUntil: 'networkidle' });
+  await phone.waitForFunction(() => Boolean(window.__haunt), null, { timeout: 15000 });
   const sw = await phone.evaluate(() => document.documentElement.scrollWidth);
   check('390 px 宽没有横向滚动', sw <= 390, `scrollWidth=${sw}`);
+  await phone.locator('[data-start]').tap();
+  await sleep(3500); // 等开场镜头落定，物件的屏幕位置才稳定
+  const pt = await phone.evaluate(() => window.__haunt.screenOf('lamp-living'));
+  await phone.touchscreen.tap(pt.x, pt.y);
+  await sleep(300);
+  const cd = await phone.evaluate(() => window.__haunt.raw().objects.find((o) => o.id === 'lamp-living').cooldown);
+  check('触屏轻点物件能附身', cd > 0, `点 (${pt.x.toFixed(0)}, ${pt.y.toFixed(0)})，冷却 ${cd.toFixed(1)} 秒`);
+  await phone.screenshot({ path: 'shots/smoke-3-phone.png' });
 } catch (e) {
   check('冒烟流程跑完', false, e.message.split('\n')[0]);
 } finally {

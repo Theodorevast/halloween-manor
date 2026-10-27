@@ -6,6 +6,8 @@ export const STRINGS = {
   start: {
     headphones: 'Put on headphones.',
     begin: 'Click to begin the haunting.',
+    /** 渲染器和模型还在加载时，开场按钮上的文案 */
+    loading: 'Lighting the candles…',
     hint: 'Possess objects to scare the visitors out the front door.',
   },
   counter: (n: number) => `Scared off tonight: ${n}`,

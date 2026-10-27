@@ -72,6 +72,7 @@ const hud = createHud(document.getElementById('hud')!, {
   },
 });
 hud.showStart();
+hud.setReady(false);
 
 const world = createWorld({ seed: Date.now() % 2147483647 });
 const control = { timeScale: 1 };
@@ -93,7 +94,8 @@ function start() {
 
 async function boot() {
   try {
-    core = await createRenderCore(canvas);
+    // ?webgl 强制走 WebGL2：排查「是不是 WebGPU 的问题」时用，冒烟测试也靠它测回退路径
+    core = await createRenderCore(canvas, { forceWebGL: new URLSearchParams(location.search).has('webgl') });
   } catch (err) {
     console.error(err);
     hud.showError(STRINGS.noWebGL);
@@ -139,6 +141,7 @@ async function boot() {
   });
 
   ready = true;
+  hud.setReady(true);
   if (wantBegin) start();
 }
 
