@@ -14,7 +14,12 @@
 //     逃跑中的人不算进平均（吓跑之后是一次「释放」）
 //   嘎吱：sfx.ts 的 creak，比摇椅低沉的地板声（330 / 820 / 1700 Hz 共鸣），0.5–1 秒，大部分进混响（听起来在别的房间）；
 //     三成概率换成两下闷闷的木头轻响（房子在沉降）
+//   第三人称（3D 启用后）：整层 +2 dB（用户要更多氛围；只抬一点，持续音和风不能盖住脚步声）；嘎吱改成每 14–38 秒一次，
+//     放在听者周围 3–9 米的随机一点（屋里），六成在地板上、四成在头顶的房梁 —— 隔墙的会被遮挡闷住，真的像别的房间在响；
+//     因为离得远、常常隔着墙，3D 的嘎吱比俯视时响 3 dB
+import { HOUSE_D, HOUSE_W } from '../config/house';
 import { Snd, bandNoise, creak, knock, rand, type Bus, type CreakSpec } from './sfx';
+import type { Place, Vec3 } from './space';
 
 export const AMB = {
   /** 总音量（dB） */
@@ -39,6 +44,11 @@ export const AMB = {
   creak: 0.08,
   creakWet: 0.7,
   floor: { rate: [34, 30, 24], res: [[330, 6, 1], [820, 8, 0.75], [1700, 7, 0.35]], grit: 0.5 } as CreakSpec,
+  /** 第三人称：整层抬多少 dB、嘎吱间隔、嘎吱多响多少 dB、放在离听者多远（米） */
+  presence3d: 2,
+  creakEvery3d: [14, 38] as [number, number],
+  creak3d: 3,
+  creakDist: [3, 9] as [number, number],
 };
 
 export const DREAD = {
@@ -50,8 +60,8 @@ export const DREAD = {
   tensionWeight: 0.5,
   tensionTau: 12,
   tensionMax: 1.2,
-  /** 各事件给紧张度加多少 */
-  bump: { startle: 0.22, scream: 0.12, heard: 0.06, flee: 0.45 },
+  /** 各事件给紧张度加多少（chill = 真的放出了一声发毛；后颈一凉不另外加，跟着它的 startle 已经加过） */
+  bump: { startle: 0.22, scream: 0.12, heard: 0.06, flee: 0.45, chill: 0.03 },
   /** dread 自己的平滑：涨得快、退得慢（秒） */
   up: 2.5,
   down: 9,
@@ -76,17 +86,23 @@ export interface Ambience {
   setDread(d: number, t: number): void;
   /** 每帧调：到点就安排下一声嘎吱 */
   update(now: number): void;
-  /** 立刻安排一声嘎吱（测量用） */
-  creak(t: number, pan?: number, settle?: boolean): void;
+  /** 立刻安排一声嘎吱（测量用）。at 不给就随机：3D 时是听者周围的一点，否则是随机声像 */
+  creak(t: number, at?: Place, settle?: boolean): void;
+  /** 第三人称的整层增益（dB）和嘎吱节奏：engine.ts 在 3D 启用时调一次 */
+  setPresence(db: number, t: number): void;
   stop(t: number): void;
 }
 
 export function createAmbience(bus: Bus): Ambience {
   const s = new Snd(bus, { to: 'amb', level: AMB.level });
+  const presence = s.gain(1);
+  presence.connect(s.out);
   const master = s.gain(0);
-  master.connect(s.out);
+  master.connect(presence);
   let started = false;
   let nextCreak = Infinity;
+  let every = AMB.creakEvery;
+  let creakDb = 0;
   const lfo = (hz: number, depth: number, target: AudioParam) => s.osc('sine', hz, 0).connect(s.gain(depth)).connect(target);
 
   // 持续音
@@ -128,8 +144,17 @@ export function createAmbience(bus: Bus): Ambience {
   const howl = bandNoise(s, 0, undefined, 'bandpass', 560, 7, (b) => lfo(0.031, 80, b.frequency));
   howl.connect(s.gain(AMB.howl / 0.5)).connect(gust);
 
-  const placeCreak = (t: number, pan = rand(-0.7, 0.7), settle = rand(0, 1) < 0.3) => {
-    const c = new Snd(bus, { to: 'amb', pan, level: AMB.level, wet: AMB.creakWet });
+  /** 3D：听者周围 3–9 米的随机一点（夹在屋里），六成在地板上、四成在房梁上 */
+  const spot = (): Vec3 => {
+    const l = bus.space!.listener;
+    const a = rand(-Math.PI, Math.PI);
+    const r = rand(AMB.creakDist[0], AMB.creakDist[1]);
+    const clampTo = (v: number, hi: number) => Math.min(hi - 0.4, Math.max(0.4, v));
+    return { x: clampTo(l.x + Math.cos(a) * r, HOUSE_W), y: rand(0, 1) < 0.6 ? 0.05 : 2.35, z: clampTo(l.z + Math.sin(a) * r, HOUSE_D) };
+  };
+  const placeCreak = (t: number, at?: Place, settle = rand(0, 1) < 0.3) => {
+    const where = at ?? (bus.space?.active ? spot() : rand(-0.7, 0.7));
+    const c = new Snd(bus, { to: 'amb', at: where, level: AMB.level + creakDb, wet: AMB.creakWet });
     if (settle) {
       knock(c, c.out, t, AMB.creak * 1.2, 160, 0.04, 0.1);
       knock(c, c.out, t + rand(0.12, 0.4), AMB.creak * 0.8, 190, 0.035, 0.1);
@@ -148,7 +173,14 @@ export function createAmbience(bus: Bus): Ambience {
       started = true;
       master.gain.setValueAtTime(0, t);
       master.gain.linearRampToValueAtTime(1, t + fadeIn);
-      nextCreak = t + rand(AMB.creakEvery[0], AMB.creakEvery[1]);
+      nextCreak = t + rand(every[0], every[1]);
+    },
+    setPresence(d, t) {
+      presence.gain.setTargetAtTime(10 ** (d / 20), t, 1.5);
+      every = AMB.creakEvery3d;
+      creakDb = AMB.creak3d;
+      // 下一声别等俯视模式那么久
+      nextCreak = Math.min(nextCreak, t + rand(every[0], every[1]));
     },
     setDread(d, t) {
       const x = Math.min(1, Math.max(0, d));
@@ -159,10 +191,10 @@ export function createAmbience(bus: Bus): Ambience {
     update(now) {
       if (!started || now < nextCreak - 0.1) return;
       placeCreak(Math.max(now + 0.05, nextCreak));
-      nextCreak = Math.max(now, nextCreak) + rand(AMB.creakEvery[0], AMB.creakEvery[1]);
+      nextCreak = Math.max(now, nextCreak) + rand(every[0], every[1]);
     },
-    creak(t, pan, settle) {
-      placeCreak(t, pan, settle);
+    creak(t, at, settle) {
+      placeCreak(t, at, settle);
     },
     stop(t) {
       master.gain.setTargetAtTime(0, t, 0.3);

@@ -2,18 +2,30 @@
 // 主相机画的网格：地板 2（木 / 砖）+ 墙 1 + 玻璃 1 + 月光光斑 1 + 家具 1 + 屋外地面 1 + 屋外石头和灯柱 1 + 灯罩 1 = 9；
 // 每个投影灯的阴影 pass 再画 2 个（layer 1 的全高墙和屋顶、家具）。
 // 只投影的全高墙在 layer 1：任何要被墙挡住的投影灯都要 shadow.camera.layers.enable(1)（不能用 set(1)，那样会丢掉 layer 0）。
+//
+// 第三人称模式（rig 是 GhostRig，2026-10-28 改版）：墙全高、不降；多一块天花板（+1 个网格）；月光方向固定；
+// 墙、玻璃、家具、天花板在鬼魂周围和「镜头 → 鬼魂」视线上溶开、洞边结霜，鬼魂附近的表面带一点冷光（walls.ts 的 DISSOLVE）。
+// 每帧把鬼魂和镜头的位置写进 uniform，不重建材质。墙和家具各有挖洞 / 不挖洞两份网格（同一份几何体），
+// 每帧按 HOLE_TEST 只显示一份：附近不会有洞时不带 discard，开销和没有溶解时一样。
+// ?noghostfx 关掉溶解和冷光（量开销的对照），?noceiling 不要天花板。
+// 开销（2026-10-28，RTX 5070 Ti，WebGPU，High，1280×800，4 个访客冻结在原地；和「没有鬼魂效果、没有天花板」比）：
+// 走廊中间 +4.1%，鬼魂在墙里（整片墙挖洞）+7.0%，天花板本身约 +1%（见 .logs/ghost-perf.mjs）
 import * as THREE from 'three/webgpu';
 import {
   abs, attribute, float, floor, fract, fwidth, hash, length, max, min, mix, mod, mx_noise_float, positionLocal,
   select, sin, smoothstep, uniform, uv, vec2, vec3,
 } from 'three/tsl';
 import {
-  CELL, DOORWAYS, FRONT_DOOR, HOUSE_D, HOUSE_W, ROOMS, WALL_T, buildTiles, roomAt, type Rect, type RoomId,
+  CELL, DOORWAYS, FRONT_DOOR, HOUSE_D, HOUSE_W, ROOMS, WALL_H, WALL_T, buildTiles, roomAt, type Rect, type RoomId,
 } from '../config/house';
-import type { CameraRig, FrameCtx, Module, Quality, RenderCore } from '../engine/types';
+import { isGhostRig, type CameraRig, type FrameCtx, type Module, type Quality, type RenderCore } from '../engine/types';
+import type { Vec2 } from '../sim/types';
 import { createFurniture } from './furniture';
 import { PALETTE } from './palette';
-import { GeoBuilder, HEAD_H, OUTWARD, SILL_H, Side, TRANSOM_Y, createWalls, v3, type V3, type WindowRun } from './walls';
+import {
+  GeoBuilder, HEAD_H, OUTWARD, SILL_H, Side, TRANSOM_Y, applyDissolve, createWalls, ghostDissolve, ghostGlowAt, holeBoxes, holesNear, v3,
+  writeDissolve, type DissolveUniforms, type V3, type WindowRun,
+} from './walls';
 
 /** 墙体之外、墙格之内的那一条（地板伸进墙格这么多，正好接到墙面） */
 const M = (CELL - WALL_T) / 2;
@@ -59,7 +71,8 @@ const FLOOR: Record<RoomId, FloorStyle> = {
 /** 房间地板的米坐标范围：向四周伸进墙格 M，正好接到墙面 */
 const floorRect = (r: Rect) => ({ x0: r.x0 * CELL - M, z0: r.z0 * CELL - M, x1: r.x1 * CELL + M, z1: r.z1 * CELL + M });
 
-function buildFloors() {
+/** glow 不为空（第三人称模式）：鬼魂身上的冷光照到地板上（walls.ts 的 GHOST_GLOW） */
+function buildFloors(glow?: DissolveUniforms) {
   const wood = new GeoBuilder({ plank: 3 });
   const tile = new GeoBuilder({ tile: 2 });
   const up: V3 = [0, 1, 0];
@@ -129,6 +142,15 @@ function buildFloors() {
     const de = min(min(fract(gx), fract(gx).oneMinus()), min(fract(gz), fract(gz).oneMinus())).mul(s);
     const grout = smoothstep(0, fwidth(p.x).add(0.006), de).mul(0.5).add(0.5);
     tileMat.colorNode = vec3(tone.mul(grout));
+  }
+
+  if (glow) {
+    // 底色 = colorNode × 顶点色（材质开着 vertexColors，three 会自己乘；自发光要的底色这里再乘一遍）
+    const upN = vec3(0, 1, 0);
+    for (const m of [woodMat, tileMat]) {
+      const albedo = (m.colorNode as THREE.Node<'vec3'>).mul(attribute('color', 'vec3'));
+      m.emissiveNode = albedo.mul(ghostGlowAt(glow, positionLocal, upN));
+    }
   }
 
   const woodMesh = new THREE.Mesh(wood.build(), woodMat);
@@ -329,22 +351,74 @@ function buildMoonPatches(runs: WindowRun[]) {
   return { mesh, update, strength };
 }
 
+// ───────────────────────── 天花板（第三人称模式） ─────────────────────────
+
+/**
+ * 天花板：整栋房子一块，高 WALL_H（和墙顶齐平），法线朝下、只从下面看得见。暗色旧灰泥，带水渍似的大块深浅。
+ * 不投影（挡月光的是 walls.ts 那块只投影的屋顶，月光只从窗进来）。
+ * 不受光照：朝下的面只拿得到半球光的地面色（几乎是黑的），月光照不到，手电往下照、几乎照不到它；受光的话它占画面上方
+ * 一大片，每个像素都要算一遍十几盏灯和阴影（2026-10-28 实测 GPU +16%）。所以这里直接按「环境光下的亮度」画底色，
+ * 再加鬼魂的冷光和溶解的霜（ambient：底色乘这个 ≈ 半球光地面色照在朝下的面上的亮度）。
+ * 墙顶的顶面和它在同一高度，但朝上、从下面看是背面，被剔掉，不会互相闪
+ */
+const CEILING = {
+  color: mixC(PALETTE.wallpaper, PALETTE.wallTrim, 0.45),
+  /** 深浅：每米几个起伏、最多暗多少 */
+  stainFreq: 0.55,
+  stain: 0.3,
+  ambient: 0.003,
+};
+
+function buildCeiling(dissolve?: DissolveUniforms) {
+  const b = new GeoBuilder();
+  b.quad([0, WALL_H, 0], [HOUSE_W, WALL_H, 0], [HOUSE_W, WALL_H, HOUSE_D], [0, WALL_H, HOUSE_D], [0, -1, 0]);
+  // 不写深度：天花板上面什么也没有，深度测试照做（墙挡得住它），但深度图里这些像素还是「背景」，
+  // 后处理里按深度算的那几遍（SSAO 背景像素直接跳过）不会因为多了一块天花板而多算三分之一个画面（2026-10-28 实测）
+  const mat = new THREE.MeshBasicNodeMaterial({ fog: false, depthWrite: false });
+  mat.lights = false;
+  const p = positionLocal;
+  const n = mx_noise_float(vec3(p.x.mul(CEILING.stainFreq), p.z.mul(CEILING.stainFreq), 3.1)).mul(0.5).add(0.5);
+  const albedo = v3(CEILING.color).mul(n.mul(CEILING.stain).add(1 - CEILING.stain));
+  // 不写深度，挖洞（discard）也就不影响深度剔除：一直用挖洞的那份（镜头升到天花板底下时它也溶开）
+  if (dissolve) applyDissolve(mat, dissolve, p, vec3(0, -1, 0), albedo, { unlitAmbient: CEILING.ambient });
+  else mat.colorNode = albedo.mul(CEILING.ambient);
+  const mesh = new THREE.Mesh(b.build(), mat);
+  mesh.name = 'ceiling';
+  mesh.receiveShadow = false;
+  mesh.castShadow = false;
+  return mesh;
+}
+
 // ───────────────────────── 组装 ─────────────────────────
 
+/**
+ * 第三人称模式的月光方向（「从房子指向镜头」的水平方向，同娃娃屋 quarter = 0）：月亮在西北，光从北墙、西墙的窗进来。
+ * 第三人称的镜头跟着鬼魂到处转，月光不能跟着转
+ */
+const GHOST_MOON_VIEW: Vec2 = { x: Math.SQRT1_2, z: Math.SQRT1_2 };
+
 export function createHouseView(core: RenderCore, rig: CameraRig): Module {
+  const search = new URLSearchParams(location.search);
+  // 第三人称模式：rig 带着鬼魂（GhostRig）。墙全高、有天花板；溶解和冷光可以用 ?noghostfx 关掉
+  const ghostMode = isGhostRig(rig);
+  const dissolve = ghostMode && !search.has('noghostfx') ? ghostDissolve : undefined;
   const tiles = buildTiles();
   const root = new THREE.Group();
   root.name = 'house';
   core.houseRoot.add(root);
 
-  const floors = buildFloors();
+  const floors = buildFloors(dissolve);
   root.add(...floors);
 
-  const walls = createWalls(tiles, rig.viewDir);
+  const walls = createWalls(tiles, rig.viewDir, { fullHeight: ghostMode, dissolve });
   root.add(walls.group, walls.shadowCaster);
 
-  const furniture = createFurniture(tiles);
+  const furniture = createFurniture(tiles, dissolve);
   root.add(furniture.mesh);
+  if (furniture.solid) root.add(furniture.solid);
+
+  const ceiling = ghostMode && !search.has('noceiling') ? buildCeiling(dissolve) : null;
+  if (ceiling) root.add(ceiling);
 
   const outdoors = buildOutdoors();
   root.add(...outdoors.objects);
@@ -371,8 +445,9 @@ export function createHouseView(core: RenderCore, rig: CameraRig): Module {
 
   const L = new THREE.Vector3();
   const aimMoon = () => {
-    // 光线的水平方向 = 从远墙指向镜头（viewDir）再偏一点，这样永远从远墙的窗照进来
-    const a = Math.atan2(rig.viewDir.z, rig.viewDir.x) + MOON.yawOffset;
+    // 光线的水平方向 = 从远墙指向镜头（viewDir）再偏一点，这样永远从远墙的窗照进来；第三人称模式固定不动
+    const vd = ghostMode ? GHOST_MOON_VIEW : rig.viewDir;
+    const a = Math.atan2(vd.z, vd.x) + MOON.yawOffset;
     const ce = Math.cos(MOON.elevation);
     L.set(Math.cos(a) * ce, -Math.sin(MOON.elevation), Math.sin(a) * ce);
     const R = 30;
@@ -391,11 +466,30 @@ export function createHouseView(core: RenderCore, rig: CameraRig): Module {
   applyQuality(core.quality);
   aimMoon();
 
+  // 第三人称：镜头位置换到房屋坐标（houseRoot 只有平移，挂在场景根上）；
+  // 墙、家具附近会不会有洞（HOLE_TEST），不会就换上不挖洞的那份材质（省掉 discard 的开销）
+  const camPos = new THREE.Vector3();
+  const boxes = holeBoxes(tiles);
+  const writeGhost = (ctx: FrameCtx) => {
+    if (!dissolve || !isGhostRig(rig)) return;
+    rig.camera.getWorldPosition(camPos);
+    core.houseRoot.updateWorldMatrix(true, false);
+    core.houseRoot.worldToLocal(camPos);
+    const ortho = (rig.camera as { isOrthographicCamera?: boolean }).isOrthographicCamera === true;
+    writeDissolve(dissolve, rig.ghost, camPos, ortho, ctx.time);
+    const near = holesNear(boxes, rig.ghost, camPos, ortho);
+    walls.setHoles(near.walls);
+    furniture.setHoles(near.furniture);
+  };
+
   let flicker = 0;
   return {
     update(ctx: FrameCtx) {
-      walls.update(ctx.dt, rig.viewDir);
-      aimMoon();
+      if (ghostMode) writeGhost(ctx);
+      else {
+        walls.update(ctx.dt, rig.viewDir);
+        aimMoon();
+      }
       // 门廊灯：极轻的油灯式摇曳
       flicker += ctx.dt;
       outdoors.porch.intensity = PORCH.intensity * (0.93 + 0.05 * Math.sin(flicker * 7.3) + 0.03 * Math.sin(flicker * 17.9 + 1.3));
@@ -407,7 +501,8 @@ export function createHouseView(core: RenderCore, rig: CameraRig): Module {
       walls.dispose();
       furniture.dispose();
       outdoors.dispose();
-      for (const f of floors) { f.geometry.dispose(); (f.material as THREE.Material).dispose(); }
+      if (dissolve) writeDissolve(dissolve, null, camPos, false, 0);
+      for (const f of [...floors, ...(ceiling ? [ceiling] : [])]) { f.geometry.dispose(); (f.material as THREE.Material).dispose(); }
       patches.mesh.geometry.dispose();
       (patches.mesh.material as THREE.Material).dispose();
       moon.dispose();

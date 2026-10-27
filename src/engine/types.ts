@@ -37,7 +37,7 @@ export interface GhostState {
   inWall: boolean;
 }
 
-/** 第三人称镜头：仍然实现 CameraRig（rotate / punch 等对它可以是空操作），多一个鬼魂状态 */
+/** 第三人称镜头：仍然实现 CameraRig（rotate 等对它可以是空操作），多一个鬼魂状态 */
 export interface GhostRig extends CameraRig {
   readonly ghost: GhostState;
   /** 指针锁定后鼠标转向；开场点击时调用（必须在用户手势里） */
@@ -63,12 +63,6 @@ export interface RenderCore {
     /** 暗角泛起一圈颜色再退去（吓跑瞬间用暗红） */
     vignettePulse(strength: number, color?: number): void;
     /**
-     * 景深焦点。target 为房屋米坐标（opts.height 为离地高度，默认 0.8 米）；opts.strength 0..1 决定焦外虚化多强
-     * （1 = 惊吓推近时的强度，悬停时用小一些的值）。传 null 回到常态：高画质下是常开的微缩景深，低画质下没有景深。
-     * 焦点位置和强度在 fx 内部平滑过渡（opts.smoothTime 秒，默认 0.25），调用方可以每帧调也可以只在变化时调
-     */
-    focus(target: Vec2 | null, opts?: { height?: number; strength?: number; smoothTime?: number }): void;
-    /**
      * 开场显影：progress 0 = 画面里只剩月光照亮的窗户和门廊灯，1 = 正常画面。origin 为光从哪里铺开
      * （房屋米坐标，默认前门外）。由镜头编排每帧驱动，fx 自己不做动画
      */
@@ -76,9 +70,9 @@ export interface RenderCore {
   };
 }
 
-/** 正交斜俯视相机（engine/camera.ts 产出） */
+/** 镜头：娃娃屋的正交斜俯视（engine/camera.ts）或第三人称的透视（engine/ghostRig.ts） */
 export interface CameraRig {
-  camera: THREE.OrthographicCamera;
+  camera: THREE.OrthographicCamera | THREE.PerspectiveCamera;
   /** 0..3：方位角 = 45° + quarter × 90°。quarter = 0 时相机在房子东南方向往西北看 */
   readonly quarter: number;
   /** 相机在水平面上「从房子中心指向相机」的单位方向（房屋坐标）；旋转过渡中会连续变化 */
@@ -88,20 +82,16 @@ export interface CameraRig {
   zoom(factor: number): void;
   /**
    * 震动：往创伤值（0..1，加完封顶 1）里加 amount。创伤值每秒线性减 1，镜头按创伤值² 小角度地抖（只转不移），
-   * 像摄影师被吓得手一缩。吓跑 0.6，惊吓 0.3–0.5，尖叫传染 0.25（juice.ts 的 TRAUMA）
+   * 像摄影师被吓得手一缩。只有吓跑会调（juice.ts 的 TRAUMA.flee = 0.6，减少动态效果时再乘 0.55）；
+   * 娃娃屋镜头满幅横滚 0.6°，吓跑那一下约 0.2°。2026-10-28 起惊吓、尖叫传染不再震，镜头也不再冲镜推近
    */
   shake(amount: number): void;
-  /**
-   * 冲镜：快速推近并偏向 target（房屋米坐标），停一下再缓缓退回。strength 0..1 决定推多近、偏多少。
-   * 播放中再来一次：从当前位置平滑转向新目标；比画面上正在播的弱的忽略。返回这次是否被采用（被忽略时 false）
-   */
-  punch(target: Vec2, strength: number): boolean;
   /** 开场：镜头从高处、拉远的位置缓缓降到正常位置 */
   intro(seconds: number): void;
   /** quarter 改变时（旋转开始时）回调 */
   onRotate(cb: (quarter: number) => void): void;
   update(dt: number): void;
   resize(w: number, h: number): void;
-  /** 房屋米坐标 → 屏幕像素坐标（相对画布左上角）；y 为高度（米） */
+  /** 房屋米坐标 → 屏幕像素坐标（相对画布左上角）；y 为高度（米）。透视镜头下点在镜头背后时 x、y 都是 NaN */
   toScreen(p: Vec2, y?: number): { x: number; y: number };
 }

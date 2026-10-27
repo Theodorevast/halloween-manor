@@ -5,6 +5,9 @@
 // 按「密度随高度指数衰减」解析积分出不透明度。这样：
 // - 墙脚、家具脚、人的腿和雾的交界连续地变淡，没有横切的硬边（几张叠起来的雾片会像卡片插在墙里）；
 // - 雾顶低于所有墙顶，墙顶永远露在雾上面，平面图看得清；深度跟着镜头走，四个方向一样。
+// - 娃娃屋的正交相机和第三人称的透视相机都要对：视线方向（正交处处相同，透视逐顶点从相机发散）、深度换算、
+//   沿视线的距离都按 persp 这个 uniform 在两种算法之间选，每次画之前按这一次的相机设（同一份着色器，不重编）。
+//   第三人称从齐眼高度斜着看，远处的地面视线贴着雾走得很长，雾自然变浓；镜头近处的雾按距离变薄，脚下的地板看得清（FOG.near）
 // 性能（场景是填充率瓶颈：约 14 盏灯，每个像素都要算一遍）：
 // - 噪声、密度、光照全在顶点着色器里算（high 0.15 米一格，约 3 万个顶点），片元只读一次深度、做几次乘加；
 // - 光不走 three 的灯光系统：每帧从场景里读出最多 4 支手电（每支两层光锥）和 4 盏点光（台灯、门廊灯、镜子的闪光），
@@ -14,9 +17,9 @@
 // 在同一个顶点着色器里改噪声的取样点和密度，不加 draw call（见 DRAFT 和 draftField）。
 import * as THREE from 'three/webgpu';
 import {
-  abs, attribute, cameraFar, cameraNear, clamp, cos, dot, exp, float, floor, length, max, min, mx_noise_float,
-  orthographicDepthToViewZ, positionLocal, positionView, sin, smoothstep, sqrt, uniform, varying, vec3,
-  viewportDepthTexture,
+  abs, attribute, cameraFar, cameraNear, clamp, cos, dot, exp, float, floor, length, max, min, mix, mx_noise_float,
+  normalize, orthographicDepthToViewZ, perspectiveDepthToViewZ, positionLocal, positionView, sin, smoothstep, sqrt,
+  uniform, varying, vec3, viewportDepthTexture,
 } from 'three/tsl';
 import {
   CELL, DOORWAYS, FRONT_DOOR, GRID_H, GRID_W, HOUSE_D, HOUSE_W, PROPS, ROOMS, Tile, WALL_CUT_H, WALL_T, buildTiles, idx, inGrid,
@@ -75,6 +78,23 @@ export const FOG = {
   phaseG: 0.3,
   /** 雾里的光按这个高度取样（指数分布的雾，平均高度约等于 scaleH） */
   sampleY: 0.1,
+  /**
+   * 视线俯角的正弦最小按这个算：贴着地面的视线在雾里走得无限长，不夹的话远处一片死白；
+   * 也限制了「雾顶的顶点 → 取样点」的距离（(top − sampleY) / minSin）。娃娃屋镜头俯角 35°（0.57），碰不到
+   */
+  minSin: 0.2,
+  /**
+   * 第三人称（透视相机）时的调整。镜头离地约 2 米、几乎平视（ghostRig.ts：俯 4°、竖直视角 60°），
+   * 看到的地面大多是 0.1–0.4 的掠射角，同样的雾按俯视调的密度会在 5 米外连成一片发白的雾板，地板、访客的脚都看不见。
+   * 所以：密度乘 density，最浓不超过 maxAlpha，掠射角最小按 minSin 算（光程最多是俯视时的 1.9 倍）。
+   * 娃娃屋（正交相机）照旧用上面的值
+   */
+  eye: { density: 0.7, maxAlpha: 0.45, minSin: 0.3 },
+  /**
+   * 离镜头近的雾变薄：雾顶上的点离镜头 from 米以内只剩 thin 倍的密度，到 to 米恢复。
+   * 第三人称鬼魂脚下、身边的地板要看得清；娃娃屋镜头在 40 米外，不受影响
+   */
+  near: { from: 1.2, to: 4.5, thin: 0.35 },
   /**
    * 每档的网格：顶点间距（米）；屋外的雾离外墙 fade[0] 米开始变淡、fade[1] 米完全没有（屋外地面那圈 7.5 米左右融进黑夜）。
    * low 档在纯 CPU 软件渲染下，开销主要是雾盖住的像素数和三角形数：网格放粗、屋外收窄
@@ -233,9 +253,14 @@ const colU = () => uniform(new THREE.Color(0, 0, 0));
 function makeUniforms() {
   return {
     time: uniform(0),
-    /** 相机视线方向（房屋坐标，单位向量，y < 0）和它的俯角正弦 */
+    /** 相机视线方向（房屋坐标，单位向量，y < 0）：正交相机的视线处处是它 */
     fwd: uniform(new THREE.Vector3(0, -0.57, -0.82)),
-    sinE: uniform(0.57),
+    /** 相机位置（房屋坐标）：透视相机的视线从这里发散 */
+    camPos: uniform(new THREE.Vector3(0, 20, 0)),
+    /** 这一次画雾的相机：1 = 透视，0 = 正交 */
+    persp: uniform(0),
+    /** 第三人称时的调整（FOG.eye：密度倍数、最浓、最小掠射角正弦），做成 uniform 是为了 ?debug 下能现调 */
+    eye: uniform(new THREE.Vector3(FOG.eye.density, FOG.eye.maxAlpha, FOG.eye.minSin)),
     ambient: uniform(FOG.ambient.clone()),
     scatter: uniform(FOG.scatter),
     torches: Array.from({ length: TORCHES }, () => ({
@@ -368,8 +393,11 @@ function fogMaterial(u: Uniforms, octaves: number, drafts = true) {
 
   // —— 顶点：噪声、密度、雾里的光 ——
   const P = positionLocal;
-  // 视线从雾顶往下走到 sampleY 高度的那一点：雾主要在这附近，噪声和光都在这里取样，旋转镜头时雾不会相对地板滑动
-  const S = P.add(u.fwd.mul(float(FOG.top - FOG.sampleY).div(u.sinE)));
+  // 经过这个顶点的视线（房屋坐标，单位向量）：正交相机处处是相机朝向，透视相机从相机位置发散
+  const ray = normalize(mix(u.fwd, P.sub(u.camPos), u.persp));
+  const sinV = max(ray.y.negate(), mix(float(FOG.minSin), u.eye.z, u.persp));
+  // 视线从雾顶往下走到 sampleY 高度的那一点：雾主要在这附近，噪声和光都在这里取样，镜头转动、移动时雾不会相对地板滑动
+  const S = P.add(ray.mul(float(FOG.top - FOG.sampleY).div(sinV)));
   const Q = P.add(S).mul(0.5);
   const t = u.time;
   // 扰动只挪噪声的取样点（雾的花纹被拧、被推），光照仍按雾真正所在的位置 S 算
@@ -402,7 +430,7 @@ function fogMaterial(u: Uniforms, octaves: number, drafts = true) {
   // 浓的地方也更高，雾面起伏
   const hs = float(FOG.scaleH).mul(patch.mul(0.4).add(0.75).add(detail.mul(0.12)));
 
-  const toCam = u.fwd.negate();
+  const toCam = ray.negate();
   let light: V3 = vec3(0, 0, 0);
   for (const tc of u.torches) {
     const v = S.sub(tc.pos);
@@ -424,14 +452,20 @@ function fogMaterial(u: Uniforms, octaves: number, drafts = true) {
   const vRho = varying(rho, 'vFogRho');
   const vHs = varying(hs, 'vFogH');
   const vLight = varying(min(light.mul(u.scatter), vec3(8, 8, 8)), 'vFogLight');
+  const vSin = varying(sinV, 'vFogSin');
 
   // —— 片元：视线在雾里走过的那一段，解析积分 ——
-  const sceneZ = orthographicDepthToViewZ(viewportDepthTexture().x, cameraNear, cameraFar);
-  const along = max(positionView.z.sub(sceneZ), 0); // 正交相机：深度差就是沿视线的距离
-  const yEnd = max(float(FOG.top).sub(along.mul(u.sinE)), 0); // 视线碰到东西（或地面）时的高度
-  const tau = vRho.mul(vHs).div(u.sinE).mul(exp(yEnd.div(vHs).negate()).sub(exp(float(FOG.top).div(vHs).negate())));
+  const depth = viewportDepthTexture().x;
+  const sceneZ = mix(orthographicDepthToViewZ(depth, cameraNear, cameraFar), perspectiveDepthToViewZ(depth, cameraNear, cameraFar), u.persp);
+  // 沿视线的距离：正交相机深度差就是距离；透视相机的视线是斜的，再除以视线和视轴夹角的余弦
+  const slant = mix(float(1), length(positionView).div(max(positionView.z.negate(), 1e-4)), u.persp);
+  const along = max(positionView.z.sub(sceneZ), 0).mul(slant);
+  const yEnd = max(float(FOG.top).sub(along.mul(vSin)), 0); // 视线碰到东西（或地面）时的高度
+  const tau = vRho.mul(vHs).div(vSin).mul(exp(yEnd.div(vHs).negate()).sub(exp(float(FOG.top).div(vHs).negate())));
+  const nearK = mix(float(FOG.near.thin), float(1), smoothstep(FOG.near.from, FOG.near.to, length(positionView)))
+    .mul(mix(float(1), u.eye.x, u.persp));
   mat.colorNode = vLight.add(u.ambient);
-  mat.opacityNode = min(float(1).sub(exp(tau.negate())), FOG.maxAlpha);
+  mat.opacityNode = min(float(1).sub(exp(tau.mul(nearK).negate())), mix(float(FOG.maxAlpha), u.eye.y, u.persp));
   return mat;
 }
 
@@ -642,7 +676,8 @@ export function createFogView(core: RenderCore, _rig: CameraRig): Module {
     inv.copy(core.houseRoot.matrixWorld).invert();
     camera.getWorldDirection(fwd).transformDirection(inv);
     u.fwd.value.copy(fwd);
-    u.sinE.value = Math.max(0.2, -fwd.y);
+    u.camPos.value.setFromMatrixPosition(camera.matrixWorld).applyMatrix4(inv);
+    u.persp.value = (camera as THREE.PerspectiveCamera).isPerspectiveCamera ? 1 : 0;
     const ts = torches.length > TORCHES
       ? [...torches].sort((x, y) => y.lights.reduce((s, l) => s + strength(l), 0) - x.lights.reduce((s, l) => s + strength(l), 0))
       : torches;

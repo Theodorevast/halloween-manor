@@ -1,6 +1,6 @@
 // 粒子：手电光束里的浮尘、肖像砸地扬起的粉尘、受惊访客呼出的白气（2026-10-27 电影感升级）。
 // 三样都是「哈希 + 时间」驱动的实例化精灵（SpriteNodeMaterial），每样一次绘制：
-// - 浮尘（particles/motes.ts）：几千颗，只在手电光锥里、墙这一侧亮；
+// - 浮尘（particles/motes.ts）：两千颗，只在手电光锥里、墙这一侧亮；
 // - 粉尘（particles/plaster.ts）：肖像砸地那一刻从画框四周喷出一团灰褐色的灰 + 几粒碎屑；
 // - 白气（particles/breath.ts）：恐惧值过了紧张线的人隔一会儿呼一小口，越怕喘得越急。
 // 灯光不走 three 的灯光系统（particles/light.ts，和雾同一套光锥和挡墙算法），材质都不受光照：灯的数量变了不重新编译。
@@ -9,6 +9,7 @@
 // main.ts 在开场按钮可用之后把它们显示出来真画一帧编好管线，第一次 update 起再按需要藏起来（没有粒子时不画；
 // 粉尘的软粒子要每帧拷一次深度，只在扬灰的两秒里拷）。
 // 粒子着色器里不用 select()（见 particles/common.ts 的 ge / lt）。
+// 娃娃屋（正交相机）和第三人称（透视相机）都要对：尺寸、软粒子、前向散射在每次画之前按这一次的相机换算（common.ts、light.ts）。
 // 性能（2026-10-27，本机 WebGPU，4 个访客，High，DPR 2，不锁帧率，同页轮流开关 16 轮）：常态（浮尘 + 呼气）±1% 以内，测不出；
 // 三样同时满载（每 0.25 秒全员呼气 + 连续扬灰）约 +3%。
 // 都是透明、不写深度；后处理以后要是加了 MRT（法线 / 速度），粒子不覆盖那些附件（common.ts 的 protectMRT）。
@@ -51,7 +52,7 @@ export function createParticlesView(core: RenderCore): Module {
   root.add(...objects);
   // 不进开场那次阻塞的预编译：main.ts 在开场按钮可用之后再把它们编好（冷启动省约 0.5 秒）
   for (const o of objects) o.userData.deferCompile = true;
-  // 画之前用这一次渲染的相机：屏幕像素换算成米、视线方向（开场下降、旋转、冲镜中都对得上）
+  // 画之前用这一次渲染的相机：屏幕像素换算成米、视线方向、相机类型（娃娃屋的旋转、第三人称镜头的移动中都对得上）
   let lastCamera: THREE.Camera | null = null;
   for (const o of objects) {
     o.onBeforeRender = (renderer, _scene, camera) => {

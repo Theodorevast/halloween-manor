@@ -1,8 +1,13 @@
 // 调试接口：地址带 ?debug 时挂到 window.__haunt，给冒烟测试和手动排查用。正常访问不挂
-import { AO, BLOOM, DOF, GRADE, GRAIN, REVEAL, type FxFlags } from './engine/postfx';
+import { AO, BLOOM, GRADE, GRAIN, REVEAL, type FxFlags } from './engine/postfx';
 import type { EngineCore } from './engine/renderer';
 import type { CameraRig, RenderCore } from './engine/types';
 import type { SimEvent, SpawnOptions, World, WorldState } from './sim/types';
+// 第三人称调试口用（见文件末尾 ghostDebug）
+import * as THREE from 'three/webgpu';
+import { HOUSE_D, HOUSE_W } from './config/house';
+import { ghostRigDebug, watchGhostUi } from './engine/ghostRig';
+import { isGhostRig, type GhostState } from './engine/types';
 
 export interface DebugDeps {
   world: World;
@@ -70,14 +75,15 @@ export function installDebug(d: DebugDeps) {
   (window as unknown as { __haunt: HauntDebug }).__haunt = api;
   Object.assign(api, cameraDebug(d));
   Object.assign(api, postDebug(d));
+  Object.assign(api, ghostDebug(d));
   console.info('[debug] window.__haunt 已就绪：state() / raw() / step(ms) / trigger(id) / spawn(opts) / rotate(dir) / setTimeScale(n)');
 }
 
-// ── 镜头与电影段落的调试口（电影感升级）：量呼吸、震动的角度，记下 fx.focus / fx.setReveal 收到的调用 ──
+// ── 镜头与电影段落的调试口（电影感升级）：量震动的角度，记下 fx.setReveal 收到的调用 ──
 export interface CameraDebug {
   /** 相机此刻的朝向（度）：az = 方位角（从房子中心指向相机，和 viewDir 同一个量），elev = 仰角，roll = 横滚 */
   camAngles(): { az: number; elev: number; roll: number };
-  /** 开始记录 fx.focus / fx.setReveal 的调用（包一层，照常转给原实现）；返回记录数组，之后的调用会追加进去 */
+  /** 开始记录 fx.setReveal 的调用（包一层，照常转给原实现）；返回记录数组，之后的调用会追加进去 */
   recordFx(): { t: number; fn: string; args: unknown[] }[];
 }
 
@@ -100,7 +106,7 @@ function cameraDebug(d: DebugDeps): CameraDebug {
       if (!wrapped) {
         wrapped = true;
         const fx = d.core.fx;
-        for (const fn of ['focus', 'setReveal'] as const) {
+        for (const fn of ['setReveal'] as const) {
           const orig = fx[fn].bind(fx) as (...a: unknown[]) => void;
           (fx as unknown as Record<string, (...a: unknown[]) => void>)[fn] = (...args: unknown[]) => {
             log.push({ t: performance.now(), fn, args: structuredClone(args) });
@@ -113,25 +119,22 @@ function cameraDebug(d: DebugDeps): CameraDebug {
   };
 }
 
-// ── 画面管线的调试口（电影感升级）：直接调 fx.focus / fx.setReveal，切换各效果（量性能、对比截图），读 GPU 时间 ──
+// ── 画面管线的调试口（电影感升级）：直接调 fx.setReveal，切换各效果（量性能、对比截图），读 GPU 时间 ──
 export interface PostDebug {
   fx: {
-    /** 焦点对到房屋 (x, z)；x 为 null 回到常态 */
-    focus(x: number | null, z?: number, strength?: number, height?: number, smoothTime?: number): void;
     /** 开场显影进度；给了 x、z 就改原点 */
     reveal(progress: number, x?: number, z?: number): void;
     /** 不给参数：读开关；给了：改开关（重建管线）。见 postfx.ts 的 FxFlags */
     flags(f?: Partial<FxFlags>): FxFlags | null;
     /** 上次 reset 以来平均每帧的 GPU 时间（要 ?gputime） */
     gpu(reset?: boolean): { ms: number; frames: number } | null;
-    focusState(): unknown;
-    /** 画面换成中间结果：0 正常，1 AO，2 景深 CoC（地址要带 ?fxview，否则没有效果） */
+    /** 画面换成中间结果：0 正常，1 AO（地址要带 ?fxview，否则没有效果） */
     view(v: number): void;
     /** 颗粒花样定住（A/B 截图做差时用） */
     freezeGrain(on: boolean): void;
     /** 临时改 AO 强度（null 恢复） */
     aoStrength(v: number | null): void;
-    /** 调参：改 postfx.ts 里某组常量（AO / DOF / GRADE / GRAIN / BLOOM / REVEAL）的字段，然后重建管线 */
+    /** 调参：改 postfx.ts 里某组常量（AO / GRADE / GRAIN / BLOOM / REVEAL）的字段，然后重建管线 */
     tune(group: string, values: Record<string, unknown>): unknown;
   };
 }
@@ -140,9 +143,6 @@ function postDebug(d: DebugDeps): PostDebug {
   const core = d.core as EngineCore;
   return {
     fx: {
-      focus(x, z = 0, strength, height, smoothTime) {
-        core.fx.focus(x === null ? null : { x, z }, { strength, height, smoothTime });
-      },
       reveal(progress, x, z) {
         core.fx.setReveal(progress, x !== undefined && z !== undefined ? { x, z } : undefined);
       },
@@ -152,7 +152,6 @@ function postDebug(d: DebugDeps): PostDebug {
         return { ...core.post.flags };
       },
       gpu: (reset) => core.gpuTime?.(reset) ?? null,
-      focusState: () => core.post?.focusState ?? null,
       view(v) {
         if (core.post) core.post.view = v;
       },
@@ -163,7 +162,7 @@ function postDebug(d: DebugDeps): PostDebug {
         if (core.post) core.post.aoStrength = v;
       },
       tune(group, values) {
-        const groups: Record<string, object> = { AO, DOF, GRADE, GRAIN, BLOOM, REVEAL };
+        const groups: Record<string, object> = { AO, GRADE, GRAIN, BLOOM, REVEAL };
         const g = groups[group];
         if (!g) return null;
         Object.assign(g, values);
@@ -172,4 +171,91 @@ function postDebug(d: DebugDeps): PostDebug {
       },
     },
   };
+}
+
+// ── 第三人称的调试口（2026-10-28 改版）：看鬼魂和镜头、摆鬼魂、对准物件、假装指针锁定（无头浏览器锁不上） ──
+export interface GhostDebug {
+  /** 第三人称时才有；娃娃屋俯视下为 null（测试靠它分辨走的是哪种镜头） */
+  ghost: {
+    /** 鬼魂状态（房屋米坐标）+ 视角 yaw / pitch（弧度，pitch 向下为正）、dist（米）、cam（镜头位置）、locked（鼠标在操控）、aim（准星下的物件） */
+    state(): GhostState & { yaw: number; pitch: number; dist: number; cam: { x: number; y: number; z: number }; locked: boolean; aim: string | null };
+    /** 把鬼魂放到房屋坐标 (x, z)，可选朝向（方向角）、俯仰；镜头立刻就位 */
+    place(x: number, z: number, heading?: number, pitch?: number): void;
+    /** 让准星对准物件（拾取盒的中心）。给了 from 就先把鬼魂挪到物件正面 from 米处、面朝物件。物件不存在时返回 false */
+    aimAt(id: string, opts?: { from?: number }): boolean;
+    /** 准星此刻对着的物件（够得着、看得见的才算；拾取器每帧更新一次，对准之后等一两帧再读） */
+    aimed(): string | null;
+    /** 镜头距离（米，1–4），立刻就位 */
+    zoom(dist: number): void;
+    /** 假装指针锁定：鼠标转向、准星、点击附身都照锁定时一样 */
+    fakeLock(on: boolean): void;
+    /** 房屋坐标 → 屏幕像素（在镜头背后时为 NaN） */
+    toScreen(x: number, z: number, y?: number): { x: number; y: number };
+    /** 在鬼魂的位置画一个半透明的占位身形（看构图用，鬼魂外形做好之前） */
+    proxy(on: boolean): void;
+  } | null;
+  /** 同 ghost.aimAt；娃娃屋俯视下返回 false */
+  aimAt(id: string, opts?: { from?: number }): boolean;
+}
+
+function ghostDebug(d: DebugDeps): GhostDebug {
+  const rig = isGhostRig(d.rig) ? d.rig : null;
+  const h = rig ? ghostRigDebug(rig) : null;
+  if (!rig || !h) return { ghost: null, aimAt: () => false };
+  let aim: string | null = null;
+  let locked = false;
+  watchGhostUi((s) => {
+    aim = s.aim;
+    locked = s.locked;
+  });
+  const box = new THREE.Box3();
+  const c = new THREE.Vector3();
+  /** 物件拾取盒的中心（房屋米坐标）和物件朝向；场景里找不到盒子就用物件位置、离地 0.8 米 */
+  const targetOf = (id: string) => {
+    const o = d.world.state.objects.find((x) => x.id === id);
+    if (!o) return null;
+    const hit = d.core.scene.getObjectByName(`hit:${id}`);
+    if (!hit) return { x: o.pos.x, y: 0.8, z: o.pos.z, facing: o.facing };
+    box.setFromObject(hit).getCenter(c);
+    return { x: c.x + HOUSE_W / 2, y: c.y, z: c.z + HOUSE_D / 2, facing: o.facing };
+  };
+  let proxy: THREE.Mesh | null = null;
+  const ghost: NonNullable<GhostDebug['ghost']> = {
+    state: () => ({ ...rig.ghost, ...h.view(), locked, aim }),
+    place: (x, z, heading, pitch) => h.place(x, z, heading, pitch),
+    aimAt(id, opts = {}) {
+      const t = targetOf(id);
+      if (!t) return false;
+      if (opts.from !== undefined) h.place(t.x + Math.cos(t.facing) * opts.from, t.z + Math.sin(t.facing) * opts.from, t.facing + Math.PI);
+      h.aim(t.x, t.y, t.z);
+      return true;
+    },
+    aimed: () => aim,
+    zoom: (dist) => h.setDist(dist),
+    fakeLock: (on) => h.fakeLock(on),
+    toScreen: (x, z, y = 0) => rig.toScreen({ x, z }, y),
+    proxy(on) {
+      if (on === (proxy !== null)) return;
+      if (proxy) {
+        proxy.removeFromParent();
+        proxy.geometry.dispose();
+        proxy = null;
+        return;
+      }
+      // 1.34 米高的胶囊，中心在鬼魂的浮动高度：大致是一个人形轮廓占的地方
+      const m = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.22, 0.9, 4, 12),
+        new THREE.MeshBasicNodeMaterial({ color: 0xcfdde6, transparent: true, opacity: 0.3, depthWrite: false }),
+      );
+      d.core.houseRoot.add(m);
+      proxy = m;
+      const follow = () => {
+        if (proxy !== m) return;
+        m.position.set(rig.ghost.x, rig.ghost.y, rig.ghost.z);
+        requestAnimationFrame(follow);
+      };
+      follow();
+    },
+  };
+  return { ghost, aimAt: ghost.aimAt };
 }

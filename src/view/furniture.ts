@@ -2,12 +2,14 @@
 // 模型坐标：正面朝 +z，x 是宽度方向，y 向上；摆放时按 yawFor(facing) 转向、平移到 rect 中心。
 // 填满 rect；背后贴着墙格时，背面再往后伸到墙面（墙体只有 WALL_T 厚，墙格靠屋里那 0.15 米本来就走不进去），
 // 不然书架、衣柜和墙之间会露一条缝。
+// 第三人称模式（传了 dissolve）：鬼魂穿过家具时，家具在它周围溶开、洞边结霜，和墙一样（walls.ts 的 DISSOLVE），
+// 洞比墙上的小一圈（DISSOLVE.furniture）；家具的影子照旧。
 import * as THREE from 'three/webgpu';
-import { attribute } from 'three/tsl';
+import { attribute, positionLocal } from 'three/tsl';
 import { CELL, FURNITURE, Tile, WALL_T, idx, inGrid, type Furniture, type FurnitureKind } from '../config/house';
 import { yawFor } from '../lib/angle';
 import { PALETTE } from './palette';
-import { GeoBuilder } from './walls';
+import { DISSOLVE, GeoBuilder, applyDissolve, type DissolveUniforms } from './walls';
 
 /**
  * 家具的关键高度（米，从地板算）。物件任务按这些数摆东西：八音盒放在床头柜顶面上
@@ -430,10 +432,15 @@ function backedByWall(f: Furniture, tiles: Uint8Array): boolean {
 
 export interface FurnitureView {
   mesh: THREE.Mesh;
+  /** 第三人称模式：同一份几何体配不挖洞的材质（附近没有洞的帧用它，见 walls.ts 的 HOLE_TEST）；娃娃屋模式为 null */
+  solid: THREE.Mesh | null;
+  /** 第三人称模式：这一帧显示挖洞的那份（true）还是不挖洞的那份；两份开局都显示着（一起预编译） */
+  setHoles(on: boolean): void;
   dispose(): void;
 }
 
-export function createFurniture(tiles: Uint8Array): FurnitureView {
+/** dissolve 不为空：第三人称模式，鬼魂周围溶开（见 walls.ts 的 DISSOLVE） */
+export function createFurniture(tiles: Uint8Array, dissolve?: DissolveUniforms): FurnitureView {
   const b = new GeoBuilder({ surf: 2 });
   const kit = new Kit(b);
   const back = (CELL - WALL_T) / 2;
@@ -451,19 +458,37 @@ export function createFurniture(tiles: Uint8Array): FurnitureView {
   b.transform = null;
 
   const geometry = b.build();
-  const material = new THREE.MeshStandardNodeMaterial({ vertexColors: true, flatShading: true });
-  const surf = attribute('surf', 'vec2');
-  material.roughnessNode = surf.x;
-  material.metalnessNode = surf.y;
-  const mesh = new THREE.Mesh(geometry, material);
+  const makeMaterial = (masked: boolean) => {
+    // 溶解要拿底色去混霜：顶点色自己乘进 colorNode，材质不再开 vertexColors（否则会再乘一遍）
+    const m = new THREE.MeshStandardNodeMaterial({ vertexColors: !dissolve, flatShading: true });
+    const surf = attribute('surf', 'vec2');
+    m.roughnessNode = surf.x;
+    m.metalnessNode = surf.y;
+    // 几何体就在房屋坐标里（网格本身没有变换），位置、法线属性就是房屋坐标（法线直接读属性，理由见 walls.ts 的 wallMaterial）
+    if (dissolve) {
+      applyDissolve(m, dissolve, positionLocal, attribute('normal', 'vec3'), attribute('color', 'vec3'), { holeScale: DISSOLVE.furniture, masked });
+    }
+    return m;
+  };
+  const mesh = new THREE.Mesh(geometry, makeMaterial(true));
   mesh.name = 'furniture';
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
+  const solid = dissolve ? new THREE.Mesh(geometry, makeMaterial(false)) : null;
+  if (solid) solid.name = 'furniture-solid';
+  for (const m of solid ? [mesh, solid] : [mesh]) {
+    m.castShadow = true;
+    m.receiveShadow = true;
+  }
   return {
     mesh,
+    solid,
+    setHoles(on) {
+      if (!solid) return;
+      mesh.visible = on;
+      solid.visible = !on;
+    },
     dispose() {
       geometry.dispose();
-      material.dispose();
+      for (const m of solid ? [mesh, solid] : [mesh]) (m.material as THREE.Material).dispose();
     },
   };
 }

@@ -1,8 +1,10 @@
-// 三种粒子共用的小工具：按实例编号取随机数、画面空间的尺寸换算、正交相机下的软粒子、保护后处理的 MRT 附件。
+// 三种粒子共用的小工具：按实例编号取随机数、画面空间的尺寸换算、软粒子、保护后处理的 MRT 附件。
+// 娃娃屋是正交相机、第三人称是透视相机：尺寸换算靠裁剪空间的 w（正交恒为 1，透视是到镜头的深度），
+// 软粒子的深度换算按每次画之前设好的 persp 在两种公式之间选（同一份着色器，不重编）
 import * as THREE from 'three/webgpu';
 import {
-  cameraNear, cameraFar, float, hash, instanceIndex, modelViewMatrix, mrt, orthographicDepthToViewZ, output, smoothstep,
-  step, uniform, varying, vec4, viewportDepthTexture,
+  cameraFar, cameraNear, cameraProjectionMatrix, float, hash, instanceIndex, max, mix, modelViewMatrix, mrt,
+  orthographicDepthToViewZ, output, perspectiveDepthToViewZ, smoothstep, step, uniform, varying, vec4, viewportDepthTexture,
 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
@@ -23,7 +25,10 @@ export const rnd = (k: number, seed: F | number = 0): F =>
 export const ge = (a: F, b: F | number): F => step(b, a);
 export const lt = (a: F, b: F | number): F => float(1).sub(step(b, a));
 
-/** 每帧更新：一个 CSS 像素 / 一个设备像素在画面上是多少米（正交相机，和深度无关） */
+/**
+ * 每次画之前更新：一个 CSS 像素在画面上是多少米——正交相机就是这个数，透视相机是离镜头 1 米处的这个数，
+ * 要再乘到镜头的深度（见 clipW）
+ */
 export function makeScreenUniforms() {
   return {
     worldPerCssPx: uniform(0.01),
@@ -33,27 +38,37 @@ export function makeScreenUniforms() {
 }
 export type ScreenUniforms = ReturnType<typeof makeScreenUniforms>;
 
+/** 这一次画粒子的相机：1 = 透视，0 = 正交（软粒子的深度换算用）。所有粒子共用，updateScreenUniforms 里设 */
+const persp = uniform(0);
+
 const _size = new THREE.Vector2();
 export function updateScreenUniforms(s: ScreenUniforms, renderer: THREE.WebGPURenderer, camera: THREE.Camera) {
   renderer.getSize(_size);
-  // 正交投影矩阵的 [1][1] = 2 / (top − bottom)（zoom 已经算进 top / bottom）：画面高 2 / P11 米
+  // 投影矩阵的 [1][1]：正交是 2 / (top − bottom)（zoom 已经算进去），画面高 2 / P11 米；
+  // 透视是 1 / tan(半视角)，离镜头 1 米处画面高 2 / P11 米
   const p11 = camera.projectionMatrix.elements[5];
   s.worldPerCssPx.value = p11 > 0 ? 2 / (p11 * Math.max(1, _size.y)) : 0.01;
   s.pixelRatio.value = renderer.getPixelRatio();
+  persp.value = (camera as THREE.PerspectiveCamera).isPerspectiveCamera ? 1 : 0;
 }
 
-/** 粒子中心的视空间 z（顶点里算好传给片元）。正交相机下正对镜头的面片上每个片元都是这个深度 */
+/** 点 p（物体局部坐标）在裁剪空间的 w：正交相机恒为 1，透视相机是到镜头的深度。屏幕上的米数 × 它 = 那个深度处的米数 */
+export const clipW = (p: V3): F =>
+  max((cameraProjectionMatrix.mul(modelViewMatrix.mul(vec4(p, 1))) as unknown as THREE.Node<'vec4'>).w, 0) as unknown as F;
+
+/** 粒子中心的视空间 z（顶点里算好传给片元）。精灵面片正对镜头，面片上每个片元都是这个深度（两种相机都是） */
 export const centerViewZ = (center: V3): F => varying((modelViewMatrix.mul(vec4(center, 1)) as unknown as THREE.Node<'vec4'>).z, 'vPartViewZ') as unknown as F;
 
 /**
- * 软粒子（正交相机版）：粒子面片和后面的地板 / 墙 / 家具相交的地方，按两者的视空间深度差在 dist 米内淡掉，
- * 不出现面片插进地板的硬直线。r186 的 softParticles() 按透视相机算深度，这里照 fog.ts 用 orthographicDepthToViewZ。
+ * 软粒子：粒子面片和后面的地板 / 墙 / 家具相交的地方，按两者的视空间深度差在 dist 米内淡掉，
+ * 不出现面片插进地板的硬直线。r186 的 softParticles() 只按透视相机算深度，这里两种都算、按 persp 选（和 fog.ts 一样）。
  * 深度贴图节点几个材质共用一个：每次渲染只拷一次深度（只有画到用它的物体时才拷，粒子不在时整个物体藏起来）
  */
 let sharedDepth: THREE.Node<'vec4'> | null = null;
 export function softFade(viewZ: F, dist: F | number): F {
   sharedDepth ??= viewportDepthTexture() as unknown as THREE.Node<'vec4'>;
-  const sceneZ = orthographicDepthToViewZ(sharedDepth.x, cameraNear, cameraFar);
+  const d = sharedDepth.x;
+  const sceneZ = mix(orthographicDepthToViewZ(d, cameraNear, cameraFar), perspectiveDepthToViewZ(d, cameraNear, cameraFar), persp);
   return smoothstep(0, dist, viewZ.sub(sceneZ));
 }
 

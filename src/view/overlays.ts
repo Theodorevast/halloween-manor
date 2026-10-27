@@ -1,15 +1,37 @@
 // 场景叠层（HTML，挂在 #overlay 里，不接收指针）：访客头顶的名牌和恐惧条、物件上方的眼睛和冷却圆环、悬停标签。
 // 每帧都要跟着相机走，所以 DOM 只在第一次需要时创建，之后放进池子复用；
-// 每帧只改 transform，文字、颜色、类名只在真的变化时才写
+// 每帧只改 transform，文字、颜色、类名只在真的变化时才写。
+// 第三人称（透视镜头）下：在镜头背后的不显示（toScreen 给 NaN），隔着墙（鬼魂看不见）的不显示——
+// 墙全高以后，名牌、眼睛不该隔着墙露出来，找人靠声音（设计文档第 9 节）——离鬼魂远的淡出；
+// 镜头差不多平视，标记改挂在每种物件的顶上（俯视时统一 1.2 米就够了）
+import { CHARACTER } from '../config/character';
 import { SCARES } from '../config/scares';
 import { STRINGS } from '../config/strings';
 import { FEAR } from '../config/visitors';
-import type { CameraRig, FrameCtx, Module } from '../engine/types';
-import type { NpcState, ScareObjectState } from '../sim/types';
+import { ghostSees } from '../engine/ghostRig';
+import { isGhostRig, type CameraRig, type FrameCtx, type Module } from '../engine/types';
+import type { NpcState, ScareObjectState, ScareType, Vec2 } from '../sim/types';
 
 /** 名牌、物件标记离地多高（米）——计划 Task 7 */
 const PLATE_Y = 1.45;
 const MARK_Y = 1.2;
+/**
+ * 第三人称：名牌离地多高——镜头差不多平视，头顶到名牌的空当在画面上不再被压扁，所以贴近头顶一点（访客身高 + 0.2 米）。
+ * 按 targetHeight 算：占位狐狸因为身长上限只有约 0.72 米高，名牌会显得高一些，换成人形吉祥物后正好
+ */
+const GHOST_PLATE_Y = CHARACTER.targetHeight + 0.2;
+/** 第三人称：标记和悬停标签挂多高（米）——各物件顶上再高 0.15–0.2 米（落地灯 1.5、八音盒连床头柜约 0.7、门 1.98……） */
+const GHOST_MARK_Y: Record<ScareType, number> = {
+  musicBox: 0.95,
+  door: 2.15,
+  lamp: 1.7,
+  rockingChair: 1.35,
+  portrait: 2.05,
+  mirror: 1.85,
+};
+/** 第三人称：离鬼魂这么远（米）开始淡出，到 FADE_FAR 完全不显示 */
+const FADE_NEAR = 7;
+const FADE_FAR = 10;
 /** 恐惧值到这里，恐惧条从橙色变成血红 */
 const DREAD_AT = FEAR.dread;
 /** 冷却圆环半径（SVG 单位，标记框 32 × 32） */
@@ -45,8 +67,22 @@ const div = (cls: string, parent: HTMLElement) => {
 };
 const at = (x: number, y: number) => `translate3d(${Math.round(x)}px,${Math.round(y)}px,0)`;
 
+/**
+ * 远近、遮挡淡出写在内层元素上（外层的 is-on 管池子里的显隐和淡入淡出，互不干扰；内层的 opacity 过渡在 styles.css）。
+ * fade 按 0.05 一档，只在换档时写
+ */
+const setFade = (el: HTMLElement, cur: number, f: number) => {
+  if (f === cur) return cur;
+  el.style.opacity = f >= 1 ? '' : String(f);
+  return f;
+};
+
 interface Plate {
   el: HTMLDivElement;
+  /** 内层（.ov-plate-in）：远近淡出写在它上面 */
+  inner: HTMLDivElement;
+  /** 此刻的远近淡出（0..1） */
+  fade: number;
   name: HTMLSpanElement;
   tag: HTMLSpanElement;
   fill: HTMLElement;
@@ -64,6 +100,8 @@ interface Plate {
 
 interface Mark {
   el: HTMLDivElement;
+  inner: HTMLDivElement;
+  fade: number;
   arc: SVGCircleElement;
   cooling: boolean;
   seen: boolean;
@@ -73,9 +111,23 @@ interface Mark {
 
 export function createOverlays(
   root: HTMLElement,
-  rig: Pick<CameraRig, 'toScreen'>,
+  rig: CameraRig,
 ): Module & { setHover(id: string | null): void; setHidden(hidden: boolean): void } {
   root.classList.add('ov');
+  const ghost = isGhostRig(rig) ? rig.ghost : null;
+  const plateY = ghost ? GHOST_PLATE_Y : PLATE_Y;
+  const markY = (o: ScareObjectState) => (ghost ? GHOST_MARK_Y[o.type] : MARK_Y);
+  /**
+   * 0 = 不显示（在镜头背后、隔着墙、离鬼魂太远），1 = 照常，中间是远处的淡出。俯视镜头下永远是 1。
+   * 隔墙按鬼魂的视线算（和拾取一样），不按镜头：镜头常常隔着一面溶开的墙跟在后面
+   */
+  const fadeOf = (p: Vec2, s: { x: number; y: number }) => {
+    if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) return 0;
+    if (!ghost) return 1;
+    const t = (FADE_FAR - Math.hypot(p.x - ghost.x, p.z - ghost.z)) / (FADE_FAR - FADE_NEAR);
+    if (t <= 0 || !ghostSees(ghost, p)) return 0;
+    return t >= 1 ? 1 : Math.round(t * 20) / 20;
+  };
 
   // ── 名牌池 ───────────────────────────────────────────
   const plates = new Map<number, Plate>();
@@ -94,7 +146,7 @@ export function createOverlays(
     const fill = div('ov-bar-fill', bar);
     // 「紧张」门槛的刻度：过了这条线访客走得更快、手电发抖
     div('ov-bar-tick', bar).style.left = `${(FEAR.nervous / FEAR.max) * 100}%`;
-    return { el, name, tag, fill, shown: 0, color: '', fleeing: false, frame: -1, w: 0, lift: 0 };
+    return { el, inner, fade: 1, name, tag, fill, shown: 0, color: '', fleeing: false, frame: -1, w: 0, lift: 0 };
   };
 
   const acquire = (n: NpcState): Plate => {
@@ -122,7 +174,7 @@ export function createOverlays(
     const inner = div('ov-mark-in', el);
     inner.innerHTML = RING + EYE;
     const arc = inner.querySelector<SVGCircleElement>('.ov-ring-arc')!;
-    const m: Mark = { el, arc, cooling: false, seen: false, ready: true, dash: -1 };
+    const m: Mark = { el, inner, fade: 1, arc, cooling: false, seen: false, ready: true, dash: -1 };
     el.classList.add('is-ready', SCARES[o.type].kind === 'lure' ? 'is-lure' : 'is-sight');
     marks.set(o.id, m);
     return m;
@@ -194,8 +246,12 @@ export function createOverlays(
       if (n.mode === 'gone') continue;
       const p = plates.get(n.id) ?? acquire(n);
       p.frame = frame;
-      const s = rig.toScreen(n.pos, PLATE_Y);
-      pending.push({ p, x: s.x, y: s.y });
+      const s = rig.toScreen(n.pos, plateY);
+      const f = fadeOf(n.pos, s);
+      p.fade = setFade(p.inner, p.fade, f);
+      // 不显示的不参加避让排布（不占地方）；还在淡出的照样跟着人走
+      if (f > 0) pending.push({ p, x: s.x, y: s.y });
+      else if (Number.isFinite(s.x) && Number.isFinite(s.y)) p.el.style.transform = at(s.x, s.y - p.lift);
 
       p.shown += (n.fear - p.shown) * Math.min(1, dt * 10);
       if (Math.abs(n.fear - p.shown) < 0.05) p.shown = n.fear;
@@ -248,14 +304,16 @@ export function createOverlays(
           m.arc.style.strokeDashoffset = String(dash);
         }
       }
-      const s = rig.toScreen(o.pos, MARK_Y);
-      m.el.style.transform = at(s.x, s.y);
+      const s = rig.toScreen(o.pos, markY(o));
+      m.fade = setFade(m.inner, m.fade, fadeOf(o.pos, s));
+      if (Number.isFinite(s.x) && Number.isFinite(s.y)) m.el.style.transform = at(s.x, s.y);
     }
   };
 
   const updateTip = (objects: ScareObjectState[]) => {
     const o = hoverId ? objects.find((x) => x.id === hoverId) : undefined;
-    if (!o) {
+    const s = o ? rig.toScreen(o.pos, markY(o)) : null;
+    if (!o || !s || !Number.isFinite(s.x) || !Number.isFinite(s.y)) {
       showTip(false);
       return;
     }
@@ -276,7 +334,6 @@ export function createOverlays(
     }
     showTip(true);
     if (measure) cardHalf = card.offsetWidth / 2;
-    const s = rig.toScreen(o.pos, MARK_Y);
     // 标签挂在冷却圆环的正上方，用一根细线（标本签的线）连到物件
     const y = s.y - 16;
     tip.style.transform = at(s.x, y);

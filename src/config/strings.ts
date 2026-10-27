@@ -21,6 +21,13 @@ export const STRINGS = {
     /** 画质按钮上露出的短标签 */
     qualityShort: { high: 'High', low: 'Low' },
   },
+  /** 第三人称（有鼠标的设备，engine/ghostRig.ts） */
+  ghost: {
+    /** 开场后在画面下方停几秒的操作说明，只出现一次 */
+    controls: 'WASD drift · Mouse look · Click to possess · Wheel zoom',
+    /** 丢了指针锁定（按了 Esc、切走了窗口）：点一下继续 */
+    resume: 'Click to resume',
+  },
   /** 悬停标签里的剩余冷却 */
   cooldown: (seconds: number) => `${Math.ceil(seconds)}s`,
   noWebGL: "Your browser can't run WebGL2, so the manor stays dark. Try a recent Chrome, Edge, Firefox or Safari.",
@@ -41,6 +48,8 @@ export const STRINGS = {
     heard: (name: string, prop: string) => `${name} heard the ${prop.toLowerCase()}`,
     startle: (name: string, prop: string) => `${name} jumped at the ${prop.toLowerCase()}`,
     startleScream: (name: string) => `${name} flinched at a scream`,
+    /** 鬼魂贴在身后够久：「后颈一凉」 */
+    neck: (name: string) => `${name} felt a cold breath on their neck`,
     flee: (name: string) => `${name} fled screaming!`,
     exit: (name: string) => `${name} is gone. Who's next?`,
   },

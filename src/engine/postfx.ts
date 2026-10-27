@@ -1,27 +1,28 @@
 // 后处理（TSL）。r186 里后处理管线类叫 THREE.RenderPipeline（PostProcessing 是 r183 起废弃的别名，会打警告）。
 //
-// High：场景（间接光乘上一帧的 SSAO）→ 微缩景深 → + 泛光（宽的几级偏暖：胶片光晕）→ 开场显影
+// High：场景（间接光乘上一帧的 SSAO）→ + 泛光（宽的几级偏暖：胶片光晕）→ 开场显影
 //       → 色调映射 + 转 sRGB → 调色 → 暗角 / 暗角脉冲 → 胶片颗粒；场景画完后用它的深度算这一帧的 SSAO
-// Low ：场景 → 开场显影 → 色调映射 + 转 sRGB → 调色 → 暗角 / 脉冲 → 颗粒（没有泛光、景深、AO）
+// Low ：场景 → 开场显影 → 色调映射 + 转 sRGB → 调色 → 暗角 / 脉冲 → 颗粒（没有泛光、AO）
+// 2026-10-28 做减法：去掉了景深（常开的微缩景深、惊吓拉焦、悬停和开场跟焦）
 //
 // - 两档各一条 RenderPipeline，共用同一个场景 pass：切画质只是换一条管线画，不重编场景材质。
 //   AO 挂在渲染器的全局 context 上，Low 档把它的强度 uniform 设成 0（SSAO 那三遍也不跑）
 // - 场景 pass 没有 MRT（只有 output + 深度）：AO 的法线从深度重建，没做 TAAU 所以也没有速度缓冲
-// - 节点在第一次 render(camera) 时才建：SSAO、景深要的是真正的镜头相机（构造时就要），createRenderCore 在相机之前跑。
+// - 节点在第一次 render(camera) 时才建：SSAO 要的是真正的镜头相机（构造时就要），createRenderCore 在相机之前跑。
 //   第一次 render 顺手把另一档的管线也画一遍，两档的着色器都在「Lighting the candles…」后面编好，之后切档不卡
 // - 调色、暗角、脉冲、颗粒在色调映射之后的显示空间里做：调色板是 sRGB 值，直接混进去就是屏幕上看到的颜色；
 //   颗粒按显示亮度加，不会被色调映射放大或压没
-// - 深度：正交相机。three 自带的 getViewZNode() / depthAwareBlur 按透视算，这里一律自己用 orthographicDepthToViewZ，
-//   near / far 用 reference 从相机上读（后处理四边形里的 cameraNear / cameraFar 是四边形自己的相机）
+// - 深度：两种相机都要对——娃娃屋是正交相机，第三人称是透视相机。管线按相机建（换相机整套重建），
+//   所以在建图时按相机类型选深度换算（viewZOf），着色器里没有分支；从深度还原位置一律走投影逆矩阵（getViewPosition），
+//   两种相机通用。near / far 用 reference 从相机上读（后处理四边形里的 cameraNear / cameraFar 是四边形自己的相机）
 import * as THREE from 'three/webgpu';
 import {
   Fn, If, Loop, PI2, abs, clamp, cross, dot, exp, float, fract, getScreenPositionFromClip, getViewPosition, int,
-  interleavedGradientNoise, length, luminance, max, mix, orthographicDepthToViewZ, pass, positionWorld, rand,
-  reference, renderOutput, rtt, screenCoordinate, smoothstep, step, texture, uniform, uv, vec2, vec3, vec4,
-  vogelDiskSample,
+  interleavedGradientNoise, length, luminance, max, mix, orthographicDepthToViewZ, pass, perspectiveDepthToViewZ,
+  positionWorld, rand, reference, renderOutput, screenCoordinate, smoothstep, step, texture, uniform, uv, vec2, vec3,
+  vec4, vogelDiskSample,
 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-import { gaussianBlur } from 'three/addons/tsl/display/GaussianBlurNode.js';
 import SSAONode from 'three/addons/tsl/display/SSAONode.js';
 import { CELL, FRONT_DOOR, HOUSE_D, HOUSE_W } from '../config/house';
 import type { Vec2 } from '../sim/types';
@@ -73,30 +74,6 @@ export const GRADE = {
 };
 
 /**
- * 景深（只在 High）。CoC 按深度算（正交相机的观察空间 z），不按屏幕位置画带子（《织梦岛》的教训：竖着的人物会被错误地虚掉）。
- * |Δz| < dead 米全清晰，再过 ramp 米涨到 max（0..1：0.5 = 第一级模糊全量，1 = 第二级模糊全量）。
- * - mini：常开的微缩景深。焦平面在画面中心对着的地面（房子中间的深度）；最远的地板、最近的墙头轻微发软，
- *   远角房间里的访客只是稍软，读得清
- * - focus：fx.focus(target, { strength: 1 }) 的强度（惊吓强调），焦点外明显虚掉；strength 在两者之间插值
- */
-export const DOF = {
-  mini: { dead: 4.2, ramp: 4.5, max: 0.34 },
-  focus: { dead: 0.8, ramp: 2.4, max: 1.0 },
-  /** 默认焦点高度（米）：focus() 没给 height 时用，大致是物件 / 人的中部 */
-  height: 0.8,
-  /** 焦点移动和强度变化的平滑时间（秒，临界阻尼弹簧），focus() 没给 smoothTime 时用 */
-  smoothTime: 0.25,
-  /** 常态焦点：画面中心视线和这个高度的水平面的交点 */
-  defaultHeight: 0.3,
-  /** 模糊用的副本分辨率（相对画布物理像素，再除以像素比） */
-  scale: 0.5,
-  /** 两级高斯模糊的 sigma（第二级在第一级基础上再降一半分辨率） */
-  sigma: [1, 2] as [number, number],
-  /** 焦内像素在模糊副本里的最小权重：模糊按 CoC 加权，清晰的人物不会被糊进周围的虚化里、在身边留一圈光晕 */
-  minWeight: 0.02,
-};
-
-/**
  * 开场显影（所有档位）。progress 0：只剩门廊灯一圈和远墙上月光照亮的窗；往 1 走时，光从 origin 按水平距离铺开，
  * 前沿 soft 米。正好 1 时整段跳过（uniform 分支，没有额外开销）。
  * 窗按位置认，不按亮度：窗玻璃是加法混合、不写深度，玻璃后面的像素深度 = 1；视线在外墙所在的竖直面上、
@@ -141,13 +118,10 @@ export const AO = {
 export interface FxFlags {
   grade: boolean;
   halation: boolean;
-  dof: boolean;
   ao: boolean;
   reveal: boolean;
 }
-export const DEFAULT_FLAGS: FxFlags = { grade: true, halation: true, dof: true, ao: true, reveal: true };
-
-export interface FocusOpts { height?: number; strength?: number; smoothTime?: number }
+export const DEFAULT_FLAGS: FxFlags = { grade: true, halation: true, ao: true, reveal: true };
 
 export interface PostFx {
   /** 每帧调一次，代替 renderer.render */
@@ -157,7 +131,6 @@ export interface PostFx {
   setBloom(on: boolean): void;
   readonly bloomOn: boolean;
   vignettePulse(strength: number, color?: number): void;
-  focus(target: Vec2 | null, opts?: FocusOpts): void;
   setReveal(progress: number, origin?: Vec2): void;
   /** 调试：脉冲的时间倍率（dev 页面放慢它，好截到中间态）。不影响颗粒 */
   timeScale: number;
@@ -168,10 +141,8 @@ export interface PostFx {
   freezeGrain: boolean;
   /** 调试：临时改 AO 强度（不重建管线，同一帧前后对比用）；null = AO.strength */
   aoStrength: number | null;
-  /** 调试：画面换成中间结果（0 正常，1 AO，2 景深 CoC）；只在 ?fxview 下有效 */
+  /** 调试：画面换成中间结果（0 正常，1 AO）；只在 ?fxview 下有效 */
   view: number;
-  /** 调试：此刻的焦点状态 */
-  readonly focusState: { x: number; y: number; z: number; strength: number; viewZ: number };
   dispose(): void;
 }
 
@@ -184,7 +155,15 @@ type F = N<'float'>;
 type V3 = N<'vec3'>;
 type Tex = THREE.TextureNode;
 
-// ───────────────────────── 正交 SSAO ─────────────────────────
+// ───────────────────────── 深度换算 ─────────────────────────
+
+/** 这台相机的深度贴图值 → 观察空间 z（负数）。正交相机深度沿视线线性，透视相机不是 */
+const viewZOf = (camera: THREE.Camera, near: F, far: F) =>
+  (camera as THREE.PerspectiveCamera).isPerspectiveCamera === true
+    ? (d: F) => perspectiveDepthToViewZ(d, near, far) as unknown as F
+    : (d: F) => orthographicDepthToViewZ(d, near, far) as unknown as F;
+
+// ───────────────────────── SSAO ─────────────────────────
 
 /** SSAONode 的私有成员（r186）：只换两个材质的片元，渲染目标、分辨率、逐帧调度都沿用原类 */
 interface SSAOInternals {
@@ -199,10 +178,11 @@ interface SSAOInternals {
 }
 
 /**
- * SSAO 改三处：法线从深度重建（不要法线缓冲），遮挡加距离截断（见 AO.range），模糊按正交深度判断边缘
- * （原版 depthAwareBlur 用透视公式换算 viewZ，正交深度进去以后深度差被压小几百倍，等于不判断边缘，轮廓外会糊出一圈）
+ * SSAO 改三处：法线从深度重建（不要法线缓冲），遮挡加距离截断（见 AO.range），模糊按这台相机的深度换算判断边缘
+ * （原版 depthAwareBlur 一律按透视公式换算 viewZ，正交深度进去以后深度差被压小几百倍，等于不判断边缘，轮廓外会糊出一圈）。
+ * 采样本身（视平面上的圆盘偏移 → 投影回屏幕）对两种相机都对，沿用原版的做法
  */
-class OrthoSSAONode extends SSAONode {
+class DepthSSAONode extends SSAONode {
   /** 已经算出过结果 */
   ready = false;
   /**
@@ -240,6 +220,7 @@ class OrthoSSAONode extends SSAONode {
     const projInv = self._cameraProjectionMatrixInverse;
     const radius = this.radius;
     const maxD2 = radius.mul(AO.range).mul(radius.mul(AO.range));
+    const persp = (this.cam as THREE.PerspectiveCamera).isPerspectiveCamera === true;
 
     const ao = Fn(() => {
       const uvN = uv();
@@ -258,7 +239,9 @@ class OrthoSSAONode extends SSAONode {
       const dx = mix(R, L, step(abs(R.z), abs(L.z)).oneMinus());
       const dy = mix(D, U, step(abs(D.z), abs(U.z)).oneMinus());
       const n0 = cross(dx, dy).normalize();
-      const nrm = n0.mul(n0.z.sign().add(0.5).sign()).toVar(); // 朝向相机（观察空间 +z）
+      // 翻到朝向相机的一面：正交相机朝 +z（视线处处平行），透视相机朝原点（视线从相机发散出去）
+      const facing = persp ? dot(n0, P).negate() : n0.z;
+      const nrm = n0.mul(facing.sign().add(0.5).sign()).toVar();
       const phi = interleavedGradientNoise(screenCoordinate).mul(PI2).toVar();
       const clipP = proj.mul(vec4(P, 1.0)).toVar();
       const occ = float(0).toVar();
@@ -277,11 +260,10 @@ class OrthoSSAONode extends SSAONode {
     self._aoMaterial.fragmentNode = ao();
     self._aoMaterial.needsUpdate = true;
 
-    const near = reference('near', 'float', this.cam) as unknown as F;
-    const far = reference('far', 'float', this.cam) as unknown as F;
+    const toViewZ = viewZOf(this.cam, reference('near', 'float', this.cam) as unknown as F, reference('far', 'float', this.cam) as unknown as F);
     const blur = Fn(() => {
       const uvN = uv();
-      const vz = (u: N<'vec2'>) => orthographicDepthToViewZ(depthTex.sample(u).r, near, far);
+      const vz = (u: N<'vec2'>) => toViewZ(depthTex.sample(u).r);
       const c = vz(uvN).toVar();
       const sum = float(0).toVar();
       const wsum = float(0).toVar();
@@ -299,30 +281,16 @@ class OrthoSSAONode extends SSAONode {
   }
 }
 
-// ───────────────────────── 平滑 ─────────────────────────
-
-/** 临界阻尼弹簧（Unity SmoothDamp 的写法）：与帧率无关，不过冲 */
-function smoothDamp(cur: number, target: number, vel: { v: number }, smoothTime: number, dt: number) {
-  const st = Math.max(1e-4, smoothTime);
-  const omega = 2 / st;
-  const x = omega * dt;
-  const e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
-  const change = cur - target;
-  const temp = (vel.v + omega * change) * dt;
-  vel.v = (vel.v - omega * temp) * e;
-  return target + (change + temp) * e;
-}
-
 // ───────────────────────── 组装 ─────────────────────────
 
 export interface PostFxOptions {
-  /** 房屋坐标系的根节点：focus / setReveal 的坐标都是房屋米坐标 */
+  /** 房屋坐标系的根节点：setReveal 的坐标是房屋米坐标 */
   houseRoot: THREE.Object3D;
 }
 
 export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene, opts: PostFxOptions): PostFx {
   const flags: FxFlags = { ...DEFAULT_FLAGS };
-  // 调试：?fx=-dof,-ao 关掉某几项，?fx=legacy 全关（= 升级前的管线），对比加载时间和性能用
+  // 调试：?fx=-ao,-grade 关掉某几项，?fx=legacy 全关（= 升级前的管线），对比加载时间和性能用
   for (const k of (new URLSearchParams(location.search).get('fx') ?? '').split(',').filter(Boolean)) {
     if (k === 'legacy') for (const f of Object.keys(flags) as (keyof FxFlags)[]) flags[f] = false;
     else if (k.startsWith('-') && k.slice(1) in flags) flags[k.slice(1) as keyof FxFlags] = false;
@@ -335,10 +303,6 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
   const uPulseColor = uniform(hexToDisplay(PALETTE.dread, new THREE.Vector3()));
   const uSeed = uniform(new THREE.Vector2());
   const uAOStrength = uniform(0);
-  const uFocusZ = uniform(-40);
-  const uDead = uniform(DOF.mini.dead);
-  const uRamp = uniform(DOF.mini.ramp);
-  const uCocMax = uniform(DOF.mini.max);
   const uReveal = uniform(1);
   const uRevealOrigin = uniform(new THREE.Vector2(FRONT_DOOR.outside.x, FRONT_DOOR.outside.z));
   const uPorch = uniform(new THREE.Vector3(9.55, 1.35, 12.6)); // 门廊灯（房屋坐标）：首帧从场景里按名字找，找不到用这个
@@ -352,7 +316,7 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
   // 挂在场景 pass 自己的 contextNode 上也行，但那样场景材质的着色器和 main.ts 开场 compileAsync（不经过 pass）编出来的不一样，
   // 每个材质要多编一遍（实测开场多 1.5 秒以上）。全局挂上以后两边是同一份着色器。
   // 读的是普通贴图节点（不是 SSAO 的 PassTextureNode）：场景材质引用它不会顺带去跑 SSAO。
-  // 结果图 aoTarget 归这里，SSAO 节点往里写（见 OrthoSSAONode）；是上一帧的结果，按上一帧的相机（uPrevVP）投回去取。
+  // 结果图 aoTarget 归这里，SSAO 节点往里写（见 DepthSSAONode）；是上一帧的结果，按上一帧的相机（uPrevVP）投回去取。
   // Low 档 / 关 AO / 还没算出来时强度 uniform 为 0，不跑 SSAO
   const aoTarget = new THREE.RenderTarget(1, 1, { depthBuffer: false, format: THREE.RedFormat });
   aoTarget.texture.name = 'postfx.ao';
@@ -373,10 +337,10 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
   interface Built {
     camera: THREE.Camera;
     scenePass: THREE.PassNode;
-    ssao: OrthoSSAONode | null;
+    ssao: DepthSSAONode | null;
     high: THREE.RenderPipeline;
     low: THREE.RenderPipeline;
-    /** High 管线里自己建的节点（泛光、景深），换泛光开关时只重建这部分 */
+    /** High 管线里自己建的节点（泛光），换泛光开关时只重建这部分 */
     highNodes: { dispose(): void }[];
     lowWarm: boolean;
     setScales(dpr: number): void;
@@ -390,9 +354,9 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
     const depth = scenePass.getTextureNode('depth') as Tex;
 
     // —— AO：场景 pass 画完后用它的深度算（透明的雾、光锥、粒子、玻璃不写深度，自然不参与），结果给下一帧的间接光 ——
-    let ssao: OrthoSSAONode | null = null;
+    let ssao: DepthSSAONode | null = null;
     if (flags.ao) {
-      ssao = new OrthoSSAONode(depth, camera, aoTarget, uPrevVP);
+      ssao = new DepthSSAONode(depth, camera, aoTarget, uPrevVP);
       ssao.radius.value = AO.radius;
       ssao.intensity.value = AO.intensity;
       ssao.bias.value = AO.bias;
@@ -400,21 +364,15 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
     }
 
     // —— 相机相关的 uniform（引用相机自己的矩阵对象，每帧自动是最新的）——
-    const near = reference('near', 'float', camera) as unknown as F;
-    const far = reference('far', 'float', camera) as unknown as F;
     const projInv = uniform(camera.projectionMatrixInverse);
     const camWorld = uniform(camera.matrixWorld);
 
-    /** 屏幕 uv 这条视线在近 / 远裁剪面上的两点（房屋坐标） */
-    const viewRay = (uvN: N<'vec2'>) => {
-      const w = (z: number) => camWorld.mul(vec4(getViewPosition(uvN, float(z), projInv), 1.0)).xyz.sub(uHouseOff);
-      return { p0: w(0), p1: w(1) };
-    };
-    /** 视线碰到地面（房屋坐标 y = 0）时的深度值（正交相机：深度沿视线线性，近裁剪面 0、远裁剪面 1） */
-    const groundDepth = (ray: { p0: V3; p1: V3 }) => clamp(ray.p0.y.div(max(ray.p0.y.sub(ray.p1.y), 1e-4)), 0, 1);
-    /** 屏幕 uv + 深度 → 房屋坐标。背景（深度 = 1，没有东西写深度）改用视线和地面的交点 */
-    const housePos = (ray: { p0: V3; p1: V3 }, d: F, bg: N<'bool'>) =>
-      mix(ray.p0, ray.p1, bg.select(groundDepth(ray), d));
+    /** 屏幕 uv + 深度值 → 房屋坐标（投影逆矩阵还原观察空间位置，正交、透视通用） */
+    const houseAt = (uvN: N<'vec2'>, d: F): V3 => camWorld.mul(vec4(getViewPosition(uvN, d, projInv), 1.0)).xyz.sub(uHouseOff);
+    /** 屏幕 uv 这条视线在近 / 远裁剪面上的两点（房屋坐标）：两种相机下视线都是这两点连成的直线 */
+    const viewRay = (uvN: N<'vec2'>) => ({ p0: houseAt(uvN, float(0)), p1: houseAt(uvN, float(1)) });
+    /** 视线碰到地面（房屋坐标 y = 0）时在 p0 → p1 上的比例（往上看、碰不到地面的视线取远端） */
+    const groundT = (ray: { p0: V3; p1: V3 }) => clamp(ray.p0.y.div(max(ray.p0.y.sub(ray.p1.y), 1e-4)), 0, 1);
     /** 视线有没有在某面外墙的竖直面上、窗台到窗楣之间穿过（0 / 1） */
     const throughWindow = (ray: { p0: V3; p1: V3 }) => {
       const { p0, p1 } = ray;
@@ -470,13 +428,14 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
         If(uReveal.lessThan(0.9999), () => {
           const uvN = uv();
           const d = depth.sample(uvN).r;
-          const bg = d.greaterThanEqual(0.99999);
           const ray = viewRay(uvN);
-          const P = housePos(ray, d, bg);
+          // 背景（深度 = 1，没有东西写深度）改用视线和地面的交点；两边都算、按 0 / 1 混合（不用 select：见文件头的坑）
+          const bg = step(0.99999, d);
+          const P = mix(houseAt(uvN, d), mix(ray.p0, ray.p1, groundT(ray)), bg);
           const R = mix(float(-REVEAL.soft), float(REVEAL.reach), uReveal);
           const radial = float(1).sub(smoothstep(R.sub(REVEAL.soft), R, length(P.xz.sub(uRevealOrigin))));
           const porch = float(1).sub(smoothstep(REVEAL.porch[0], REVEAL.porch[1], length(P.sub(uPorch))));
-          const win = bg.select(throughWindow(ray), float(0));
+          const win = throughWindow(ray).mul(bg);
           const m = max(max(radial, porch), win);
           out.mulAssign(mix(float(REVEAL.floor), float(1), m));
         });
@@ -486,30 +445,9 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
 
     // —— High ——
     const highNodes: { dispose(): void }[] = [];
-    let dofSrc: THREE.RTTNode | null = null;
     let bloomNode: ReturnType<typeof bloom> | null = null;
-    let cocDbg: F | null = null;
     const buildHigh = () => {
       let hdr: V3 = color.rgb;
-      if (flags.dof) {
-        const viewZ = (u: N<'vec2'>) => {
-          const d = depth.sample(u).r;
-          // 背景：按视线和地面的交点算深度（窗外、屋外地面跟着地板一起虚，不会因为「无穷远」而全虚）
-          const bg = d.greaterThanEqual(0.99999);
-          return orthographicDepthToViewZ(bg.select(groundDepth(viewRay(u)), d), near, far);
-        };
-        const coc = (u: N<'vec2'>) => smoothstep(uDead, uDead.add(uRamp), abs(viewZ(u).sub(uFocusZ))).mul(uCocMax);
-        // 半分辨率副本：rgb = 场景，a = CoC（模糊按它加权）
-        dofSrc = rtt(vec4(color.rgb, max(coc(uv()), DOF.minWeight)), null, null, { resolutionScale: DOF.scale });
-        const b1 = gaussianBlur(dofSrc, null, DOF.sigma[0], { premultipliedAlpha: true });
-        const b2 = gaussianBlur(b1.getTextureNode(), null, DOF.sigma[1], { premultipliedAlpha: true, resolutionScale: 0.5 });
-        highNodes.push(dofSrc, b1, b2);
-        const c = coc(uv());
-        cocDbg = c;
-        const w1 = clamp(c.mul(2), 0, 1);
-        const w2 = clamp(c.mul(2).sub(1), 0, 1);
-        hdr = mix(mix(hdr, b1.getTextureNode().rgb, w1), b2.getTextureNode().rgb, w2);
-      }
       if (bloomOn) {
         bloomNode = bloom(color, BLOOM.strength, BLOOM.radius, BLOOM.threshold);
         bloomNode.smoothWidth.value = BLOOM.smoothWidth;
@@ -522,13 +460,10 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
       pipe.outputColorTransform = false;
       let outNode: N<'vec4'> = finish(reveal(hdr));
       if (debugViews) {
-        // 调试视图（只在 ?fxview 下建）：1 = AO，2 = 景深 CoC（红 = 第一级，绿 = 第二级）
-        const ao = aoTex.sample(uv()).r;
-        const cc = cocDbg ?? float(0);
+        // 调试视图（只在 ?fxview 下建）：1 = AO。
         // 用 mix 选，不用 select / If：WebGL 后端在条件块里采样贴图会出错（贴图 uv 翻转要建临时变量）
         const v1 = uView.equal(1).select(float(1), float(0));
-        const v2 = uView.equal(2).select(float(1), float(0));
-        outNode = mix(mix(outNode, vec4(vec3(ao), 1), v1), vec4(clamp(cc.mul(2), 0, 1), clamp(cc.mul(2).sub(1), 0, 1), 0, 1), v2);
+        outNode = mix(outNode, vec4(vec3(aoTex.sample(uv()).r), 1), v1);
       }
       // SSAO 要排在场景 pass 后面（读这一帧的深度）。three 按建图时第一次遇到的顺序调度各 pass：
       // 在输出图最后摸一下 SSAO 的结果（乘 0）——场景 pass 早在前面就遇到了
@@ -547,7 +482,6 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
       setScales(dpr) {
         const k = 1 / Math.max(1, dpr);
         bloomNode?.setResolutionScale(BLOOM.scale * k);
-        dofSrc?.setResolutionScale(DOF.scale * k);
         if (ssao) ssao.resolutionScale = AO.scale * k;
       },
     };
@@ -555,7 +489,6 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
     rebuildHigh = () => {
       for (const n of b.highNodes) n.dispose();
       b.highNodes.length = 0;
-      dofSrc = null;
       bloomNode = null;
       b.high.dispose();
       b.high = buildHigh();
@@ -586,58 +519,13 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
   let aoWasHigh = false;
   const bufSize = new THREE.Vector2();
   const lastBuf = new THREE.Vector2();
+  const v0 = new THREE.Vector3();
 
   const pulseValue = () => {
     if (pulseT >= PULSE.duration) return 0;
     if (pulseT < PULSE.attack) return pulseStrength * (1 - (1 - pulseT / PULSE.attack) ** 2);
     const u = (pulseT - PULSE.attack) / (PULSE.duration - PULSE.attack);
     return pulseStrength * (0.5 + 0.5 * Math.cos(Math.PI * u));
-  };
-
-  // 焦点：房屋坐标（米），三个分量和强度各自走临界阻尼弹簧
-  const focusCur = { x: FRONT_DOOR.inside.x, y: DOF.defaultHeight, z: FRONT_DOOR.inside.z, s: 0 };
-  const focusVel = { x: { v: 0 }, y: { v: 0 }, z: { v: 0 }, s: { v: 0 } };
-  let focusTarget: { x: number; y: number; z: number } | null = null;
-  let focusStrength = 0;
-  let focusSmooth = DOF.smoothTime;
-  let focusPrimed = false;
-  let focusViewZ = -40;
-  const v0 = new THREE.Vector3();
-  const v1 = new THREE.Vector3();
-  const houseWorld = new THREE.Vector3();
-
-  /** 常态焦点：画面中心的视线和 y = defaultHeight 平面的交点（房屋坐标）；冲镜、平移时跟着画面中心走 */
-  const defaultFocus = (camera: THREE.Camera, out: { x: number; y: number; z: number }) => {
-    v0.set(0, 0, -1).unproject(camera);
-    v1.set(0, 0, 1).unproject(camera);
-    const h = DOF.defaultHeight + houseWorld.y;
-    const t = Math.abs(v0.y - v1.y) > 1e-6 ? (v0.y - h) / (v0.y - v1.y) : 0.5;
-    v0.lerp(v1, Math.min(1, Math.max(0, t)));
-    out.x = v0.x - houseWorld.x;
-    out.y = DOF.defaultHeight;
-    out.z = v0.z - houseWorld.z;
-  };
-  const tmpTarget = { x: 0, y: 0, z: 0 };
-
-  const updateFocus = (camera: THREE.Camera, dt: number) => {
-    const tgt = focusTarget ?? (defaultFocus(camera, tmpTarget), tmpTarget);
-    const sTarget = focusTarget ? focusStrength : 0;
-    if (!focusPrimed) {
-      focusPrimed = true;
-      Object.assign(focusCur, tgt, { s: sTarget });
-    } else {
-      focusCur.x = smoothDamp(focusCur.x, tgt.x, focusVel.x, focusSmooth, dt);
-      focusCur.y = smoothDamp(focusCur.y, tgt.y, focusVel.y, focusSmooth, dt);
-      focusCur.z = smoothDamp(focusCur.z, tgt.z, focusVel.z, focusSmooth, dt);
-      focusCur.s = Math.min(1, Math.max(0, smoothDamp(focusCur.s, sTarget, focusVel.s, focusSmooth, dt)));
-    }
-    v0.set(focusCur.x, focusCur.y, focusCur.z).add(houseWorld).applyMatrix4(camera.matrixWorldInverse);
-    focusViewZ = v0.z;
-    uFocusZ.value = focusViewZ;
-    const s = focusCur.s;
-    uDead.value = DOF.mini.dead + (DOF.focus.dead - DOF.mini.dead) * s;
-    uRamp.value = DOF.mini.ramp + (DOF.focus.ramp - DOF.mini.ramp) * s;
-    uCocMax.value = DOF.mini.max + (DOF.focus.max - DOF.mini.max) * s;
   };
 
   const fx: PostFx = {
@@ -648,7 +536,6 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
     set view(v: number) { uView.value = v; },
     get bloomOn() { return bloomOn; },
     get flags() { return flags; },
-    get focusState() { return { ...focusCur, strength: focusCur.s, viewZ: focusViewZ }; },
     render(camera) {
       const now = performance.now();
       const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
@@ -672,8 +559,7 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
           uPorch.value.copy(opts.houseRoot.worldToLocal(v0));
         }
       }
-      opts.houseRoot.getWorldPosition(houseWorld);
-      uHouseOff.value.copy(houseWorld);
+      opts.houseRoot.getWorldPosition(uHouseOff.value);
 
       pulseT += dt * fx.timeScale;
       uPulse.value = Math.min(1, pulseValue()) * PULSE.maxMix;
@@ -686,7 +572,6 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
       }
 
       camera.updateMatrixWorld();
-      updateFocus(camera, dt);
       // AO 是上一帧在 High 管线里算的：刚切到 High、画布尺寸刚变（结果图重新分配、是空的）时还没有，这一帧先不乘
       renderer.getDrawingBufferSize(bufSize);
       const resized = bufSize.x !== lastBuf.x || bufSize.y !== lastBuf.y;
@@ -717,17 +602,6 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
       // 起音曲线 v = S·(1 − (1 − x)²) 反解出 v = cur 时的进度 x
       pulseT = pulseStrength > 0 ? PULSE.attack * (1 - Math.sqrt(Math.max(0, 1 - cur / pulseStrength))) : 0;
       hexToDisplay(colorHex, uPulseColor.value);
-    },
-    focus(target, o = {}) {
-      focusSmooth = o.smoothTime ?? DOF.smoothTime;
-      if (!target) {
-        focusTarget = null;
-        return;
-      }
-      const h = o.height ?? DOF.height;
-      if (focusTarget) { focusTarget.x = target.x; focusTarget.y = h; focusTarget.z = target.z; }
-      else focusTarget = { x: target.x, y: h, z: target.z };
-      focusStrength = Math.min(1, Math.max(0, o.strength ?? 1));
     },
     setReveal(progress, origin) {
       uReveal.value = Math.min(1, Math.max(0, progress));

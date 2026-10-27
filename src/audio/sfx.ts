@@ -42,7 +42,12 @@
 //   离开 exit（0.4 秒 + 尾巴）：远处闷闷的关门声 —— 60→42 Hz 闷响 + 低通噪声，全部过 320 Hz 低通，九成是混响；不是「叮」
 //   进门 spawn（1.6 秒）：两下敲门（210 / 640 Hz 门板共鸣 + 一点「嗒」，过 2.2 kHz 低通显得在门外）[0, 0.24]，
 //     然后前门吱呀一声（0.55–1.55，20→28→18 Hz 摩擦，520 / 1180 / 2350 Hz 共鸣）
+//   后颈一凉 chillSwell（chill 事件 neck 为真；不定位，是配乐的一层；约 1 秒涌起 + 3 秒退掉）：低沉的小二度 D2 + E♭2
+//     锯齿波（各两根 ±5 音分，4.4 Hz 的拍，二次谐波 D3 / E♭3 再打 8.7 Hz 的拍）+ 一点 D1 正弦，过低通 160 → 520 Hz
+//     （跟着音量开、跟着音量收）；指数渐强 0.7 秒（越到后面涨得越快，像反向的音头）、撑 0.25 秒、0.55 秒时间常数退掉。
+//     倒吸一口气（voices.ts 的 neckGasp）同时从那个访客身上出来；2.5 秒内不重复涌起
 import type { ScareType } from '../sim/types';
+import { isPort, type Place, type Port, type Space } from './space';
 import { DOOR_T_LINE } from '../view/props/door';
 import { LAMP_FLICKER, LAMP_RELIGHT } from '../view/props/lamp';
 import { MIRROR_FLASH } from '../view/props/mirror';
@@ -63,6 +68,7 @@ export const LEVEL = {
   braam: 0,
   exit: -11,
   spawn: -10,
+  chill: 0,
 };
 
 // ── 共用：总线、随机数、节点工厂、包络 ─────────────────────────────────────────────
@@ -82,6 +88,8 @@ export interface Bus {
   noise: AudioBuffer;
   /** 窄脉冲波形：木头摩擦「粘一下、滑一下」的激励 */
   pulse: PeriodicWave;
+  /** 第三人称的 3D 声像（space.ts）；active 之前所有声音都走立体声声像 */
+  space?: Space;
 }
 
 /** 随机数：默认 Math.random；dev 页面测量时换成带种子的，结果可复现 */
@@ -93,8 +101,11 @@ const clamp = (x: number, a: number, b: number) => (x < a ? a : x > b ? b : x);
 const lerp = (a: number, b: number, u: number) => a + (b - a) * u;
 
 export interface SndOpts {
-  /** 声像 -1..1 */
-  pan?: number;
+  /**
+   * 放在哪：数字 = 立体声声像 -1..1（俯视模式，或 braam 这类不定位的声音）；Vec3 = 房屋米坐标里的 3D 位置；
+   * Port = 跟着人走的常驻声道（访客、鬼魂）。3D 还没启用（没调过 setListener）时一律按立体声居中
+   */
+  at?: Place;
   to?: 'sfx' | 'voice' | 'amb';
   /** 总音量（dB） */
   level?: number;
@@ -104,32 +115,50 @@ export interface SndOpts {
 
 /**
  * 一个声音的全部节点。out → 声像 → 总线（并按 wet 送混响）；dry → 声像 → 总线（不送混响）。
- * end(t) 之后由一个静音的 ConstantSource 的 onended 断开全部节点，防止泄漏
+ * 声像：立体声是一个 StereoPanner；3D 是 space.ts 的 Port（HRTF + 隔墙遮挡，混响也跟着遮挡和距离走）。
+ * end(t) 之后由一个静音的 ConstantSource 的 onended 断开全部节点，防止泄漏（自己建的 Port 一起释放）
  */
 export class Snd {
   readonly ac: BaseAudioContext;
   readonly out: GainNode;
   private readonly nodes: AudioNode[] = [];
-  private readonly panner: StereoPannerNode;
+  /** 直达声的入口：StereoPanner，或 Port.in */
+  private readonly direct: AudioNode;
+  /** 自己建的 Port（结束时释放）；借用的常驻声道不归它管 */
+  private readonly port: Port | null = null;
   private readonly lvl: number;
   private dryOut: GainNode | null = null;
 
   constructor(readonly bus: Bus, o: SndOpts = {}) {
     this.ac = bus.ac;
     this.lvl = db(o.level ?? 0);
-    const p = o.pan ?? 0;
-    this.panner = this.add(new StereoPannerNode(this.ac, { pan: Number.isFinite(p) ? clamp(p, -1, 1) : 0 }));
-    this.panner.connect(bus[o.to ?? 'sfx']);
+    const at = o.at ?? 0;
+    const dest = bus[o.to ?? 'sfx'];
+    let wetIn: AudioNode = bus.reverb;
+    if (typeof at !== 'number' && bus.space?.active) {
+      if (isPort(at)) {
+        this.direct = at.in;
+        wetIn = at.wet;
+      } else {
+        const port = (this.port = bus.space.port(at, dest));
+        this.direct = port.in;
+        wetIn = port.wet;
+      }
+    } else {
+      const p = typeof at === 'number' && Number.isFinite(at) ? clamp(at, -1, 1) : 0;
+      this.direct = this.add(new StereoPannerNode(this.ac, { pan: p }));
+      this.direct.connect(dest);
+    }
     this.out = this.gain(this.lvl);
-    this.out.connect(this.panner);
-    if (o.wet) this.out.connect(this.gain(o.wet)).connect(bus.reverb);
+    this.out.connect(this.direct);
+    if (o.wet) this.out.connect(this.gain(o.wet)).connect(wetIn);
   }
 
   /** 不送混响的干声输出（电流噼啪这类要「干」的声音） */
   get dry(): GainNode {
     if (!this.dryOut) {
       this.dryOut = this.gain(this.lvl);
-      this.dryOut.connect(this.panner);
+      this.dryOut.connect(this.direct);
     }
     return this.dryOut;
   }
@@ -175,6 +204,7 @@ export class Snd {
     s.onended = () => {
       for (const n of this.nodes) n.disconnect();
       s.disconnect();
+      this.port?.release();
     };
     s.start();
     s.stop(Math.max(this.ac.currentTime + 0.01, t1));
@@ -259,7 +289,7 @@ export function crackle(out: Grain[], t: number, k: number) {
 }
 
 /** 颗粒声轨 → 滤波链 → dest */
-function playGrains(s: Snd, t: number, grains: Grain[], dest: AudioNode, gain: number, ...filters: BiquadFilterNode[]) {
+export function playGrains(s: Snd, t: number, grains: Grain[], dest: AudioNode, gain: number, ...filters: BiquadFilterNode[]) {
   if (!grains.length) return;
   let node: AudioNode = s.play(grainBuffer(s.ac, grains), t);
   for (const f of filters) node = node.connect(f);
@@ -375,7 +405,8 @@ function darks(tab: readonly (readonly [number, number])[]): number[] {
   return out;
 }
 
-export type SfxFn = (bus: Bus, t: number, pan: number) => number;
+/** 一个声音：t 起播，at 是放在哪（见 SndOpts.at）；返回节点全部断开的时刻 */
+export type SfxFn = (bus: Bus, t: number, at: Place) => number;
 
 // ── 台灯 ────────────────────────────────────────────────────────────────────
 
@@ -396,8 +427,8 @@ export const LAMP = {
   surge: 1.5,
 };
 
-export const lamp: SfxFn = (bus, t, pan) => {
-  const s = new Snd(bus, { pan, level: LEVEL.lamp, wet: 0.06 });
+export const lamp: SfxFn = (bus, t, at) => {
+  const s = new Snd(bus, { at, level: LEVEL.lamp, wet: 0.06 });
   const tab = LAMP_FLICKER;
   const off = tab[tab.length - 1][0];
   const peakAt = tab.reduce((m, e) => (e[1] > m[1] ? e : m), tab[0])[0];
@@ -428,8 +459,8 @@ export const lamp: SfxFn = (bus, t, pan) => {
   return s.end(t + off + 0.35);
 };
 
-export const lampReset: SfxFn = (bus, t, pan) => {
-  const s = new Snd(bus, { pan, level: LEVEL.lampReset, wet: 0.1 });
+export const lampReset: SfxFn = (bus, t, at) => {
+  const s = new Snd(bus, { at, level: LEVEL.lampReset, wet: 0.1 });
   const tab = LAMP_RELIGHT;
   const warm = tab[tab.length - 1][0]; // 从这里开始预热
   const full = warm + 0.15; // 满亮（view/props/lamp.ts：0.15 秒内爬到满）
@@ -525,8 +556,8 @@ function chairMotion(): ChairMotion {
   return (chairCache = { ext, speed, total });
 }
 
-export const rockingChair: SfxFn = (bus, t, pan) => {
-  const s = new Snd(bus, { pan, level: LEVEL.rockingChair, wet: CHAIR.wet });
+export const rockingChair: SfxFn = (bus, t, at) => {
+  const s = new Snd(bus, { at, level: LEVEL.rockingChair, wet: CHAIR.wet });
   const m = chairMotion();
   const thMax = m.ext.reduce((a, e) => Math.max(a, Math.abs(e.th)), 1e-6);
   const backBank = creakBank(s, CHAIR.back, s.out);
@@ -574,10 +605,10 @@ export const PORTRAIT = {
   wet: 0.35,
 };
 
-export const portrait: SfxFn = (bus, t, pan) => {
+export const portrait: SfxFn = (bus, t, at) => {
   const T = PORTRAIT_TIMELINE;
   const P = PORTRAIT;
-  const s = new Snd(bus, { pan, level: LEVEL.portrait, wet: P.wet });
+  const s = new Snd(bus, { at, level: LEVEL.portrait, wet: P.wet });
   const wood: Grain[] = [];
   const glass: Grain[] = [];
 
@@ -639,9 +670,9 @@ export const portrait: SfxFn = (bus, t, pan) => {
 /** 肖像复原的时刻（view/props/portrait.ts 的 reset 段里写死的：抽动 0–0.12、飘回 0.32–0.92、落定 1.05） */
 const PORTRAIT_RESET = { twitch: 0.12, liftFrom: 0.32, liftTo: 0.92, settle: 1.05 };
 
-export const portraitReset: SfxFn = (bus, t, pan) => {
+export const portraitReset: SfxFn = (bus, t, at) => {
   const R = PORTRAIT_RESET;
-  const s = new Snd(bus, { pan, level: LEVEL.portraitReset, wet: 0.4 });
+  const s = new Snd(bus, { at, level: LEVEL.portraitReset, wet: 0.4 });
   playGrains(
     s,
     t,
@@ -683,12 +714,12 @@ export const MIRROR = {
   wet: 0.5,
 };
 
-export const mirror: SfxFn = (bus, t, pan) => {
+export const mirror: SfxFn = (bus, t, at) => {
   const M = MIRROR;
   const tab = MIRROR_FLASH;
   const hit = (tab.find((e) => e[1] > 1) ?? [0.6, 1])[0];
   const fin = tab[tab.length - 1][0];
-  const s = new Snd(bus, { pan, level: LEVEL.mirror, wet: M.wet });
+  const s = new Snd(bus, { at, level: LEVEL.mirror, wet: M.wet });
 
   // 脸每闪出来一次：一声很轻的高频气声
   for (const [at, b] of flashes(tab, 0)) {
@@ -772,10 +803,10 @@ export const DOOR = {
   wet: 0.55,
 };
 
-export const door: SfxFn = (bus, t, pan) => {
+export const door: SfxFn = (bus, t, at) => {
   const L = DOOR_T_LINE;
   const D = DOOR;
-  const s = new Snd(bus, { pan, level: LEVEL.door, wet: D.wet });
+  const s = new Snd(bus, { at, level: LEVEL.door, wet: D.wet });
 
   // 0 → 撞上：越来越急的风
   const wg = s.gain(0);
@@ -871,10 +902,10 @@ function musicBoxPhase(): (phase: number) => number {
 }
 let mbCache: ((p: number) => number) | null = null;
 
-export const musicBox: SfxFn = (bus, t, pan) => {
+export const musicBox: SfxFn = (bus, t, at) => {
   const T = MUSIC_BOX_T;
   const B = MUSIC_BOX;
-  const s = new Snd(bus, { pan, level: LEVEL.musicBox, wet: B.wet });
+  const s = new Snd(bus, { at, level: LEVEL.musicBox, wet: B.wet });
   const timeAt = (mbCache ??= musicBoxPhase());
 
   // 盒子的音色：小木盒没有低频，1.8 kHz 一带稍微亮一点；盖子砸上时把还在响的音按死
@@ -957,9 +988,9 @@ export const BRAAM = {
 };
 
 /** t = 冲击时刻（engine.ts 已经在它前面静音了 hit-stop 那 0.15 秒） */
-export const braam: SfxFn = (bus, t, pan) => {
+export const braam: SfxFn = (bus, t, at) => {
   const B = BRAAM;
-  const s = new Snd(bus, { pan, level: LEVEL.braam, wet: B.wet });
+  const s = new Snd(bus, { at, level: LEVEL.braam, wet: B.wet });
   const end = t + B.dur;
   const sum = s.gain(1);
   for (const [f, a] of B.voices) for (const d of [-B.detune, B.detune]) s.osc('sawtooth', f, t, end + 0.1, d).connect(s.gain(B.osc * a)).connect(sum);
@@ -1001,8 +1032,8 @@ export const FRONT = {
   creakSpec: { rate: [20, 28, 18], res: [[520, 8, 1], [1180, 10, 0.7], [2350, 8, 0.35]], grit: 0.4 } as CreakSpec,
 };
 
-export const exitDoor: SfxFn = (bus, t, pan) => {
-  const s = new Snd(bus, { pan, level: LEVEL.exit, wet: FRONT.exitWet });
+export const exitDoor: SfxFn = (bus, t, at) => {
+  const s = new Snd(bus, { at, level: LEVEL.exit, wet: FRONT.exitWet });
   const far = s.bq('lowpass', FRONT.exitLp, 0.7);
   far.connect(s.out);
   thud(s, far, t, FRONT.exitThud, 60, 42, 0.12, 500, FRONT.exitNoise);
@@ -1010,8 +1041,8 @@ export const exitDoor: SfxFn = (bus, t, pan) => {
   return s.end(t + 0.4 + 2.4);
 };
 
-export const spawnDoor: SfxFn = (bus, t, pan) => {
-  const s = new Snd(bus, { pan, level: LEVEL.spawn, wet: 0.35 });
+export const spawnDoor: SfxFn = (bus, t, at) => {
+  const s = new Snd(bus, { at, level: LEVEL.spawn, wet: 0.35 });
   const outside = s.bq('lowpass', 2200, 0.7);
   outside.connect(s.out);
   for (const at of [0, FRONT.knockGap]) {
@@ -1026,3 +1057,42 @@ export const spawnDoor: SfxFn = (bus, t, pan) => {
 export const TRIGGER: Record<ScareType, SfxFn> = { musicBox, door, lamp, rockingChair, portrait, mirror };
 /** 物件复原 → 声音（只有台灯和肖像有「被破坏」状态） */
 export const RESET: Partial<Record<ScareType, SfxFn>> = { lamp: lampReset, portrait: portraitReset };
+
+// ── 后颈一凉：低沉的不协和涌起（不定位）──────────────────────────────────────────
+
+export const CHILL = {
+  /** [赫兹, 音量]：D2、E♭2，每个音两根锯齿波 ±detune 音分；再加 D1 正弦 */
+  voices: [[73.42, 1], [77.78, 0.9]] as [number, number][],
+  detune: 5,
+  osc: 0.5,
+  sub: 0.55,
+  /** 低通：起点、最亮（赫兹） */
+  lp: [160, 520] as const,
+  /** 涌起秒数、撑住秒数、退掉的时间常数（秒） */
+  rise: 0.7,
+  hold: 0.25,
+  fall: 0.55,
+  amp: 0.19,
+  wet: 0.35,
+};
+
+export const chillSwell: SfxFn = (bus, t, at) => {
+  const C = CHILL;
+  const s = new Snd(bus, { at, level: LEVEL.chill, wet: C.wet });
+  const top = t + C.rise;
+  const off = top + C.hold;
+  const end = off + C.fall * 7;
+  const lp = s.bq('lowpass', C.lp[0], 0.7);
+  for (const [f, a] of C.voices) for (const d of [-C.detune, C.detune]) s.osc('sawtooth', f, t, end, d).connect(s.gain(C.osc * a)).connect(lp);
+  s.osc('sine', 36.71, t, end).connect(s.gain(C.sub)).connect(lp);
+  lp.frequency.setValueAtTime(C.lp[0], t);
+  lp.frequency.exponentialRampToValueAtTime(C.lp[1], top);
+  lp.frequency.setTargetAtTime(C.lp[0], off, C.fall);
+  const env = s.gain(0);
+  lp.connect(env).connect(s.out);
+  env.gain.setValueAtTime(0.0003, t);
+  env.gain.exponentialRampToValueAtTime(C.amp, top);
+  env.gain.setValueAtTime(C.amp, off);
+  env.gain.setTargetAtTime(0, off, C.fall);
+  return s.end(end + 2.2);
+};

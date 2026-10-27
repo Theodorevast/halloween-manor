@@ -6,7 +6,7 @@
 // 和 fog.ts 的不同：雾的光是在 0.15 米一格的网格顶点上采样的，所以把光锥放宽、把近处压平；
 // 粒子是一个个点，直接用手电真实的光锥角度。
 import * as THREE from 'three/webgpu';
-import { abs, clamp, dot, float, length, max, smoothstep, sqrt, uniform, vec3 } from 'three/tsl';
+import { abs, clamp, dot, float, length, max, mix, normalize, smoothstep, sqrt, uniform, vec3 } from 'three/tsl';
 import { CELL, GRID_H, GRID_W, blocksSight, buildTiles, idx, type Tile } from '../../config/house';
 import type { RenderCore } from '../../engine/types';
 
@@ -61,8 +61,12 @@ export function makeLightUniforms() {
       /** 截止距离、衰减指数 */
       range: uniform(new THREE.Vector2(1, 2)),
     })),
-    /** 视线反方向（房屋坐标，单位向量，指向镜头）：前向散射用 */
+    /** 视线反方向（房屋坐标，单位向量，指向镜头）：正交相机的前向散射用 */
     toCam: uniform(new THREE.Vector3(0.57, 0.57, 0.57)),
+    /** 镜头位置（房屋坐标）：透视相机的视线从这里发散，每颗粒子自己算指向镜头的方向 */
+    camPos: uniform(new THREE.Vector3(0, 20, 0)),
+    /** 1 = 透视相机，0 = 正交相机 */
+    persp: uniform(0),
   };
 }
 export type LightUniforms = ReturnType<typeof makeLightUniforms>;
@@ -116,6 +120,7 @@ export interface LightOpts {
 /** p 点（房屋坐标）受到的光（线性颜色 × 强度，和 three 的辐照度同一量纲） */
 export function lightAt(u: LightUniforms, p: V3, o: LightOpts = {}): V3 {
   let light: V3 = vec3(0, 0, 0);
+  const toCam = o.phaseG ? normalize(mix(u.toCam, u.camPos.sub(p), u.persp)) : null;
   for (const t of u.torches) {
     const v = p.sub(t.pos);
     const dist = length(v);
@@ -126,7 +131,7 @@ export function lightAt(u: LightUniforms, p: V3, o: LightOpts = {}): V3 {
     const b = smoothstep(t.coneB.x, t.coneB.y, c).mul(distanceAtt(d, t.coneB.z, t.coneB.w));
     const near = smoothstep(LIGHT.nearFade[0], LIGHT.nearFade[1], sqrt(v.x.mul(v.x).add(v.z.mul(v.z))));
     let beam: V3 = t.colA.mul(a).add(t.colB.mul(b)).mul(near);
-    if (o.phaseG) beam = beam.mul(phase(dot(L, u.toCam), o.phaseG));
+    if (o.phaseG && toCam) beam = beam.mul(phase(dot(L, toCam), o.phaseG));
     if (o.spill) beam = beam.add(t.colA.mul(float(o.spill).div(dist.mul(dist).add(LIGHT.spillSoft))));
     light = light.add(beam.mul(fanVisibility(t, p)));
   }
@@ -164,7 +169,7 @@ export interface LightReader {
   readonly activeTorches: number;
   /** 每帧在访客模块 update 之后调（手电位置已经是这一帧的） */
   update(dt: number): void;
-  /** 渲染前用这一次的相机更新视线方向 */
+  /** 渲染前用这一次的相机更新视线方向、镜头位置 */
   setCamera(camera: THREE.Camera): void;
 }
 
@@ -257,6 +262,8 @@ export function createLightReader(core: RenderCore): LightReader {
     setCamera(camera) {
       camera.getWorldDirection(fwd).transformDirection(inv);
       u.toCam.value.copy(fwd).negate();
+      u.camPos.value.setFromMatrixPosition(camera.matrixWorld).applyMatrix4(inv);
+      u.persp.value = (camera as THREE.PerspectiveCamera).isPerspectiveCamera ? 1 : 0;
     },
   };
 }

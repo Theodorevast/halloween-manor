@@ -6,7 +6,7 @@
 // CPU 每次只写一个「砸地时刻」和画框在地上的位置，不传缓冲、不建材质。
 // 灰本身不发光：颜色 = 灰的底色 × 这一点受到的手电 / 台灯光 + 一点月光底色。屋里黑，所以只有被手电照着的那团看得见，
 // 这一下正好是访客在看着画的时候（肖像是「被看见才生效」的惊吓）。
-// 贴地的面片用正交深度做软粒子，不出现插进地板 / 墙里的直线。
+// 贴地的面片做软粒子（common.ts，正交、透视相机都对），不出现插进地板 / 墙里的直线。
 import * as THREE from 'three/webgpu';
 import {
   exp, float, instanceIndex, length, max, min, mix, mx_noise_float, mx_noise_vec3, pow, smoothstep, sqrt, uniform, uv,

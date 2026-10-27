@@ -147,10 +147,7 @@ export async function createRenderCore(canvas: HTMLCanvasElement, opts: RenderCo
       vignettePulse(strength, color = PALETTE.dread) {
         post?.vignettePulse(strength, color);
       },
-      // 景深焦点、开场显影：见 postfx.ts 的 DOF / REVEAL。没有后处理（极少数后端）时这两个是空操作
-      focus(target, o) {
-        post?.focus(target, o);
-      },
+      // 开场显影：见 postfx.ts 的 REVEAL。没有后处理（极少数后端）时是空操作
       setReveal(progress, origin) {
         post?.setReveal(progress, origin);
       },

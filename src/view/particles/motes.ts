@@ -4,20 +4,20 @@
 // 做法：一个实例化精灵，每颗的位置全由实例编号的哈希 + 时间算出（两层慢正弦漂移 + 很慢的整体气流），
 // 不存缓冲、不用计算着色器，WebGL2 回退也一样。亮度 = 这一点受到的手电光（light.ts：真实光锥、距离衰减、
 // 射线挡墙）× 前向散射。光弱到看不见的颗粒在顶点里把面片缩成 0，不产生片元：开销只在顶点（几千个，可以忽略）。
-// 尺寸按屏幕像素定（灰尘本身远小于一个像素，看到的大小是光学模糊），所以镜头缩放时不变；面片保底 minDevicePx 个设备像素，
-// 太小的按面积把亮度降回去，免得光栅化采不准、一动就闪。
+// 尺寸按屏幕像素定（灰尘本身远小于一个像素，看到的大小是光学模糊），所以镜头缩放、远近都不变（透视相机按到镜头的深度换算成米）；
+// 面片保底 minDevicePx 个设备像素，太小的按面积把亮度降回去，免得光栅化采不准、一动就闪。
 import * as THREE from 'three/webgpu';
 import { exp, float, max, min, mod, pow, sin, smoothstep, uniform, uv, varying, vec2, vec3 } from 'three/tsl';
 import { HOUSE_D, HOUSE_W } from '../../config/house';
 import { lightAt, type LightUniforms } from './light';
-import { ge, makeSprite, protectMRT, rnd, type ScreenUniforms } from './common';
+import { clipW, ge, makeSprite, protectMRT, rnd, type ScreenUniforms } from './common';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
 
 export const MOTES = {
-  /** 颗数（low 档不画） */
-  count: 4000,
+  /** 颗数（low 档不画）。2026-10-28 做减法：4000 → 2000，光束里的灰稀一些，不抢画面 */
+  count: 2000,
   /** 分布的空间（房屋米坐标）：整栋房子 + 前门外一点，离地 y[0]–y[1] 米 */
   box: { x: [0, HOUSE_W] as const, z: [0, HOUSE_D + 1.5] as const, y: [0.12, 1.32] as const },
   /** 贴地那一段埋在雾里：离地 floorFade[0] 到 [1] 米之间慢慢亮起来；顶上 topFade 之间淡掉 */
@@ -100,7 +100,7 @@ export function createMotes(light: LightUniforms, screen: ScreenUniforms): Motes
   const energy = dev.mul(MOTES.quad).div(quadDev);
   // 光弱的（光锥外、墙后、埋在雾里的）面片缩成 0：不产生片元
   const lit = ge(peak.mul(heightFade), MOTES.cutoff);
-  const size = quadDev.div(screen.pixelRatio).mul(screen.worldPerCssPx).mul(lit);
+  const size = quadDev.div(screen.pixelRatio).mul(screen.worldPerCssPx).mul(clipW(p)).mul(lit);
 
   const col = L.mul(MOTES.gain).mul(grain).mul(twinkle).mul(heightFade).mul(energy.mul(energy));
   const vCol = varying(min(col, vec3(MOTES.maxLum, MOTES.maxLum, MOTES.maxLum)), 'vMoteCol');

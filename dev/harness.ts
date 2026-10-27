@@ -14,7 +14,10 @@ import type { NpcState, SimEvent, Vec2, WorldState } from '../src/sim/types';
 
 const ELEV = (35 * Math.PI) / 180;
 
-function makeRig(canvas: HTMLCanvasElement): CameraRig {
+/** 沙盒的镜头永远是正交的（CameraRig.camera 还可能是第三人称的透视相机），沙盒页面直接改它的 left / right / top / bottom */
+type OrthoRig = CameraRig & { camera: THREE.OrthographicCamera };
+
+function makeRig(canvas: HTMLCanvasElement): OrthoRig {
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
   let quarter = 0;
   let zoom = 1;
@@ -53,7 +56,6 @@ function makeRig(canvas: HTMLCanvasElement): CameraRig {
       resize(canvas.clientWidth, canvas.clientHeight);
     },
     shake() {},
-    punch() { return false; },
     intro() {},
     onRotate(cb) { cbs.push(cb); },
     update() {},
@@ -72,7 +74,7 @@ function fakeNpc(id: number, name: string, personality: NpcState['personality'])
 
 export interface Harness {
   core: RenderCore;
-  rig: CameraRig;
+  rig: OrthoRig;
   state: WorldState;
   add(m: Module): void;
   emit(e: SimEvent): void;
@@ -104,7 +106,7 @@ export async function createHarness(opts: { ambient?: number } = {}): Promise<Ha
     setQuality(q) { core.quality = q; },
     resize(w, h) { renderer.setSize(w, h, false); },
     render(camera) { renderer.render(scene, camera); },
-    fx: { vignettePulse() {}, focus() {}, setReveal() {} },
+    fx: { vignettePulse() {}, setReveal() {} },
   };
   const rig = makeRig(canvas);
 

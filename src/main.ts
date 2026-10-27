@@ -134,7 +134,7 @@ async function boot() {
   const props = createPropsView(c);
   const overlays = createOverlays(document.getElementById('overlay')!, r);
   const characters = await createCharactersView(c);
-  const cine = (cinematic = createCinematic(r, c, overlays));
+  const cine = (cinematic = createCinematic(r, c));
   modules.push(
     createHouseView(c, r), createFogView(c, r), props, characters, createParticlesView(c),
     ...(isGhostRig(r) ? [createGhostView(c, r)] : []),
@@ -145,7 +145,6 @@ async function boot() {
   picker.onHover((id) => {
     props.setHover(id);
     overlays.setHover(id);
-    cine.setHover(id);
   });
   picker.onPick((id) => { if (started) world.trigger(id); });
 
@@ -186,6 +185,15 @@ async function boot() {
     if (started) dispatch(world.step(dt * control.timeScale));
     const ctx: FrameCtx = { dt, time, state: world.state };
     r.update(dt);
+    // 第三人称：听者放在镜头处（房屋米坐标 = 世界坐标 − houseRoot 的偏移；houseRoot 只平移不旋转），
+    // 鬼魂交给声音（穿墙的「呼」、飘动的冷风；隔墙遮挡从鬼魂的位置算）
+    if (isGhostRig(r)) {
+      r.camera.updateMatrixWorld();
+      const e = r.camera.matrixWorld.elements;
+      const o = c.houseRoot.position;
+      audio.setListener({ x: e[12] - o.x, y: e[13] - o.y, z: e[14] - o.z }, { x: -e[8], y: -e[9], z: -e[10] });
+      audio.setGhost(started ? r.ghost : null);
+    }
     for (const m of modules) m.update?.(ctx);
     if (started) frameWatch(dt);
     // 延后编译的物件：ready 之后的头几帧在正常渲染里临时显示（各模块 update 之后、渲染之前），画完恢复

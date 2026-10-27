@@ -1,6 +1,9 @@
 // 界面：开场遮罩、左上计数、左下事件播报、右下按钮（设计文档「开场」「界面（HUD，英文）」）。
+// 第三人称（engine/ghostRig.ts）另有：画面正中的准星（只在指针锁定时）、开场后停几秒的操作提示、
+// 丢了指针锁定时的「Click to resume」；旋转按钮藏起来。这些状态从 watchGhostUi 来，不用 main.ts 接线。
 // 视觉方向写在 styles.css 开头。文案全部从 STRINGS 取；动态文字一律用 textContent，不拼 HTML
 import { STRINGS } from '../config/strings';
+import { watchGhostUi } from '../engine/ghostRig';
 import type { FrameCtx, Module, Quality } from '../engine/types';
 import type { SimEvent, WorldState } from '../sim/types';
 
@@ -28,6 +31,9 @@ const TICKER_LIFE = 6;
 const TICKER_FADE = 1.2;
 /** 开场遮罩淡出（秒），和 styles.css 里 .hud-start 的 transition 一致 */
 const START_FADE = 0.8;
+/** 第三人称的操作提示：开场后多久开始淡入、停多久（秒）。淡入淡出本身 1.2 秒，在 styles.css 的 .hud-keys */
+const KEYS_DELAY = 1.2;
+const KEYS_HOLD = 6;
 
 // 图标：细线 + 实心箭头，像旧版画里的刻线。currentColor 跟着按钮颜色走
 const SVG = (body: string) => `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${body}</svg>`;
@@ -65,6 +71,9 @@ const TEMPLATE = `
 <div class="hud-play" hidden>
   <p class="hud-counter" aria-live="polite"><span class="hud-counter-label"></span><span class="hud-counter-n"></span></p>
   <ol class="hud-ticker" role="log"></ol>
+  <div class="hud-aim" aria-hidden="true"></div>
+  <p class="hud-keys"></p>
+  <p class="hud-resume" role="status"></p>
   <div class="hud-controls">
     <button type="button" class="hud-btn" data-act="left">${ICON_LEFT}</button>
     <button type="button" class="hud-btn" data-act="right">${ICON_RIGHT}</button>
@@ -98,6 +107,12 @@ function tickerLine(e: SimEvent, s: WorldState): { text: string; tone: Tone } | 
       const p = prop(e.object);
       return p ? { text: STRINGS.ticker.startle(n, p), tone: 'scare' } : null;
     }
+    case 'chill': {
+      // 平时的发毛每 0.7 秒一步，不进播报；只播「后颈一凉」那一下（同一步还会有一个 startle，那个不播）
+      if (!e.neck) return null;
+      const n = who(e.npc);
+      return n ? { text: STRINGS.ticker.neck(n), tone: 'scare' } : null;
+    }
     case 'flee': {
       const n = who(e.npc);
       return n ? { text: STRINGS.ticker.flee(n), tone: 'flee' } : null;
@@ -124,6 +139,11 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   const btn = (act: string) => $<HTMLButtonElement>(`[data-act="${act}"]`);
   const left = btn('left'), right = btn('right'), mute = btn('mute'), quality = btn('quality');
   const qualityText = $('.hud-btn-text');
+  const aim = $('.hud-aim');
+  const keysHint = $('.hud-keys');
+  const resume = $('.hud-resume');
+  keysHint.textContent = STRINGS.ghost.controls;
+  resume.textContent = STRINGS.ghost.resume;
 
   $('.hud-title').textContent = STRINGS.title;
   headphones.textContent = STRINGS.start.headphones;
@@ -180,7 +200,40 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     play.hidden = false;
     // 下一帧再加 is-on，让淡入的 transition 生效
     requestAnimationFrame(() => play.classList.add('is-on'));
+    showKeysOnce();
+    refreshGhost();
   }
+
+  // ── 第三人称：准星、操作提示、「点一下继续」 ─────────────────────
+  const ghost = { active: false, engaged: false, locked: false, pending: false, aiming: false };
+  let keysShown = false;
+  let keysTimer = 0;
+  // toggle 带第二个参数时，类名没变就不写属性，状态变化时整体刷一遍即可
+  function refreshGhost() {
+    const live = ghost.active && playing && !errored;
+    left.hidden = right.hidden = ghost.active;
+    aim.classList.toggle('is-on', live && ghost.locked);
+    aim.classList.toggle('is-aiming', live && ghost.locked && ghost.aiming);
+    resume.classList.toggle('is-on', live && ghost.engaged && !ghost.locked && !ghost.pending);
+  }
+  // 操作提示一页只出现一次：重新锁定指针时不再出来
+  function showKeysOnce() {
+    if (!ghost.active || !playing || keysShown) return;
+    keysShown = true;
+    keysTimer = window.setTimeout(() => {
+      keysHint.classList.add('is-on');
+      keysTimer = window.setTimeout(() => keysHint.classList.remove('is-on'), KEYS_HOLD * 1000);
+    }, KEYS_DELAY * 1000);
+  }
+  const unwatchGhost = watchGhostUi((s) => {
+    ghost.active = s.active;
+    ghost.engaged = s.engaged;
+    ghost.locked = s.locked;
+    ghost.pending = s.pending;
+    ghost.aiming = s.aim !== null;
+    showKeysOnce();
+    refreshGhost();
+  });
 
   // ── 按钮 ────────────────────────────────────────────
   const setMuteUi = (m: boolean) => {
@@ -216,8 +269,9 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     }
     if (!playing || e.repeat) return;
     const k = e.key.toLowerCase();
-    if (k === 'q') h.onRotate(-1);
-    else if (k === 'e') h.onRotate(1);
+    // 第三人称没有 90° 旋转
+    if (k === 'q' && !ghost.active) h.onRotate(-1);
+    else if (k === 'e' && !ghost.active) h.onRotate(1);
     else if (k === 'm') toggleMute();
   };
   addEventListener('keydown', onKey);
@@ -283,6 +337,9 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
       beginBtn.hidden = true;
       hint.hidden = true;
       start.classList.add('is-error');
+      // 第三人称：把鼠标还给玩家，才看得见光标、点得了「点一下重新加载」
+      if (document.pointerLockElement) document.exitPointerLock();
+      refreshGhost();
     },
     setQuality: setQualityUi,
     setReady(r) {
@@ -317,6 +374,8 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     dispose() {
       removeEventListener('keydown', onKey);
       clearTimeout(hideTimer);
+      clearTimeout(keysTimer);
+      unwatchGhost();
       root.innerHTML = '';
     },
   };

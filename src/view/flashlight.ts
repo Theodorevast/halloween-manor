@@ -6,7 +6,9 @@
 // 灯由 characters.ts 在模块创建时一次建好（对象池），之后只改参数、不增删：
 // three.js 的灯数量或 castShadow 一变，场景里每个材质都要重新编译，访客进出门时会卡一下。
 import * as THREE from 'three/webgpu';
-import { abs, color, mx_noise_float, normalView, positionWorld, pow, smoothstep, time, uniform, uv, vec3 } from 'three/tsl';
+import {
+  abs, color, dot, mix, mx_noise_float, normalView, normalize, positionView, positionWorld, pow, smoothstep, time, uniform, uv, vec3,
+} from 'three/tsl';
 import { CELL, GRID_H, GRID_W, blocksSight, buildTiles, type Tile } from '../config/house';
 import { VISION } from '../config/visitors';
 import type { Quality } from '../engine/types';
@@ -61,6 +63,12 @@ export interface Flashlight {
   setQuality(q: Quality): void;
   dispose(): void;
 }
+
+/**
+ * 这一次画光锥的相机：1 = 透视（第三人称），0 = 正交（娃娃屋）。所有手电共用，光锥画之前按相机设。
+ * 光锥「正对镜头的程度」要用指向镜头的方向算：正交相机处处是观察空间 +z，透视相机逐片元从这一点指向镜头
+ */
+const beamPersp = uniform(0);
 
 // 光锥网格要在墙那里截断：沿格子地图走一遍，找到第一个挡视线的格子
 let tiles: Uint8Array | null = null;
@@ -120,8 +128,12 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
   // 也盖住 24 个面拼出来的条纹。贴地那一段交给雾（雾自己会被手电照亮），光锥在这里渐隐，免得两层加法叠得过亮
   const dust = mx_noise_float(positionWorld.mul(vec3(2.2, 3, 2.2)).add(vec3(time.mul(0.12), time.mul(0.05), time.mul(-0.08)))).mul(0.5).add(0.5);
   const aboveFog = smoothstep(0.2, 0.6, positionWorld.y);
-  beamMat.opacityNode = pow(uv().y, 1.8).mul(pow(abs(normalView.z), 1.4)).mul(strength).mul(dust.mul(0.7).add(0.3)).mul(aboveFog);
+  const toCam = normalize(mix(vec3(0, 0, 1), positionView.negate(), beamPersp));
+  beamMat.opacityNode = pow(uv().y, 1.8).mul(pow(abs(dot(normalView, toCam)), 1.4)).mul(strength).mul(dust.mul(0.7).add(0.3)).mul(aboveFog);
   const beam = new THREE.Mesh(parts.cone, beamMat);
+  beam.onBeforeRender = (_r, _s, camera) => {
+    beamPersp.value = (camera as THREE.PerspectiveCamera).isPerspectiveCamera ? 1 : 0;
+  };
   beam.renderOrder = 2;
   for (const m of [body, lens, beam]) {
     m.castShadow = false; // 手电自己不能挡住自己的光

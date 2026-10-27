@@ -1,13 +1,19 @@
 // 射线拾取：鼠标悬停 → onHover（同时改光标），一次「点击」→ onPick。
 // 点击的判定：按下和抬起间隔 < 400 ms、位移 < 6 px，这样拖一下、按住不放都不会误触发附身。
-// 触屏没有悬停：按下时先按落点更新一次悬停（叠层能显示物件名），抬起时再判定点击
+// 触屏没有悬停：按下时先按落点更新一次悬停（叠层能显示物件名），抬起时再判定点击。
+// 第三人称（ghostRig）换一套：准星（画面正中）对着的、离鬼魂 4 米以内、鬼魂看得见的物件是悬停，
+// 指针锁定时按下左键附身；没锁定时那一下是「点一下继续」（ghostRig 重新锁定），不附身
 import * as THREE from 'three/webgpu';
-import type { CameraRig } from './types';
+import { HOUSE_D, HOUSE_W } from '../config/house';
+import { ghostSees, setGhostUi, watchGhostUi } from './ghostRig';
+import { isGhostRig, type CameraRig, type GhostRig } from './types';
 
 const CLICK_MS = 400;
 const CLICK_PX = 6;
 /** 触屏轻点后，悬停标签停留多久（毫秒） */
 const TOUCH_HOVER_MS = 1500;
+/** 第三人称：准星对着的物件离鬼魂（水平距离，米）这么近才够得着 */
+const AIM_RANGE = 4;
 
 export interface Picker {
   onHover(cb: (id: string | null) => void): void;
@@ -15,7 +21,16 @@ export interface Picker {
   dispose(): void;
 }
 
+const propIdOf = (obj: THREE.Object3D): string | null => {
+  for (let o: THREE.Object3D | null = obj; o; o = o.parent) {
+    const id = o.userData.propId;
+    if (typeof id === 'string') return id;
+  }
+  return null;
+};
+
 export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTargets: () => THREE.Object3D[]): Picker {
+  if (isGhostRig(rig)) return createAimPicker(canvas, rig, getTargets);
   const ray = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
   const hoverCbs: ((id: string | null) => void)[] = [];
@@ -30,13 +45,6 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
 
   const box = new THREE.Box3();
   const center = new THREE.Vector3();
-  const propIdOf = (obj: THREE.Object3D): string | null => {
-    for (let o: THREE.Object3D | null = obj; o; o = o.parent) {
-      const id = o.userData.propId;
-      if (typeof id === 'string') return id;
-    }
-    return null;
-  };
 
   /**
    * 屏幕点下的物件 id。点击盒故意做得比物件大，相邻物件的盒子会互相重叠（转了镜头以后厨房门的盒子会挡住摇椅、
@@ -152,6 +160,83 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
       disposed = true;
       canvas.style.cursor = '';
       canvas.style.touchAction = prevTouchAction;
+      hoverCbs.length = 0;
+      pickCbs.length = 0;
+    },
+  };
+}
+
+/**
+ * 第三人称的拾取：每帧从镜头沿准星（画面正中）打一条射线。穿过的拾取盒里，挑盒子中心离射线最近的那个
+ * （和俯视一样：相邻物件的盒子会一起被穿过，比如卧室的台灯和八音盒），但只算离鬼魂 AIM_RANGE 米以内、
+ * 鬼魂看得见（中间没有墙，见 ghostRig.ts 的 ghostSees）的：墙全高以后，隔着墙的物件看不见，标签也不该凭空冒出来
+ */
+function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: () => THREE.Object3D[]): Picker {
+  const ray = new THREE.Raycaster();
+  const centre = new THREE.Vector2(0, 0);
+  const box = new THREE.Box3();
+  const c = new THREE.Vector3();
+  const hoverCbs: ((id: string | null) => void)[] = [];
+  const pickCbs: ((id: string) => void)[] = [];
+  let hover: string | null = null;
+  let locked = false;
+  let disposed = false;
+
+  const aimed = (): string | null => {
+    if (!locked) return null;
+    ray.setFromCamera(centre, rig.camera);
+    const g = rig.ghost;
+    let best: string | null = null;
+    let bestD = Infinity;
+    for (const hit of ray.intersectObjects(getTargets(), true)) {
+      const id = propIdOf(hit.object);
+      if (!id || id === best) continue;
+      box.setFromObject(hit.object).getCenter(c);
+      // 世界坐标 → 房屋米坐标
+      const p = { x: c.x + HOUSE_W / 2, z: c.z + HOUSE_D / 2 };
+      if (Math.hypot(p.x - g.x, p.z - g.z) > AIM_RANGE || !ghostSees(g, p)) continue;
+      const d = ray.ray.distanceSqToPoint(c);
+      if (d < bestD) {
+        bestD = d;
+        best = id;
+      }
+    }
+    return best;
+  };
+
+  const setHover = (id: string | null) => {
+    if (id === hover) return;
+    hover = id;
+    setGhostUi({ aim: id });
+    for (const cb of hoverCbs) cb(id);
+  };
+
+  // 镜头每帧都在动（跟随、转向），悬停每帧重算一次：7 个盒子的一条射线，很便宜
+  const tick = () => {
+    if (disposed) return;
+    setHover(aimed());
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  // 丢了锁定：下一帧 aimed() 返回 null，悬停自己收起
+  const unwatch = watchGhostUi((s) => { locked = s.locked; });
+
+  const onDown = (e: PointerEvent) => {
+    if (e.button !== 0 || !locked) return;
+    const id = aimed();
+    setHover(id);
+    if (id) for (const cb of pickCbs) cb(id);
+  };
+  canvas.addEventListener('pointerdown', onDown);
+
+  return {
+    onHover(cb) { hoverCbs.push(cb); },
+    onPick(cb) { pickCbs.push(cb); },
+    dispose() {
+      canvas.removeEventListener('pointerdown', onDown);
+      unwatch();
+      disposed = true;
+      setHover(null);
       hoverCbs.length = 0;
       pickCbs.length = 0;
     },

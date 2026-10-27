@@ -262,7 +262,7 @@ h.add({
 /** 从走路 / 跑步片段反推「脚不打滑」的播放速率和模型的正面朝向 */
 async function calibrate() {
   const asset = await loadCharacterAsset(CHARACTER);
-  const H = CHARACTER.targetHeight;
+  const H = asset.height; // 归一化后的实际身高（身长超过 maxLength 时比 targetHeight 矮）
   const out: Record<string, unknown> = {
     url: CHARACTER.url, triangles: asset.triangles, rawSize: asset.rawSize.toArray().map((v) => +v.toFixed(2)), scale: +asset.scale.toPrecision(3),
     front: +asset.front.toFixed(3), clips: asset.clips.map((c) => `${c.name} ${c.duration.toFixed(2)}s`), facingOffset: CHARACTER.facingOffset,

@@ -2,6 +2,7 @@
 //   node scripts/smoke.mjs            先构建再测
 //   node scripts/smoke.mjs --no-build 直接测现有的 dist/
 //   node scripts/smoke.mjs --webgl    强制走 WebGL2 回退路径（地址加 ?webgl）
+// 三段：娃娃屋俯视（?dollhouse，原有的各项检查）· 第三人称鬼魂（有鼠标的桌面默认走这条）· 手机竖屏（触屏自动走俯视）
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright-core';
@@ -11,7 +12,27 @@ const BASE = `http://127.0.0.1:${PORT}/`;
 const CHROME = process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const VITE = 'node_modules/vite/bin/vite.js';
 const WEBGL = process.argv.includes('--webgl');
+const QS = WEBGL ? '&webgl' : '';
 mkdirSync('shots', { recursive: true });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const up = async () => {
+  try {
+    return (await fetch(BASE)).ok;
+  } catch {
+    return false;
+  }
+};
+
+// 这台机器上几个会话共用 5738：别人的冒烟测试还占着端口时先等它结束，不然会连到别人的预览服务器上去测
+for (let i = 0; await up(); i++) {
+  if (i === 0) console.log(`${PORT} 端口被占着（可能是别的会话在跑冒烟测试），等它结束…`);
+  if (i >= 120) {
+    console.error(`${PORT} 端口一直被占着，稍后再试`);
+    process.exit(2);
+  }
+  await sleep(1000);
+}
 
 if (!process.argv.includes('--no-build')) {
   const b = spawnSync(process.execPath, [VITE, 'build'], { stdio: 'inherit' });
@@ -20,16 +41,21 @@ if (!process.argv.includes('--no-build')) {
 
 // 直接用 node 跑 vite.js（不经过 .bin 里的 sh 脚本），这样 kill() 能结束它
 const server = spawn(process.execPath, [VITE, 'preview', '--port', String(PORT), '--strictPort', '--host', '127.0.0.1'], { stdio: 'ignore' });
+let serverExited = false;
+server.on('exit', () => { serverExited = true; });
 const stop = () => server.kill();
 process.on('exit', stop);
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 for (let i = 0; ; i++) {
-  try {
-    if ((await fetch(BASE)).ok) break;
-  } catch {}
+  if (await up()) break;
   if (i > 50) throw new Error(`preview 没在 ${PORT} 端口起来`);
   await sleep(200);
+}
+// 端口在构建期间被别人抢走时，我们的预览起不来（--strictPort），上面连上的是别人的
+await sleep(300);
+if (serverExited) {
+  console.error(`自己的预览没起来（${PORT} 端口被占？），稍后再试`);
+  process.exit(2);
 }
 
 const results = [];
@@ -61,21 +87,33 @@ async function litRatio(page, png) {
   }, png.toString('base64'));
 }
 
-try {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+/** 收集页面报错：JS 异常、console.error、任何 4xx / 5xx 响应（正式首页带 favicon，404 也算错） */
+function watchErrors(page) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) errors.push(m.text()); });
-  // 正式首页带 favicon，任何 404 都算错（dev 沙盒页没有 favicon，那是 shot.mjs 的事）
   page.on('response', (r) => { if (r.status() >= 400) errors.push(`${r.status()} ${r.url()}`); });
+  return errors;
+}
 
-  await page.goto(`${BASE}?debug${WEBGL ? '&webgl' : ''}`, { waitUntil: 'networkidle' });
+/** 等加载完、开场按钮可用，和真实玩家一样 */
+const waitReady = (page) =>
+  page.waitForFunction(() => Boolean(window.__haunt) && !document.querySelector('.hud-begin')?.disabled, null, { timeout: 30000 });
+
+try {
+  // ── 娃娃屋俯视（?dollhouse）：原有的各项检查 ─────────────────────────
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const errors = watchErrors(page);
+
+  await page.goto(`${BASE}?debug&dollhouse${QS}`, { waitUntil: 'networkidle' });
   await page.locator('[data-start]').waitFor({ timeout: 15000 });
   await page.screenshot({ path: 'shots/smoke-0-start.png' });
-  await page.waitForFunction(() => Boolean(window.__haunt) && !document.querySelector('.hud-begin')?.disabled, null, { timeout: 30000 }); // 等加载完、开场按钮可用，和真实玩家一样
+  await waitReady(page);
+  check('?dollhouse 走娃娃屋俯视', await page.evaluate(() => window.__haunt.ghost === null));
   await page.locator('[data-start]').click();
   await sleep(3500);
   check('开场遮罩点击后消失', !(await page.locator('[data-start]').isVisible().catch(() => false)));
+  check('俯视有旋转按钮', await page.locator('[data-act="left"]').isVisible());
   const backend = await page.evaluate(() => window.__haunt.backend);
   check('渲染后端', !WEBGL || backend === 'WebGL2', backend);
 
@@ -100,8 +138,7 @@ try {
   check('画面不是一片黑', lit > 0.01, `亮像素 ${(lit * 100).toFixed(1)}%`);
 
   // 4 个镜头方位下逐个点每个物件的屏幕位置：附身的必须是它自己（点击盒互相遮挡时会附身到旁边的物件）。
-  // 冻结模拟：附身是同步生效的（冷却马上开始），惊吓要等模拟往前走才落下；不冻结的话，
-  // 恰好有人看着台灯时会触发镜头推近，下一次点击时镜头还在动
+  // 冻结模拟：附身是同步生效的（冷却马上开始），惊吓要等模拟往前走才落下
   await page.evaluate(() => window.__haunt.setTimeScale(0));
   const misses = [];
   for (let q = 0; q < 4; q++) {
@@ -126,11 +163,197 @@ try {
   await page.evaluate(() => window.__haunt.setTimeScale(1));
   console.log(await page.evaluate(() => window.__haunt.state()));
   check('没有页面报错', errors.length === 0, errors.slice(0, 5).join(' | '));
+  await page.close();
 
-  // 手机竖屏（触屏）：不出横向滚动条；轻点开场能开始，轻点物件能附身
+  // ── 第三人称鬼魂：有鼠标的桌面默认走这条 ───────────────────────────
+  // 无头 Chrome 里指针锁定一般锁得上，但不保证：先按真实情况检查界面，之后用 ghost.fakeLock(true) 走同一条路，不依赖它
+  const gp = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const gErrors = watchErrors(gp);
+  await gp.goto(`${BASE}?debug${QS}`, { waitUntil: 'networkidle' });
+  await waitReady(gp);
+  check('桌面默认走第三人称', await gp.evaluate(() => window.__haunt.ghost !== null));
+  // 鼠标放在画面正中，之后的点击都原地按下：锁定指针后移动鼠标就是转镜头
+  await gp.mouse.move(640, 400);
+  await gp.locator('[data-start]').click();
+  await sleep(3500);
+  check('第三人称：开场遮罩点击后消失', !(await gp.locator('[data-start]').isVisible().catch(() => false)));
+  check('第三人称：旋转按钮藏起来', !(await gp.locator('[data-act="left"]').isVisible()));
+  const hint = await gp.evaluate(() => ({ on: document.querySelector('.hud-keys').classList.contains('is-on'), text: document.querySelector('.hud-keys').textContent }));
+  check('第三人称：开场后有操作提示', hint.on && hint.text.includes('WASD'), hint.text);
+  const lockUi = await gp.evaluate(() => ({
+    real: document.pointerLockElement !== null,
+    aim: document.querySelector('.hud-aim').classList.contains('is-on'),
+    resume: document.querySelector('.hud-resume').classList.contains('is-on'),
+  }));
+  check('第三人称：准星 /「点一下继续」和指针锁定一致', lockUi.real ? lockUi.aim && !lockUi.resume : !lockUi.aim && lockUi.resume, JSON.stringify(lockUi));
+  await gp.evaluate(() => window.__haunt.ghost.fakeLock(true));
+  await sleep(100);
+  check('第三人称：锁定时显示准星', await gp.evaluate(() => document.querySelector('.hud-aim').classList.contains('is-on') && !document.querySelector('.hud-resume').classList.contains('is-on')));
+  const gs = () => gp.evaluate(() => window.__haunt.ghost.state());
+  const g0 = await gs();
+  check('第三人称：鬼魂离地约 1.4 米、镜头在天花板和地板之间', Math.abs(g0.y - 1.4) < 0.1 && g0.cam.y <= 2.25 + 1e-6 && g0.cam.y >= 0.3 - 1e-6, `鬼魂 ${g0.y.toFixed(2)} 米，镜头 ${g0.cam.y.toFixed(2)} 米`);
+
+  // 冻结模拟（访客不走动、不触发惊吓），只测鬼魂和镜头：主循环照常每帧更新它们
+  await gp.evaluate(() => window.__haunt.setTimeScale(0));
+
+  // 鼠标左右移动转朝向（真锁定或假装锁定都一样，靠 movementX）：右移 100 像素约右转 0.22 弧度，移回来转回原处
+  const yaw0 = (await gs()).yaw;
+  await gp.mouse.move(740, 400, { steps: 4 });
+  await sleep(250);
+  const yawR = (await gs()).yaw;
+  await gp.mouse.move(640, 400, { steps: 4 });
+  await sleep(250);
+  const yaw1 = (await gs()).yaw;
+  check('第三人称：鼠标左右转向', yawR - yaw0 > 0.15 && Math.abs(yaw1 - yaw0) < 0.02, `右移后 +${(yawR - yaw0).toFixed(3)}，移回后差 ${(yaw1 - yaw0).toFixed(3)} 弧度`);
+
+  // WASD：走廊中段朝东，按住 W 一秒往东飘，松开后平滑停下；D 往右（南）
+  await gp.evaluate(() => window.__haunt.ghost.place(8, 6, 0));
+  await gp.keyboard.down('KeyW');
+  await sleep(1000);
+  await gp.keyboard.up('KeyW');
+  const w1 = await gs();
+  await sleep(1500);
+  const w2 = await gs();
+  check('第三人称：按住 W 朝前飘', w1.x - 8 > 0.6 && Math.abs(w1.z - 6) < 0.05, `前进 ${(w1.x - 8).toFixed(2)} 米，侧移 ${(w1.z - 6).toFixed(2)} 米`);
+  check('第三人称：松开后滑一小段停下', w2.speed < 0.05 && w2.x - w1.x > 0.05 && w2.x - w1.x < 1.2, `又滑了 ${(w2.x - w1.x).toFixed(2)} 米，速度 ${w2.speed.toFixed(3)}`);
+  await gp.keyboard.down('KeyD');
+  await sleep(600);
+  await gp.keyboard.up('KeyD');
+  const d1 = await gs();
+  check('第三人称：D 往右边飘', d1.z - w2.z > 0.3 && Math.abs(d1.x - w2.x) < 0.05, `右移 ${(d1.z - w2.z).toFixed(2)} 米`);
+  // 边界：从西墙边朝西一直飘，停在房子外 0.6 米处
+  await gp.evaluate(() => window.__haunt.ghost.place(0.6, 6, Math.PI));
+  await gp.keyboard.down('KeyW');
+  await sleep(1300);
+  await gp.keyboard.up('KeyW');
+  const b1 = await gs();
+  check('第三人称：飘不出房子外一圈边距', b1.x >= -0.6 - 1e-6 && b1.x < -0.5, `x = ${b1.x.toFixed(2)}`);
+  // 穿墙：墙格里 inWall，走廊中间不是
+  const inWall = await gp.evaluate(() => {
+    const g = window.__haunt.ghost;
+    g.place(6.25, 4.75);
+    const a = g.state().inWall;
+    g.place(6.25, 6);
+    const b = g.state().inWall;
+    g.place(8, 4.75); // 客厅门洞
+    const c = g.state().inWall;
+    return [a, b, c];
+  });
+  check('第三人称：在墙里时 inWall，走廊和门洞里不是', inWall[0] && !inWall[1] && !inWall[2], JSON.stringify(inWall));
+  // 镜头不穿天花板、不穿地板（俯仰到头、拉到最远）
+  const camYs = await gp.evaluate(() => {
+    const g = window.__haunt.ghost;
+    g.zoom(4);
+    g.place(8, 6, 0, 0.87);
+    const hi = g.state().cam.y;
+    g.place(8, 6, 0, -0.52);
+    const lo = g.state().cam.y;
+    g.zoom(2.4);
+    g.place(8, 6, 0, 0.07);
+    return [hi, lo];
+  });
+  check('第三人称：镜头不穿天花板和地板', camYs[0] <= 2.25 + 1e-6 && camYs[1] >= 0.3 - 1e-6, camYs.map((y) => y.toFixed(2)).join(' / '));
+  // 滚轮：往后滚拉远（最远 4 米），往前滚推近（最近 1 米）
+  for (let i = 0; i < 6; i++) await gp.mouse.wheel(0, 300);
+  await sleep(150);
+  const far = (await gs()).dist;
+  for (let i = 0; i < 12; i++) await gp.mouse.wheel(0, -300);
+  await sleep(150);
+  const near = (await gs()).dist;
+  await gp.evaluate(() => window.__haunt.ghost.zoom(2.4));
+  check('第三人称：滚轮调远近 1–4 米', Math.abs(far - 4) < 1e-6 && Math.abs(near - 1) < 1e-6, `${far.toFixed(2)} / ${near.toFixed(2)}`);
+
+  // 准星对准每个物件（站在它正面 2.2 米处），点一下：附身的必须是它自己，悬停标签要出来
+  const gMisses = [];
+  const ids = await gp.evaluate(() => window.__haunt.raw().objects.map((o) => o.id));
+  for (const id of ids) {
+    await gp.evaluate(() => window.__haunt.step(25000)); // 等所有冷却走完
+    await gp.evaluate((x) => window.__haunt.ghost.aimAt(x, { from: 2.2 }), id);
+    await sleep(120); // 拾取器每帧更新一次悬停
+    const aimed = await gp.evaluate(() => window.__haunt.ghost.aimed());
+    const tip = await gp.evaluate(() => document.querySelector('.ov-tip').classList.contains('is-on'));
+    await gp.mouse.down();
+    await gp.mouse.up();
+    await sleep(50);
+    const fired = await gp.evaluate(() => window.__haunt.raw().objects.filter((o) => o.cooldown > 0).map((o) => o.id));
+    if (aimed !== id || !tip || fired.length !== 1 || fired[0] !== id) gMisses.push(`${id}：准星 ${aimed}，标签 ${tip ? '有' : '无'}，附身 ${fired.join('+') || '没反应'}`);
+  }
+  check('第三人称：准星对准每个物件、点击附身到它自己', gMisses.length === 0, gMisses.join('；'));
+  await gp.screenshot({ path: `shots/smoke-4-ghost${WEBGL ? '-webgl' : ''}.png` });
+
+  // 够不着的不算：离得太远（同一个房间里约 5 米），或者隔着墙（走廊里看卧室的八音盒，中间是墙）
+  const reach = await gp.evaluate(async () => {
+    const h = window.__haunt;
+    const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    h.step(25000);
+    h.ghost.place(5.8, 4.2, -Math.PI / 2); // 同在客厅，离落地灯约 5 米：看得见，但够不着
+    h.ghost.aimAt('lamp-living');
+    await frame();
+    const far = h.ghost.aimed();
+    h.ghost.place(2, 6.2, Math.PI / 2);
+    h.ghost.aimAt('music-box');
+    await frame();
+    const walled = h.ghost.aimed();
+    return { far, walled };
+  });
+  await gp.mouse.down();
+  await gp.mouse.up();
+  await sleep(50);
+  const reachFired = await gp.evaluate(() => window.__haunt.raw().objects.filter((o) => o.cooldown > 0).map((o) => o.id));
+  check('第三人称：太远、隔墙的物件够不着，点了也不附身', reach.far === null && reach.walled === null && reachFired.length === 0, `${JSON.stringify(reach)} 附身 ${reachFired.join('+') || '无'}`);
+
+  // 名牌：前面看得见的照常，镜头背后的、隔着墙的不显示
+  const plates = await gp.evaluate(async () => {
+    const h = window.__haunt;
+    h.ghost.place(8, 3.2, -Math.PI / 2); // 客厅，朝北；镜头在身后走廊里
+    h.spawn({ pos: { x: 6.6, z: 2.4 }, lookDir: 0, name: 'Ahead' });
+    h.spawn({ pos: { x: 8.3, z: 6.4 }, lookDir: 0, name: 'Behind' }); // 走廊里、镜头背后（经门洞看得见）
+    h.spawn({ pos: { x: 12.5, z: 2.6 }, lookDir: 0, name: 'Walled' }); // 厨房，隔着墙
+    await new Promise((r) => setTimeout(r, 400));
+    const op = (name) => {
+      const p = [...document.querySelectorAll('.ov-plate.is-on')].find((x) => x.querySelector('.ov-name')?.textContent === name);
+      return p ? p.firstElementChild.style.opacity || '1' : 'none';
+    };
+    return { ahead: op('Ahead'), behind: op('Behind'), walled: op('Walled') };
+  });
+  check('第三人称：名牌只给看得见的人（镜头背后、隔墙的不显示）', plates.ahead === '1' && plates.behind === '0' && plates.walled === '0', JSON.stringify(plates));
+
+  // 丢了指针锁定：提示「Click to resume」，准星收起；在画布上点一下重新锁定，这一下不附身
+  const resume = await gp.evaluate(async () => {
+    const h = window.__haunt;
+    h.step(25000);
+    h.ghost.aimAt('lamp-living', { from: 2.2 }); // 准星正对着物件：这时候点一下也只是继续
+    h.ghost.fakeLock(false);
+    if (document.pointerLockElement) document.exitPointerLock();
+    await new Promise((r) => setTimeout(r, 300));
+    return { resume: document.querySelector('.hud-resume').classList.contains('is-on'), aim: document.querySelector('.hud-aim').classList.contains('is-on') };
+  });
+  check('第三人称：丢了锁定提示继续、准星收起', resume.resume && !resume.aim, JSON.stringify(resume));
+  await gp.mouse.down();
+  await gp.mouse.up();
+  await sleep(500);
+  const resumed = await gp.evaluate(() => ({
+    fired: window.__haunt.raw().objects.filter((o) => o.cooldown > 0).map((o) => o.id),
+    real: document.pointerLockElement !== null,
+    resume: document.querySelector('.hud-resume').classList.contains('is-on'),
+  }));
+  check('第三人称：点一下继续不附身', resumed.fired.length === 0, `附身 ${resumed.fired.join('+') || '无'}，重新锁定 ${resumed.real}`);
+  if (resumed.real) check('第三人称：点一下重新锁定', !resumed.resume);
+
+  await gp.evaluate(() => window.__haunt.setTimeScale(1));
+  await gp.evaluate(() => window.__haunt.ghost.place(9.3, 10.1, Math.PI / 2));
+  await sleep(600);
+  const gShot = await gp.screenshot({ path: `shots/smoke-5-ghost-foyer${WEBGL ? '-webgl' : ''}.png` });
+  const gLit = await litRatio(gp, gShot);
+  check('第三人称：画面不是一片黑', gLit > 0.01, `亮像素 ${(gLit * 100).toFixed(1)}%`);
+  check('第三人称：没有页面报错', gErrors.length === 0, gErrors.slice(0, 5).join(' | '));
+  await gp.close();
+
+  // ── 手机竖屏（触屏）：自动走俯视；不出横向滚动条；轻点开场能开始，轻点物件能附身 ──────────
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
-  await phone.goto(`${BASE}?debug${WEBGL ? '&webgl' : ''}`, { waitUntil: 'networkidle' });
-  await phone.waitForFunction(() => Boolean(window.__haunt) && !document.querySelector('.hud-begin')?.disabled, null, { timeout: 30000 }); // 等加载完、开场按钮可用，和真实玩家一样
+  await phone.goto(`${BASE}?debug${QS}`, { waitUntil: 'networkidle' });
+  await waitReady(phone);
+  check('触屏自动走娃娃屋俯视', await phone.evaluate(() => window.__haunt.ghost === null));
   const sw = await phone.evaluate(() => document.documentElement.scrollWidth);
   check('390 px 宽没有横向滚动', sw <= 390, `scrollWidth=${sw}`);
   await phone.locator('[data-start]').tap();
