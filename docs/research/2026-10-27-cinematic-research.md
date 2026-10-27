@@ -32,6 +32,7 @@
 - 透明物体会覆盖法线和速度缓冲（MRT 附件默认不混合）：雾、光锥、玻璃、幽光会盖掉后面不透明表面的值
 - TRAA、TAAU、SSAO、GTAO、Godrays 等构造时要传真正的相机；现在 `createPostFx` 在相机建好之前就跑了，要改顺序或首帧再建
 - r186 里**没有 TSL 版的移轴**（`TiltShiftShader.js` 只给旧的 WebGLRenderer）；`AnamorphicNode` 在 r185 删了
+- **TSL 的 `select()` 会生成 if/else 分支**：一个共享节点如果第一次是在某个分支里构建的，它就只在那个分支里被赋值，另一个分支读到的是 0（粒子任务实测，肖像粉尘因此整个看不见）。值莫名其妙为 0 时先怀疑这个；用不分支的 `step` / `mix` 写法绕开（`src/view/particles/common.ts` 里有 `ge` / `lt` 小工具）
 
 ### 可用节点（`three/addons/tsl/display/`）
 

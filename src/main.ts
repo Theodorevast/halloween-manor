@@ -10,6 +10,7 @@ import { createJuice } from './engine/juice';
 import { createPicker } from './engine/picking';
 import { createRenderCore, watchFrameTime } from './engine/renderer';
 import type { CameraRig, FrameCtx, Module, Quality, RenderCore } from './engine/types';
+import type { Object3D } from 'three/webgpu';
 import type { SimEvent } from './sim/types';
 import { createWorld } from './sim/world';
 import { createHud } from './ui/hud';
@@ -152,8 +153,18 @@ async function boot() {
     await c.renderer.compileAsync(c.scene, r.camera);
     c.render(r.camera);
   };
+  // 不常用的物件（镜中人脸、肖像的地上印子、粒子）不进这次阻塞的预编译，开场按钮可用之后再编（见下面 ready 之后）。
+  // 它们一起会让冷启动多等 1 秒左右（实测：粒子约 0.5 秒，镜子和肖像的新材质约 0.6 秒）
+  const deferred: Object3D[] = [];
+  c.scene.traverse((o) => { if (o.userData.deferCompile) deferred.push(o); });
+  const deferredWasVisible = deferred.map((o) => o.visible);
+  for (const o of deferred) o.visible = false;
   await characters.prewarm(compile).catch((err) => console.warn('预编译着色器失败，改为边画边编', err));
+  for (const [i, o] of deferred.entries()) o.visible = deferredWasVisible[i];
 
+  /** ready 之后还要把延后编译的物件临时画进去的帧数 */
+  const DEFERRED_WARM_FRAMES = 3;
+  let warmFrames = 0;
   const frameWatch = watchFrameTime(() => { if (quality === 'high' && !qualityPicked) setQuality('low'); });
   let last = performance.now();
   let time = 0;
@@ -168,12 +179,25 @@ async function boot() {
     r.update(dt);
     for (const m of modules) m.update?.(ctx);
     if (started) frameWatch(dt);
+    // 延后编译的物件：ready 之后的头几帧在正常渲染里临时显示（各模块 update 之后、渲染之前），画完恢复
+    const warm = warmFrames > 0;
+    const was = warm ? deferred.map((o) => o.visible) : null;
+    if (warm) for (const o of deferred) o.visible = true;
     c.render(r.camera);
+    if (was) {
+      for (const [i, o] of deferred.entries()) o.visible = was[i];
+      warmFrames--;
+    }
   });
 
   ready = true;
   hud.setReady(true);
   if (wantBegin) start();
+
+  // 开场按钮已经可用：趁玩家读标题，把延后的物件编好。compileAsync 编的是渲染器默认的渲染目标，
+  // 而场景是后处理管线自己的 pass 画的（格式、多重采样都不一样），编出来的管线用不上，所以和预热一样真画一帧。
+  // 这一帧画在开场遮罩后面，玩家看不见；这些物件这时都是透明 / 缩成 0 的，下一帧各模块的 update 再按需要藏起来
+  warmFrames = DEFERRED_WARM_FRAMES;
 }
 
 // 渲染器建好之后的任何一步抛错（某些浏览器 / 显卡不支持某个节点等），都要告诉玩家，而不是让开场按钮永远停在加载中

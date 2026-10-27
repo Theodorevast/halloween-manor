@@ -1,4 +1,6 @@
 // 调试接口：地址带 ?debug 时挂到 window.__haunt，给冒烟测试和手动排查用。正常访问不挂
+import { AO, BLOOM, DOF, GRADE, GRAIN, REVEAL, type FxFlags } from './engine/postfx';
+import type { EngineCore } from './engine/renderer';
 import type { CameraRig, RenderCore } from './engine/types';
 import type { SimEvent, SpawnOptions, World, WorldState } from './sim/types';
 
@@ -66,5 +68,108 @@ export function installDebug(d: DebugDeps) {
     },
   };
   (window as unknown as { __haunt: HauntDebug }).__haunt = api;
+  Object.assign(api, cameraDebug(d));
+  Object.assign(api, postDebug(d));
   console.info('[debug] window.__haunt 已就绪：state() / raw() / step(ms) / trigger(id) / spawn(opts) / rotate(dir) / setTimeScale(n)');
+}
+
+// ── 镜头与电影段落的调试口（电影感升级）：量呼吸、震动的角度，记下 fx.focus / fx.setReveal 收到的调用 ──
+export interface CameraDebug {
+  /** 相机此刻的朝向（度）：az = 方位角（从房子中心指向相机，和 viewDir 同一个量），elev = 仰角，roll = 横滚 */
+  camAngles(): { az: number; elev: number; roll: number };
+  /** 开始记录 fx.focus / fx.setReveal 的调用（包一层，照常转给原实现）；返回记录数组，之后的调用会追加进去 */
+  recordFx(): { t: number; fn: string; args: unknown[] }[];
+}
+
+function cameraDebug(d: DebugDeps): CameraDebug {
+  const log: { t: number; fn: string; args: unknown[] }[] = [];
+  let wrapped = false;
+  const deg = 180 / Math.PI;
+  return {
+    camAngles() {
+      const m = d.rig.camera.matrixWorld.elements;
+      // 列：x 轴 m[0..2]，y 轴 m[4..6]，z 轴（视线反方向）m[8..10]
+      const [xx, xy, xz, yx, yy, yz, zx, zy, zz] = [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]];
+      const az = Math.atan2(zz, zx), elev = Math.asin(Math.max(-1, Math.min(1, zy)));
+      // 不横滚时的「上」：(−sinE·cosA, cosE, −sinE·sinA)
+      const ux = -Math.sin(elev) * Math.cos(az), uy = Math.cos(elev), uz = -Math.sin(elev) * Math.sin(az);
+      const roll = Math.atan2(xx * ux + xy * uy + xz * uz, yx * ux + yy * uy + yz * uz);
+      return { az: az * deg, elev: elev * deg, roll: roll * deg };
+    },
+    recordFx() {
+      if (!wrapped) {
+        wrapped = true;
+        const fx = d.core.fx;
+        for (const fn of ['focus', 'setReveal'] as const) {
+          const orig = fx[fn].bind(fx) as (...a: unknown[]) => void;
+          (fx as unknown as Record<string, (...a: unknown[]) => void>)[fn] = (...args: unknown[]) => {
+            log.push({ t: performance.now(), fn, args: structuredClone(args) });
+            orig(...args);
+          };
+        }
+      }
+      return log;
+    },
+  };
+}
+
+// ── 画面管线的调试口（电影感升级）：直接调 fx.focus / fx.setReveal，切换各效果（量性能、对比截图），读 GPU 时间 ──
+export interface PostDebug {
+  fx: {
+    /** 焦点对到房屋 (x, z)；x 为 null 回到常态 */
+    focus(x: number | null, z?: number, strength?: number, height?: number, smoothTime?: number): void;
+    /** 开场显影进度；给了 x、z 就改原点 */
+    reveal(progress: number, x?: number, z?: number): void;
+    /** 不给参数：读开关；给了：改开关（重建管线）。见 postfx.ts 的 FxFlags */
+    flags(f?: Partial<FxFlags>): FxFlags | null;
+    /** 上次 reset 以来平均每帧的 GPU 时间（要 ?gputime） */
+    gpu(reset?: boolean): { ms: number; frames: number } | null;
+    focusState(): unknown;
+    /** 画面换成中间结果：0 正常，1 AO，2 景深 CoC（地址要带 ?fxview，否则没有效果） */
+    view(v: number): void;
+    /** 颗粒花样定住（A/B 截图做差时用） */
+    freezeGrain(on: boolean): void;
+    /** 临时改 AO 强度（null 恢复） */
+    aoStrength(v: number | null): void;
+    /** 调参：改 postfx.ts 里某组常量（AO / DOF / GRADE / GRAIN / BLOOM / REVEAL）的字段，然后重建管线 */
+    tune(group: string, values: Record<string, unknown>): unknown;
+  };
+}
+
+function postDebug(d: DebugDeps): PostDebug {
+  const core = d.core as EngineCore;
+  return {
+    fx: {
+      focus(x, z = 0, strength, height, smoothTime) {
+        core.fx.focus(x === null ? null : { x, z }, { strength, height, smoothTime });
+      },
+      reveal(progress, x, z) {
+        core.fx.setReveal(progress, x !== undefined && z !== undefined ? { x, z } : undefined);
+      },
+      flags(f) {
+        if (!core.post) return null;
+        if (f) core.post.setFlags(f);
+        return { ...core.post.flags };
+      },
+      gpu: (reset) => core.gpuTime?.(reset) ?? null,
+      focusState: () => core.post?.focusState ?? null,
+      view(v) {
+        if (core.post) core.post.view = v;
+      },
+      freezeGrain(on) {
+        if (core.post) core.post.freezeGrain = on;
+      },
+      aoStrength(v) {
+        if (core.post) core.post.aoStrength = v;
+      },
+      tune(group, values) {
+        const groups: Record<string, object> = { AO, DOF, GRADE, GRAIN, BLOOM, REVEAL };
+        const g = groups[group];
+        if (!g) return null;
+        Object.assign(g, values);
+        core.post?.setFlags({});
+        return g;
+      },
+    },
+  };
 }

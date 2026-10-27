@@ -382,7 +382,9 @@ export function createHouseView(core: RenderCore, rig: CameraRig): Module {
 
   const applyQuality = (q: Quality) => {
     const high = q === 'high';
-    moon.castShadow = high;
+    // 月光阴影两档都开：关掉它会改变每一个受光材质的着色器，第一次切到 Low 时全部重编，页面卡 2 秒以上
+    // （2026-10-27 实测）。一张 2048 的方向光阴影图只画深度，开销远小于那次卡顿
+    moon.castShadow = true;
     moon.intensity = high ? MOON.intensity : MOON.intensityLow;
     patches.strength.value = high ? MOON.patch : MOON.patchLow;
   };
