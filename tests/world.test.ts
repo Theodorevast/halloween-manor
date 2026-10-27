@@ -282,9 +282,11 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
           expect(ofType(hit, 'startle').some((e) => e.npc === walker.id && e.object === id)).toBe(true);
           expect(walker.mode).toBe('startled');
           expect(JSON.stringify(walker.path)).toBe(path0); // 路径原样留着
-          // 受惊结束后回到原来的状态，接着走原来的路
-          run(w, FEAR.startleTime + 0.05, DT);
-          if (walker.mode !== 'fleeing') expect(walker.mode).toBe(mode0);
+          // 受惊结束后回到原来的状态，接着走原来的路。
+          // 僵住期间听见别人的尖叫（同一面镜子也吓到了旁边的人）或引诱声的，按设计恢复成警觉（见「受惊中听到声音」）
+          const after = [...hit, ...run(w, FEAR.startleTime + 0.05, DT)];
+          const heard = after.some((e) => (e.type === 'heard' || (e.type === 'startle' && e.object === null)) && e.npc === walker.id);
+          if (walker.mode !== 'fleeing') expect(walker.mode).toBe(heard ? 'alert' : mode0);
           cases++;
         }
       }
@@ -794,34 +796,37 @@ describe('World：闲逛、转向、不穿墙', () => {
   });
 
   test('转向限速：身体和手电每步最多转 turnRate × dt（受惊时除外；被惊吓蓄势定住时最多 transfixTurn 倍）', () => {
-    const w = createWorld({ seed: 48 });
-    const prev = new Map<number, { h: number; l: number; m: string }>();
     const ids = PROPS.map((p) => p.id);
     const normal = BEHAVIOR.turnRate * DT + 1e-9;
     const transfixed = BEHAVIOR.turnRate * BEHAVIOR.transfixTurn * DT + 1e-9;
-    // 这一步开始前有没有惊吓物件在蓄势（只有这时才可能有人被定住、转得更快）
-    const anyWindingUp = () =>
-      w.state.objects.some((o) => {
-        const spec = SCARES[o.type];
-        return spec.kind === 'sight' && o.active > 0 && spec.active - o.active < spec.hitAt - 1e-9;
-      });
     let sawFast = false;
-    for (let k = 0; k < 60 * 90; k++) {
-      if (k % 150 === 0) w.trigger(ids[(k / 150) % ids.length]);
-      const limit = anyWindingUp() ? transfixed : normal;
-      w.step(DT);
-      for (const n of w.state.npcs) {
-        const p = prev.get(n.id);
-        if (p && p.m !== 'startled' && n.mode !== 'startled') {
-          const dh = Math.abs(wrapAngle(n.heading - p.h)), dl = Math.abs(wrapAngle(n.lookDir - p.l));
-          expect(dh).toBeLessThanOrEqual(limit);
-          expect(dl).toBeLessThanOrEqual(limit);
-          if (Math.max(dh, dl) > normal) sawFast = true;
+    // 每局都检查限速；「确实有人被定住、转得比平时快」要看运气（谁正好在蓄势时看见、要转多少），换几个种子直到出现
+    for (let seed = 48; seed < 60 && !sawFast; seed++) {
+      const w = createWorld({ seed });
+      const prev = new Map<number, { h: number; l: number; m: string }>();
+      // 这一步开始前有没有惊吓物件在蓄势（只有这时才可能有人被定住、转得更快）
+      const anyWindingUp = () =>
+        w.state.objects.some((o) => {
+          const spec = SCARES[o.type];
+          return spec.kind === 'sight' && o.active > 0 && spec.active - o.active < spec.hitAt - 1e-9;
+        });
+      for (let k = 0; k < 60 * 90; k++) {
+        if (k % 150 === 0) w.trigger(ids[(k / 150) % ids.length]);
+        const limit = anyWindingUp() ? transfixed : normal;
+        w.step(DT);
+        for (const n of w.state.npcs) {
+          const p = prev.get(n.id);
+          if (p && p.m !== 'startled' && n.mode !== 'startled') {
+            const dh = Math.abs(wrapAngle(n.heading - p.h)), dl = Math.abs(wrapAngle(n.lookDir - p.l));
+            expect(dh).toBeLessThanOrEqual(limit);
+            expect(dl).toBeLessThanOrEqual(limit);
+            if (Math.max(dh, dl) > normal) sawFast = true;
+          }
+          prev.set(n.id, { h: n.heading, l: n.lookDir, m: n.mode });
         }
-        prev.set(n.id, { h: n.heading, l: n.lookDir, m: n.mode });
       }
     }
-    expect(sawFast).toBe(true); // 这局里确实有人被定住、转得比平时快
+    expect(sawFast).toBe(true); // 确实有人被定住、转得比平时快
   });
 
   test('长时间跑：访客永远站在可走格里（门外那一段除外），恐惧值在 0–100', () => {

@@ -1,11 +1,12 @@
 // 把格子、感知、物件、访客状态机、生成器组合成一个 World。集成阶段只用 createWorld。
-// 每一步（1/60 秒）的顺序：引诱结算 → 惊吓结算 → 尖叫传染 → 访客状态机 → 物件计时 → 时间前进 → 生成 → 移除离开的 → seenBy。
+// 每一步（1/60 秒）的顺序：引诱结算 → 惊吓结算 → 尖叫传染 → 鬼魂贴近（发毛、后颈一凉）→ 尖叫传染 →
+// 访客状态机（移动、互相避让）→ 兜底推开挤在一起的人 → 物件计时 → 时间前进 → 生成 → 移除离开的 → seenBy。
 // 先结算惊吓再移动：玩家点下去的那一刻，看着物件的人就会被吓到，不会因为同一步里转开了而落空。
 import { FRONT_DOOR } from '../config/house';
 import { FEAR, HIT_STOP, VISION } from '../config/visitors';
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
-import { canBeScared, createNav, createNpc, exposure, hear, startle, updateNpc } from './npc';
+import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, separate, startle, updateNpc, walkTo } from './npc';
 import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
@@ -32,6 +33,8 @@ export function createWorld(opts: WorldOptions): World {
   /** 两次 step 之间产生的事件（trigger、手动 spawn），下一次 step 一起返回 */
   let pending: SimEvent[] = [];
   let acc = 0;
+  /** 玩家操控的鬼魂（setGhost 给的，复制一份）；null = 没有鬼魂 */
+  let ghost: Vec2 | null = null;
 
   // 尖叫传染：这一步里开始尖叫的人排队结算，每人每步最多传染一次
   const screamQueue: Npc[] = [];
@@ -51,6 +54,8 @@ export function createWorld(opts: WorldOptions): World {
     onFlee: () => {
       state.hitStop = HIT_STOP;
     },
+    crowd: npcs,
+    ghost: null,
   };
 
   const inHouse = () => npcs.reduce((c, n) => c + (canBeScared(n) ? 1 : 0), 0);
@@ -75,6 +80,7 @@ export function createWorld(opts: WorldOptions): World {
       lookDir = o.lookDir ?? angleOf(inside.x - outside.x, inside.z - outside.z);
     }
     const npc = createNpc({ id: nextId++, name, personality, pos, lookDir, mode, now: state.time }, ctx);
+    if (o.goal) walkTo(npc, ctx, o.goal);
     npcs.push(npc);
     state.npcs.push(npc.s);
     events.push({ type: 'spawn', npc: npc.s.id });
@@ -134,7 +140,18 @@ export function createWorld(opts: WorldOptions): World {
     }
     flushScreams();
 
+    // 鬼魂贴近：发毛、后颈一凉。在移动之前：被吹了一口凉气的人这一步就僵住；没有鬼魂时什么都不变
+    ctx.ghost = ghost;
+    for (const n of npcs) feelGhost(n, ctx);
+    flushScreams();
+
+    // 移动：先记下每个人这一步开始时的位置（避让看的是它，和更新顺序无关），都走完再兜底推开挤在一起的人
+    for (const n of npcs) {
+      n.px = n.s.pos.x;
+      n.pz = n.s.pos.z;
+    }
     for (const n of npcs) updateNpc(n, ctx);
+    separate(npcs, grid, SIM_DT);
     flushScreams(); // 状态机兜底触发的逃跑也会尖叫
     for (const n of npcs) {
       if (n.s.mode !== 'gone') continue;
@@ -171,8 +188,9 @@ export function createWorld(opts: WorldOptions): World {
   return {
     state,
 
-    // 占位：贴近发毛由模拟层任务实现（2026-10-28 第三人称改版）
-    setGhost() {},
+    setGhost(pos: Vec2 | null) {
+      ghost = pos ? { x: pos.x, z: pos.z } : null;
+    },
 
     step(dt: number): SimEvent[] {
       const events = pending;

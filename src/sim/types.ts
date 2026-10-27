@@ -32,12 +32,20 @@ export interface NpcState {
   fear: number;
   /** fear ≥ 60：走得更快，手电抖动 */
   nervous: boolean;
-  /** 当前移动速度（米/秒），画面用它选走 / 跑动画 */
+  /**
+   * 当前移动速度（米/秒），画面用它选走 / 跑动画。就是这一步实际挪动的距离 / 步长（含侧身让路、被挤开），
+   * 起步、停下、拐弯时连续变化（加减速见 config/visitors.ts 的 MOTION）
+   */
   speed: number;
   /** > 0：正在尖叫，剩余秒数 */
   screaming: number;
   /** 当前路径的剩余路点（米坐标）。画面不用，调试用 */
   path: Vec2[];
+  /**
+   * 鬼魂贴近带来的发毛程度（0–1，平滑过的，第三人称改版）：画面可以拿来发抖，声音拿来加一层寒意。
+   * 模拟层每步都写；没有鬼魂（setGhost(null)）时恒为 0。可选只是为了不打扰手写 NpcState 的调试页
+   */
+  uneasy?: number;
 }
 
 export type ScareKind = 'lure' | 'sight';
@@ -69,13 +77,22 @@ export interface WorldState {
   hitStop: number;
 }
 
+/**
+ * 「后颈一凉」那次 startle 的 object：不是物件 id，state.objects 里找不到它。
+ * 按 id 找物件的消费者要能接受找不到（2026-10-28 时 src/ 里现有的都已经判空）
+ */
+export const GHOST_SOURCE = 'ghost';
+
 export type SimEvent =
   | { type: 'spawn'; npc: number }
   /** 玩家附身物件 */
   | { type: 'trigger'; object: string; scareType: ScareType }
   /** NPC 听到引诱声，转入警觉 */
   | { type: 'heard'; npc: number; object: string }
-  /** NPC 被吓到。object 为 null 表示被别人的尖叫吓到 */
+  /**
+   * NPC 被吓到（僵住、够多就尖叫）。object 是物件 id；为 null 表示被别人的尖叫吓到（这种不僵住）；
+   * 为 GHOST_SOURCE 表示鬼魂贴着后颈吹了一口凉气（同一步前面有一个 neck: true 的 chill，amount 是同一笔，别加两次）
+   */
   | { type: 'startle'; npc: number; object: string | null; amount: number; scream: boolean }
   /** 恐惧值涨满，开始逃跑（同时触发 hit-stop） */
   | { type: 'flee'; npc: number }
@@ -83,7 +100,8 @@ export type SimEvent =
   | { type: 'exit'; npc: number; name: string; total: number }
   /**
    * 鬼魂贴近带来的寒意（第三人称改版）。neck = true 时是「后颈一凉」的惊吓（贴得很近停留够久），
-   * 否则是持续发毛的一小步。amount 为这一下涨的恐惧值
+   * 紧跟着同一步有一个 object = GHOST_SOURCE 的 startle；
+   * 否则是持续发毛的一小步（鬼魂在身边时约每 GHOST.chillEvery 秒一个）。amount 为这一下涨的恐惧值
    */
   | { type: 'chill'; npc: number; amount: number; neck: boolean }
   /** 物件从「被破坏」状态复原（台灯亮回、肖像立回画架） */
@@ -111,6 +129,8 @@ export interface SpawnOptions {
   lookDir?: number;
   /** 默认 'entering'；给了 pos 时默认 'wander' */
   mode?: 'entering' | 'wander';
+  /** 测试和调试用：生成后先寻路走到这里（闲逛状态，到了再左右照）；给了它就不看 mode */
+  goal?: Vec2;
 }
 
 export interface WorldOptions {
