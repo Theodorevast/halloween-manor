@@ -13,6 +13,7 @@ import type { SimEvent } from './sim/types';
 import { createWorld } from './sim/world';
 import { createHud } from './ui/hud';
 import { createCharactersView } from './view/characters';
+import { createFogView } from './view/fog';
 import { createHouseView } from './view/house';
 import { createOverlays } from './view/overlays';
 import { createPropsView } from './view/props';
@@ -123,7 +124,7 @@ async function boot() {
   const props = createPropsView(c);
   const overlays = createOverlays(document.getElementById('overlay')!, r);
   const characters = await createCharactersView(c);
-  modules.push(createHouseView(c, r), props, characters, createJuice(r, c), audio, overlays, hud);
+  modules.push(createHouseView(c, r), createFogView(c, r), props, characters, createJuice(r, c), audio, overlays, hud);
 
   const picker = createPicker(canvas, r, () => props.pickTargets());
   picker.onHover((id) => {
