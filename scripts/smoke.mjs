@@ -72,7 +72,7 @@ try {
   await page.goto(`${BASE}?debug${WEBGL ? '&webgl' : ''}`, { waitUntil: 'networkidle' });
   await page.locator('[data-start]').waitFor({ timeout: 15000 });
   await page.screenshot({ path: 'shots/smoke-0-start.png' });
-  await page.waitForFunction(() => Boolean(window.__haunt), null, { timeout: 15000 });
+  await page.waitForFunction(() => Boolean(window.__haunt) && !document.querySelector('.hud-begin')?.disabled, null, { timeout: 30000 }); // 等加载完、开场按钮可用，和真实玩家一样
   await page.locator('[data-start]').click();
   await sleep(3500);
   check('开场遮罩点击后消失', !(await page.locator('[data-start]').isVisible().catch(() => false)));
@@ -108,7 +108,7 @@ try {
   // 手机竖屏（触屏）：不出横向滚动条；轻点开场能开始，轻点物件能附身
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   await phone.goto(`${BASE}?debug${WEBGL ? '&webgl' : ''}`, { waitUntil: 'networkidle' });
-  await phone.waitForFunction(() => Boolean(window.__haunt), null, { timeout: 15000 });
+  await phone.waitForFunction(() => Boolean(window.__haunt) && !document.querySelector('.hud-begin')?.disabled, null, { timeout: 30000 }); // 等加载完、开场按钮可用，和真实玩家一样
   const sw = await phone.evaluate(() => document.documentElement.scrollWidth);
   check('390 px 宽没有横向滚动', sw <= 390, `scrollWidth=${sw}`);
   await phone.locator('[data-start]').tap();

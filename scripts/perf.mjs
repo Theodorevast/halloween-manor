@@ -58,7 +58,7 @@ const quality = () => page.evaluate(() => document.querySelector('[aria-label^="
 try {
   await page.goto(`${BASE}?debug`, { waitUntil: 'networkidle' });
   await page.locator('[data-start]').waitFor({ timeout: 30000 });
-  await page.waitForFunction(() => Boolean(window.__haunt), null, { timeout: 30000 });
+  await page.waitForFunction(() => Boolean(window.__haunt) && !document.querySelector('.hud-begin')?.disabled, null, { timeout: 30000 }); // 等加载完、开场按钮可用
   await page.locator('[data-start]').click();
   if (LOW) await page.locator('[aria-label^="Quality"]').click();
   if (argv.includes('--empty')) {
