@@ -6,7 +6,7 @@
 // 灯由 characters.ts 在模块创建时一次建好（对象池），之后只改参数、不增删：
 // three.js 的灯数量或 castShadow 一变，场景里每个材质都要重新编译，访客进出门时会卡一下。
 import * as THREE from 'three/webgpu';
-import { abs, color, normalView, pow, uniform, uv } from 'three/tsl';
+import { abs, color, mx_noise_float, normalView, positionWorld, pow, smoothstep, time, uniform, uv, vec3 } from 'three/tsl';
 import { CELL, GRID_H, GRID_W, blocksSight, buildTiles, type Tile } from '../config/house';
 import { VISION } from '../config/visitors';
 import type { Quality } from '../engine/types';
@@ -116,7 +116,11 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
   const beamMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
   beamMat.colorNode = color(PALETTE.torchHalo);
   // 越靠近手越浓；侧面（光锥轮廓）几乎透明，正对镜头的中间浓一点，看起来像一团光而不是一个锥壳
-  beamMat.opacityNode = pow(uv().y, 1.8).mul(pow(abs(normalView.z), 1.4)).mul(strength);
+  // 光束里的灰尘：世界坐标上缓慢飘的噪声（灰尘飘在空气里，不跟着手电走），光锥不再是一块均匀的亮片，
+  // 也盖住 24 个面拼出来的条纹。贴地那一段交给雾（雾自己会被手电照亮），光锥在这里渐隐，免得两层加法叠得过亮
+  const dust = mx_noise_float(positionWorld.mul(vec3(2.2, 3, 2.2)).add(vec3(time.mul(0.12), time.mul(0.05), time.mul(-0.08)))).mul(0.5).add(0.5);
+  const aboveFog = smoothstep(0.2, 0.6, positionWorld.y);
+  beamMat.opacityNode = pow(uv().y, 1.8).mul(pow(abs(normalView.z), 1.4)).mul(strength).mul(dust.mul(0.7).add(0.3)).mul(aboveFog);
   const beam = new THREE.Mesh(parts.cone, beamMat);
   beam.renderOrder = 2;
   for (const m of [body, lens, beam]) {
