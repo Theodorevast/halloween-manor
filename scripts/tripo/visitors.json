@@ -1,0 +1,85 @@
+{
+  "$comment": [
+    "Tripo 访客流水线的清单（node scripts/tripo/visitors.mjs --dry-run 先看会发什么、花多少）。",
+    "status: draft = 草稿，--run 只做到换装图（每个约 10 积分）。看过 assets-src/visitors/<id>/costume.png 满意后改成 approved，才会做 3D、绑骨、动作（每个约 95 积分）。",
+    "reference: 吉祥物参考图，可以是文件，也可以是目录（目录里只能有一张 PNG / JPEG / WebP）。",
+    "每个访客可以用 overrides 覆盖 defaults 里的任何字段；值写 null 表示删掉这个字段。改了已经做过的步骤会停下来提示 --reroll，不会悄悄重做。",
+    "价格表在 scripts/tripo/catalog.mjs（developers.tripo3d.ai/en/pricing，2026-10-27 读取）。下面四套服装都是草稿，等用户确认。"
+  ],
+  "reference": "assets-src/mascot/",
+  "defaults": {
+    "route": "single",
+    "prep": {
+      "$comment": "共用的预处理：先把参考图里的吉祥物摆成 T 姿势（image-to-image 的 t_pose 模板），四套服装都从这张图出发，比例一致，也更好绑骨。参考图如果只有头像或扁平 logo，在前面加 \"figure\"（生成全身）；已经是端正的全身站姿可以把 templates 写成 []。",
+      "templates": ["t_pose"],
+      "request": { "model": "seedream_v5", "size": "2048x2048", "output_format": "png" }
+    },
+    "costume": {
+      "$comment": "chat_image_2.5_sunburst：文档说它「编辑时最大程度保留没改动的部分」，适合换装但不改脸；quality=medium 与 low 同价（2K 10 积分）。想省钱换 seedream_v5（5 积分），同时在 overrides 里写 \"quality\": null。",
+      "promptTemplate": "Dress the character in this image in a Halloween costume: {costume}. It must stay clearly the same character: keep its face, head shape, body proportions and its own colours unchanged; the costume is worn over the character and does not turn it into a monster. Keep exactly the same pose, camera angle and framing, full body visible from head to feet, facing the viewer. Victorian gothic, restrained and realistic: well-made, slightly worn fabric in muted colours (charcoal, oxblood, moss green, tarnished brass), no glow, no text or logos, nothing held in the hands. Both legs stay visible and separate; nothing hangs below the knees except boots. Plain light grey seamless background, soft even lighting.",
+      "request": { "model": "chat_image_2.5_sunburst", "quality": "medium", "size": "2048x2048", "output_format": "png" }
+    },
+    "views": {
+      "$comment": "只有 route = multiview 时用：换装图 → 四视图 → multiview-to-model，背面（斗篷、披肩）更准，每个访客多 10 积分。",
+      "request": {}
+    },
+    "model": {
+      "$comment": "H3.1 + 标准纹理 = 30 积分。face_limit 12000 给游戏的 1.5 万三角面预算留余量。不设 compress（绑骨前压缩没核实）和 export_orientation（文档说后处理时别设）。auto_size 不用：游戏自己归一到 1.1 米。",
+      "request": { "model": "v3.1-20260211", "face_limit": 12000, "texture": true, "pbr": true, "texture_quality": "standard" }
+    },
+    "rig": {
+      "$comment": "v1.0-20240301 只做人形，但有 90+ 个预设动作（害怕、张望都在里面）；v2.5 / v3.0 只有 11 个。spec=mixamo：Mixamo 兼容的骨骼名，以后能从 Mixamo 补动作。",
+      "request": { "model": "v1.0-20240301", "rig_type": "biped", "spec": "mixamo", "out_format": "glb" }
+    },
+    "animate": {
+      "$comment": "键对应 src/config/character.ts 的 clips（idle / walk / run / scared），一次 retarget 最多 5 个，每个 10 积分。上次试玩说访客动作太夸张，先选平实的；想加「张望」就加一行 \"lookAround\": \"preset:biped:look_around\"（+10 积分，同一次请求里）。",
+      "clips": {
+        "idle": "preset:biped:idle",
+        "walk": "preset:biped:walk",
+        "run": "preset:biped:run",
+        "scared": "preset:biped:scared_01"
+      },
+      "$alternatives": {
+        "idle": ["preset:biped:look_around", "preset:biped:standing_relax", "preset:biped:wait"],
+        "run": ["preset:biped:flee_01", "preset:biped:flee_02"],
+        "scared": ["preset:biped:frightened", "preset:biped:afraid", "preset:biped:scared_02"]
+      },
+      "request": { "animate_in_place": true, "export_with_geometry": true, "out_format": "glb" }
+    },
+    "convert": {
+      "$comment": "默认关。导出时如果检查出贴图大于 2048，再打开它（高级转换 10 积分/个）。未核实：convert 能不能直接吃 retarget 的 task_id、format=GLTF 回来是不是 .glb。",
+      "enabled": false,
+      "request": { "format": "GLTF", "texture_size": 2048, "with_animation": true, "animate_in_place": true }
+    }
+  },
+  "variants": [
+    {
+      "id": "lantern-explorer",
+      "status": "draft",
+      "label": "提灯夜行的探险家",
+      "costume": "a Victorian night explorer: a hip-length waxed field jacket in dark olive with brass buttons and a short shoulder cape, a narrow leather satchel strap across the chest, a small unlit brass lantern clipped to the belt at the hip, a flat tweed cap, fingerless leather gloves and lace-up leather boots",
+      "notes": "灯挂在腰带上、手里空着：游戏会自己在访客手边画手电，手里再拎一盏灯就成了两盏光源。"
+    },
+    {
+      "id": "vampire",
+      "status": "draft",
+      "label": "维多利亚吸血鬼",
+      "costume": "a restrained Victorian vampire: a black wool frock coat cut at the hip with a tall stand-up collar, a short black shoulder cape lined with deep oxblood red that ends at the elbows, a charcoal waistcoat, a white silk cravat with a small garnet pin and black gloves; no fangs, no blood, no bat wings",
+      "notes": "斗篷只到手肘、不拖地：长斗篷会被绑到腿上，走路时被扯着变形。不加獠牙和血，保持克制。"
+    },
+    {
+      "id": "witch",
+      "status": "draft",
+      "label": "女巫（尖帽和毛线披肩）",
+      "costume": "a Victorian witch: a tall black felt witch hat with a slightly bent tip and a modest brim, a hand-knitted charcoal wool shawl with a fringe draped over the shoulders, a plain dark plum dress that ends above the knees, dark striped stockings and buckled boots, a sprig of dried lavender tucked into the hat band",
+      "notes": "帽檐不宽、裙子在膝盖以上：宽帽檐容易和肩膀粘成一块，长裙会把两条腿连起来，绑骨后走路会撕扯。"
+    },
+    {
+      "id": "skeleton",
+      "status": "draft",
+      "label": "手绘骷髅连身衣",
+      "costume": "a homemade skeleton costume: a fitted black knit bodysuit with a hood, hand-painted with a slightly faded off-white bone pattern (ribs, spine, pelvis, arm and leg bones), black gloves with painted finger bones; the character's own face stays visible inside the hood",
+      "notes": "轮廓几乎不变、只改花纹，是四个里最稳的：绑骨和动作最不容易出问题。"
+    }
+  ]
+}
