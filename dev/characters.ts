@@ -11,10 +11,16 @@
 //   quality=low
 //   probe=x,z,朝向[,手电方向]  放一个不动的访客（focus=2 跟拍它）；still 暂停两个假访客；only 去掉两个假访客（这时 focus=0 是探针）
 //   torch=外圈,亮芯,衰减  bias=bias,normalBias  nobeam  noshadowwalls  shadowside=front   手电 / 阴影调参
+//   fear=20,85       依次设各访客的恐惧值（只给一个数就全部设成它）：≥ 60 缩着身子走、不时回头张望，越接近 100 越明显
+//   slow=0.25        角色表现层慢放（只慢角色的动画和程序化动作，假访客照常走）；0 = 定格
 // 控制台：window.__chars.inspect() / .calibrate() / .perf(秒) / .info() / .scene
+//   .startle(序号, amount, 物件id?)  按指定的恐惧增量吓一下（amount 约 5–72，决定跳多高；给物件就在空中扭向它）
+//   .fear(序号, 值)  设恐惧值；.slow(倍率)  慢放 / 定格；.freezeAfter(秒)  过这么多秒（角色表现层的时间）后定格，截跳到最高点用
+//   .screenOf(序号)  访客在画布上的像素位置（focus 跟拍时不准）
 import * as THREE from 'three/webgpu';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { CHARACTER } from '../src/config/character';
+import { FEAR } from '../src/config/visitors';
 import { CELL, GRID_H, GRID_W, HOUSE_D, HOUSE_W, Tile, WALL_CUT_H, WALL_H, buildTiles, cellCenter, idx } from '../src/config/house';
 import type { Module, RenderCore, CameraRig } from '../src/engine/types';
 import type { NpcState } from '../src/sim/types';
@@ -138,9 +144,65 @@ if (q.get('probe')) {
 if (q.has('only')) h.state.npcs.splice(0, 2); // 只留探针（和 visitors=4 加的人）
 if (q.has('still')) dispatchEvent(new KeyboardEvent('keydown', { key: ' ' })); // harness：空格暂停假访客
 
+// —— 恐惧值：fear=20,85（harness 不会回落恐惧值，设了就一直是这个数）——
+const setFear = (i: number, f: number) => {
+  const n = h.state.npcs[i];
+  if (!n) return;
+  n.fear = Math.max(0, Math.min(FEAR.max, f));
+  n.nervous = n.fear >= FEAR.nervous;
+};
+if (q.get('fear')) {
+  const fs = q.get('fear')!.split(',').map(Number);
+  h.state.npcs.forEach((_, i) => setFear(i, fs[Math.min(i, fs.length - 1)]));
+}
+
 const view = await createCharactersView(h.core);
 if (h.core.quality === 'low') view.setQuality?.('low');
-h.add(view);
+
+// —— 角色表现层套一层时间缩放：slow 慢放、0 定格（假访客的移动不受影响）——
+let slow = Number(q.get('slow') ?? 1);
+let viewTime = 0;
+let realTime = 0;
+let freezeIn = -1;
+/** startle() 吓的人：到点（真实时间）把受惊状态改回闲逛（harness 只管 0 号，而且暂停时也不管） */
+const startledUntil = new Map<number, number>();
+h.add({
+  update(ctx) {
+    realTime = ctx.time;
+    let dt = ctx.dt * slow;
+    if (freezeIn >= 0 && (freezeIn -= dt) <= 0) {
+      dt += freezeIn; // 正好停在 freezeAfter 的那一刻
+      freezeIn = -1;
+      slow = 0;
+    }
+    viewTime += dt;
+    for (const n of ctx.state.npcs) {
+      const until = startledUntil.get(n.id);
+      if (until === undefined || ctx.time < until) continue;
+      startledUntil.delete(n.id);
+      if (n.mode === 'startled') n.mode = 'wander';
+    }
+    view.update?.({ ...ctx, dt, time: viewTime });
+  },
+  onEvent: (e, state) => view.onEvent?.(e, state),
+  setQuality: (ql) => view.setQuality?.(ql),
+});
+
+/** 按指定的恐惧增量吓第 i 个访客（不经过 harness 的 trigger：那个只吓 0 号、amount 固定是物件的基础值） */
+function startle(i: number, amount: number, objectId: string | null = null) {
+  const n = h.state.npcs[i];
+  if (!n) return false;
+  setFear(i, n.fear + amount);
+  n.mode = 'startled';
+  n.modeTime = 0;
+  const o = objectId ? h.state.objects.find((x) => x.id === objectId) : undefined;
+  if (o) n.lookDir = angleOf(o.pos.x - n.pos.x, o.pos.z - n.pos.z); // 和模拟一样：手电一下子定在吓到它的东西上
+  h.emit({ type: 'startle', npc: n.id, object: o ? o.id : null, amount, scream: amount >= FEAR.screamAt });
+  // object 为 null 时表现层不跳（模拟里那是被别人的尖叫吓到），这里也就不进受惊状态
+  if (!o) n.mode = 'wander';
+  else startledUntil.set(n.id, realTime + FEAR.startleTime / Math.max(0.05, slow));
+  return true;
+}
 
 // —— 脚下的朝向箭头 ——
 if (q.has('arrows')) {
@@ -286,6 +348,20 @@ async function perf(seconds = 3) {
 
 (window as unknown as { __chars: unknown }).__chars = {
   view, inspect: () => view.inspect(), calibrate, perf, info: () => lastInfo, source: view.source, scene: h.core.scene,
+  startle, fear: setFear,
+  /** 第 i 个访客腰部（离地 0.5 米）在画布上的像素位置：截图时裁剪跟着人走 */
+  screenOf(i: number) {
+    const n = h.state.npcs[i];
+    return n ? h.rig.toScreen(n.pos, 0.5) : null;
+  },
+  slow(n: number) {
+    slow = Math.max(0, n);
+    freezeIn = -1;
+  },
+  freezeAfter(sec: number) {
+    if (slow === 0) slow = 1;
+    freezeIn = Math.max(1e-4, sec);
+  },
 };
 h.start();
 console.log('backend', h.core.backend, '· 角色来源', view.source);
