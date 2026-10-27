@@ -52,6 +52,11 @@ export interface CameraRig {
   zoom(factor: number): void;
   /** 叠加一次屏幕震动 */
   shake(strength: number, duration: number): void;
+  /**
+   * 冲镜：快速推近并偏向 target（房屋米坐标），停一下再缓缓退回。strength 0..1 决定推多近、偏多少。
+   * 播放中再来一次：从当前位置平滑转向新目标；比画面上正在播的弱的忽略
+   */
+  punch(target: Vec2, strength: number): void;
   /** 开场：镜头从高处、拉远的位置缓缓降到正常位置 */
   intro(seconds: number): void;
   /** quarter 改变时（旋转开始时）回调 */

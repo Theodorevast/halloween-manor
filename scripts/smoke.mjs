@@ -99,7 +99,10 @@ try {
   const lit = await litRatio(page, shot);
   check('画面不是一片黑', lit > 0.01, `亮像素 ${(lit * 100).toFixed(1)}%`);
 
-  // 4 个镜头方位下逐个点每个物件的屏幕位置：附身的必须是它自己（点击盒互相遮挡时会附身到旁边的物件）
+  // 4 个镜头方位下逐个点每个物件的屏幕位置：附身的必须是它自己（点击盒互相遮挡时会附身到旁边的物件）。
+  // 冻结模拟：附身是同步生效的（冷却马上开始），惊吓要等模拟往前走才落下；不冻结的话，
+  // 恰好有人看着台灯时会触发镜头推近，下一次点击时镜头还在动
+  await page.evaluate(() => window.__haunt.setTimeScale(0));
   const misses = [];
   for (let q = 0; q < 4; q++) {
     if (q > 0) {
@@ -120,6 +123,7 @@ try {
     }
   }
   check('4 个方位下点每个物件都附身到它自己', misses.length === 0, misses.join('；'));
+  await page.evaluate(() => window.__haunt.setTimeScale(1));
   console.log(await page.evaluate(() => window.__haunt.state()));
   check('没有页面报错', errors.length === 0, errors.slice(0, 5).join(' | '));
 

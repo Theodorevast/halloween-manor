@@ -6,9 +6,6 @@ import type { CameraRig } from './types';
 
 const CLICK_MS = 400;
 const CLICK_PX = 6;
-/** 镜头动起来后多久内跟着刷新悬停：旋转过渡 0.45 秒、缩放平滑约 0.4 秒，各留一点余量 */
-const REFRESH_ROTATE_MS = 600;
-const REFRESH_ZOOM_MS = 500;
 /** 触屏轻点后，悬停标签停留多久（毫秒） */
 const TOUCH_HOVER_MS = 1500;
 
@@ -72,32 +69,42 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
     for (const cb of hoverCbs) cb(id);
   };
 
-  // 鼠标不动、镜头在动（Q / E 旋转、滚轮缩放）时，光标下的物件会变：镜头动的这段时间里每帧按上次的鼠标位置重新检测
+  // 鼠标不动、镜头在动（旋转、缩放、开场、冲镜、震动）时，光标下的物件会变。不去一样样猜镜头什么时候在动、动多久：
+  // 鼠标在画布上时每帧比一下相机的投影和位置，变了就按上次的鼠标位置重新检测。不动的帧只比 32 个数，不做射线
   let mouse: { x: number; y: number } | null = null;
-  let refreshUntil = 0;
-  let refreshing = false;
+  let watching = false;
   let disposed = false;
-  const refreshTick = () => {
-    if (disposed) return;
-    if (mouse) setHover(idAt(mouse.x, mouse.y));
-    if (performance.now() < refreshUntil) requestAnimationFrame(refreshTick);
-    else refreshing = false;
-  };
-  const refreshFor = (ms: number) => {
-    if (!mouse || disposed) return;
-    refreshUntil = Math.max(refreshUntil, performance.now() + ms);
-    if (!refreshing) {
-      refreshing = true;
-      requestAnimationFrame(refreshTick);
+  const lastCam = new Float64Array(32);
+  const camMoved = () => {
+    const p = rig.camera.projectionMatrix.elements, w = rig.camera.matrixWorld.elements;
+    let moved = false;
+    for (let i = 0; i < 16; i++) {
+      if (p[i] !== lastCam[i] || w[i] !== lastCam[16 + i]) moved = true;
+      lastCam[i] = p[i];
+      lastCam[16 + i] = w[i];
     }
+    return moved;
   };
-  rig.onRotate(() => refreshFor(REFRESH_ROTATE_MS));
-  const onWheel = () => refreshFor(REFRESH_ZOOM_MS);
+  const watchTick = () => {
+    if (disposed || !mouse) {
+      watching = false;
+      return;
+    }
+    if (camMoved()) setHover(idAt(mouse.x, mouse.y));
+    requestAnimationFrame(watchTick);
+  };
+  const watch = () => {
+    if (watching || disposed) return;
+    watching = true;
+    camMoved(); // 刚按当前镜头检测过，以此为起点
+    requestAnimationFrame(watchTick);
+  };
 
   const onMove = (e: PointerEvent) => {
     if (e.pointerType === 'touch') return; // 手指拖动不算悬停
     mouse = { x: e.clientX, y: e.clientY };
     setHover(idAt(e.clientX, e.clientY));
+    watch();
   };
   const onDown = (e: PointerEvent) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
@@ -131,7 +138,6 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
   canvas.addEventListener('pointerup', onUp);
   canvas.addEventListener('pointercancel', onCancel);
   canvas.addEventListener('pointerleave', onLeave);
-  canvas.addEventListener('wheel', onWheel, { passive: true });
 
   return {
     onHover(cb) { hoverCbs.push(cb); },
@@ -142,7 +148,6 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
       canvas.removeEventListener('pointerup', onUp);
       canvas.removeEventListener('pointercancel', onCancel);
       canvas.removeEventListener('pointerleave', onLeave);
-      canvas.removeEventListener('wheel', onWheel);
       clearTimeout(touchHoverTimer);
       disposed = true;
       canvas.style.cursor = '';

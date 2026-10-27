@@ -1,7 +1,8 @@
 // 引擎自检页：真正的 createRenderCore + createCameraRig + createPicker + createJuice。
 // 一块 16 × 12 米的地板（每米一条格线）、四角 2.4 米高的柱子（检查取景装得下墙高）、
 // 四个可拾取方块（userData.propId）、房屋 (8, 6) 处一块亮青色方片（对 toScreen）、一盏手电 + 一盏台灯 + 发光块（看泛光）。
-// 按键：Q / E 旋转；Z / X 缩小 / 放大；S 小震；F 模拟吓跑（juice：大震 + 暗角脉冲）；V 只放暗角脉冲；B 切画质；I 开场镜头；T 换色调映射
+// 按键：Q / E 旋转；Z / X 缩小 / 放大；S 小震；F 模拟吓跑（juice：大震 + 暗角脉冲）；V 只放暗角脉冲；B 切画质；I 开场镜头；T 换色调映射；
+// P 冲镜（依次冲向四个方块，满幅）
 // URL 参数：?tm=agx|neutral|aces|reinhard|none  ?ambient=0.35  ?webgl（强制 WebGL2）  ?quality=low  ?marker（在 toScreen(8, 6) 画红圈）
 import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W, WALL_H } from '../src/config/house';
@@ -172,6 +173,7 @@ const juice = createJuice(rig, core);
 const emit = (e: SimEvent) => juice.onEvent?.(e, fakeState);
 
 // —— 输入 ——
+let punches = 0;
 const toggleQuality = () => core.setQuality(core.quality === 'high' ? 'low' : 'high');
 addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
@@ -184,6 +186,10 @@ addEventListener('keydown', (e) => {
   else if (k === 'v') core.fx.vignettePulse(1);
   else if (k === 'b') toggleQuality();
   else if (k === 'i') rig.intro(2.5);
+  else if (k === 'p') {
+    const b = BOXES[punches++ % BOXES.length];
+    rig.punch({ x: b.x, z: b.z }, 1);
+  }
   else if (k === 't') {
     const names = Object.keys(TM);
     tmName = names[(names.indexOf(tmName) + 1) % names.length];
@@ -253,6 +259,8 @@ const dispatch = (type: string, x: number, y: number, pointerType = 'mouse') => 
   toScreen: (x: number, z: number, y = 0) => rig.toScreen({ x, z }, y),
   emit,
   dispatch,
+  /** 冲镜到房屋 (x, z)，strength 默认满幅 */
+  punch: (x: number, z: number, strength = 1) => rig.punch({ x, z }, strength),
   /** 放慢暗角脉冲 factor 倍再触发，方便截到中间态 */
   slowPulse(factor = 20) {
     if (core.post) core.post.timeScale = 1 / factor;

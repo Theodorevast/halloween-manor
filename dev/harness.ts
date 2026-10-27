@@ -53,6 +53,7 @@ function makeRig(canvas: HTMLCanvasElement): CameraRig {
       resize(canvas.clientWidth, canvas.clientHeight);
     },
     shake() {},
+    punch() {},
     intro() {},
     onRotate(cb) { cbs.push(cb); },
     update() {},

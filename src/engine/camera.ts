@@ -1,4 +1,4 @@
-// 正交斜俯视相机：90° 旋转（缓入缓出、可连按）、滚轮缩放、屏幕震动、开场下降镜头。
+// 正交斜俯视相机：90° 旋转（缓入缓出、可连按）、滚轮缩放、屏幕震动、开场下降镜头、惊吓落下时的冲镜。
 // 画面始终按「整栋房子 + 边距」取景（横屏按高度、竖屏按宽度），缩放在这个基准上乘
 import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W, WALL_H } from '../config/house';
@@ -21,10 +21,29 @@ const ZOOM_RATE = 12;
 const MARGIN = 0.07;
 /** 相机离房子中心的距离：正交相机只影响裁剪面，够远就行 */
 const DIST = 40;
+/**
+ * 冲镜：惊吓落在访客身上时，镜头推近并偏向那个物件，停一下再退回。下面是 strength = 1 的幅度，弱的按比例缩小。
+ * - 推近 1.3 倍：物件明显大一圈，房子的大部分仍在画面里，看得出是在哪个房间
+ * - 画面中心往物件挪 60%：比「以物件为中心缩放」（物件原地不动）多走一截，物件被拉向画面中间
+ * - 0.12 秒推进（像倒吸一口气），停 0.5 秒让人看清，0.8 秒缓缓退回：退得比进得慢很多，余韵比冲击长
+ */
+const PUNCH = {
+  zoom: 1.3,
+  pan: 0.6,
+  attack: 0.12,
+  hold: 0.5,
+  release: 0.8,
+  /** 已经推进去时换目标：焦点用这么久平滑滑过去，而不是在 0.12 秒里甩过去 */
+  glide: 0.35,
+  /** 焦点离地高度（米），大致是物件中部（和调试接口 screenOf 一样） */
+  height: 0.8,
+};
 
 const azimuthOf = (quarterUnwrapped: number) => Math.PI / 4 + (quarterUnwrapped * Math.PI) / 2;
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+const easeOutCubic = (t: number) => 1 - (1 - t) ** 3;
+const smoothstep = (t: number) => t * t * (3 - 2 * t);
 
 /** 一段方位角过渡：三次 Hermite，起点带上一段的速度、终点速度为 0。
  *  第一次按旋转时起点速度为 0，就是标准的缓入缓出；过渡中再按，从当前位置和速度接着转，不跳、不顿 */
@@ -39,6 +58,8 @@ const segVel = (s: RotSeg, u: number) => {
 };
 
 interface Shake { strength: number; duration: number; t: number; px: number; py: number }
+/** 一段冲镜：幅度从 a0 推到 peak、停、退回 0；焦点（房屋米坐标）从 from 滑到 to */
+interface Punch { from: Vec2; to: Vec2; a0: number; peak: number; glide: number; t: number }
 
 export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, DIST * 2.5);
@@ -51,6 +72,10 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
   let elev = ELEV;
   let introZoom = 1;
   const shakes: Shake[] = [];
+  let punch: Punch | null = null;
+  /** 此刻的冲镜幅度 0..1 和焦点。焦点存房屋坐标而不是屏幕坐标：冲镜中转镜头，焦点仍跟着那个物件 */
+  let punchA = 0;
+  const punchF: Vec2 = { x: HOUSE_W / 2, z: HOUSE_D / 2 };
   let clock = 0;
   let width = Math.max(1, canvas.clientWidth);
   let height = Math.max(1, canvas.clientHeight);
@@ -103,11 +128,26 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
     }
 
     const z = zoomCur * introZoom;
-    const hw = fit.hw / z, hh = fit.hh / z;
-    camera.left = fit.cx + ox - hw;
-    camera.right = fit.cx + ox + hw;
-    camera.top = fit.cy + oy + hh;
-    camera.bottom = fit.cy + oy - hh;
+    let hw = fit.hw / z, hh = fit.hh / z;
+    let cx = fit.cx, cy = fit.cy;
+    if (punchA > 0) {
+      // 冲镜：焦点投到视平面（和 computeFit 同一套坐标），画面中心往它挪，再推近。
+      // 挪动量限制在「推近后的框仍落在推近前的框里」：只是往里裁，不会把房子推出画面，也不会露出原本看不到的黑边
+      const zp = 1 + punchA * (PUNCH.zoom - 1);
+      const se = Math.sin(elev), ce = Math.cos(elev);
+      const px = punchF.x - HOUSE_W / 2, pz = punchF.z - HOUSE_D / 2;
+      const vx = px * viewDir.z - pz * viewDir.x;
+      const vy = -se * (px * viewDir.x + pz * viewDir.z) + ce * PUNCH.height;
+      const room = 1 - 1 / zp;
+      cx += clamp(punchA * PUNCH.pan * (vx - cx), -hw * room, hw * room);
+      cy += clamp(punchA * PUNCH.pan * (vy - cy), -hh * room, hh * room);
+      hw /= zp;
+      hh /= zp;
+    }
+    camera.left = cx + ox - hw;
+    camera.right = cx + ox + hw;
+    camera.top = cy + oy + hh;
+    camera.bottom = cy + oy - hh;
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
   };
@@ -141,6 +181,24 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
       if (strength <= 0 || duration <= 0) return;
       shakes.push({ strength, duration, t: 0, px: Math.random() * 100, py: Math.random() * 100 });
     },
+    punch(target, strength) {
+      const s = clamp(strength, 0, 1);
+      if (!(s > 0)) return;
+      // 画面上正在播更强的（推进、停留中按峰值算，退回中按此刻的幅度算）：不被弱的打断。
+      // 一样强的照常接上：同一个物件又吓到一个人，等于把停留延长
+      const level = punch && punch.t < PUNCH.attack + PUNCH.hold ? punch.peak : punchA;
+      if (s < level - 1e-6) return;
+      // 从此刻的幅度和焦点接着走，不跳。镜头还没推进去时焦点直接放到目标上（幅度为 0，看不出来）
+      const showing = punchA > 0.02;
+      punch = {
+        from: showing ? { x: punchF.x, z: punchF.z } : { x: target.x, z: target.z },
+        to: { x: target.x, z: target.z },
+        a0: punchA,
+        peak: s,
+        glide: showing ? PUNCH.glide : PUNCH.attack,
+        t: 0,
+      };
+    },
     intro(seconds) {
       intro = { t: 0, dur: Math.max(0.01, seconds) };
       elev = INTRO_ELEV;
@@ -173,6 +231,22 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
       for (let i = shakes.length - 1; i >= 0; i--) {
         shakes[i].t += dt;
         if (shakes[i].t >= shakes[i].duration) shakes.splice(i, 1);
+      }
+      if (punch) {
+        const p = punch;
+        p.t += dt;
+        const { attack, hold, release } = PUNCH;
+        if (p.t < attack) punchA = p.a0 + (p.peak - p.a0) * easeOutCubic(p.t / attack);
+        else if (p.t < attack + hold) punchA = p.peak;
+        else if (p.t < attack + hold + release) punchA = p.peak * (1 - easeInOutCubic((p.t - attack - hold) / release));
+        else {
+          punchA = 0;
+          punch = null;
+        }
+        // 换目标用 smoothstep：最快时只有平均速度的 1.5 倍（三次缓动是 3 倍），读起来是平移过去，不是甩过去
+        const k = smoothstep(Math.min(1, p.t / p.glide));
+        punchF.x = p.from.x + (p.to.x - p.from.x) * k;
+        punchF.z = p.from.z + (p.to.z - p.from.z) * k;
       }
       place();
     },
