@@ -24,6 +24,8 @@ export const STRINGS = {
   /** 悬停标签里的剩余冷却 */
   cooldown: (seconds: number) => `${Math.ceil(seconds)}s`,
   noWebGL: "Your browser can't run WebGL2, so the manor stays dark. Try a recent Chrome, Edge, Firefox or Safari.",
+  bootFailed: 'Something went wrong while lighting the manor. Reload the page, or try a recent Chrome, Edge, Firefox or Safari.',
+  deviceLost: 'The candles went out: your browser lost its graphics device. Click anywhere to relight the manor.',
   ready: 'Ready',
   personalityTag: { timid: 'scaredy-cat', average: '', brave: 'skeptic' } satisfies Record<Personality, string>,
   propName: {

@@ -25,6 +25,7 @@ stage.appendChild(canvas);
 let core: RenderCore | undefined;
 let rig: CameraRig | undefined;
 let quality: Quality = 'high';
+let qualityPicked = false;
 /** boot 全部完成（模型加载完）才算 ready；开场点击可能早于 ready，先记下 wantBegin */
 let ready = false;
 let wantBegin = false;
@@ -38,18 +39,11 @@ const audio: AudioSys = createAudio((p) => {
   const s = rig.toScreen(p);
   return Math.max(-1, Math.min(1, (s.x / Math.max(1, canvas.clientWidth)) * 2 - 1)) * 0.8;
 });
-// 浏览器可能在切标签页后挂起音频：开场之后的每次点击都顺手恢复
+// 浏览器可能挂起音频（Safari 来电、切 App 等）：开场之后的每次点击、按键都顺手恢复
 addEventListener('pointerdown', () => { if (wantBegin) void audio.unlock(); });
-// 标签页隐藏时主循环停了，模拟也停了，环境声却还在响：临时静音，回来时恢复玩家自己的静音设置
-let mutedBeforeHide = false;
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    mutedBeforeHide = audio.muted;
-    audio.setMuted(true);
-  } else {
-    audio.setMuted(mutedBeforeHide);
-  }
-});
+addEventListener('keydown', () => { if (wantBegin) void audio.unlock(); });
+// 标签页隐藏时主循环停了，模拟也停了，环境声却还在响：整个暂停，回来再恢复
+document.addEventListener('visibilitychange', () => audio.setSuspended(document.hidden));
 
 const setQuality = (q: Quality) => {
   quality = q;
@@ -67,6 +61,7 @@ const hud = createHud(document.getElementById('hud')!, {
     return audio.muted;
   },
   onToggleQuality: () => {
+    qualityPicked = true; // 玩家自己选过画质，自动降档就别再插手
     setQuality(quality === 'high' ? 'low' : 'high');
     return quality;
   },
@@ -102,12 +97,27 @@ async function boot() {
     return;
   }
   const c = core;
+  // 图形设备丢失（GPU 进程崩溃、睡眠唤醒、驱动更新、WebGL 上下文太多）：three 默认只打日志、之后 render 直接返回，
+  // 画面永久黑掉而模拟和尖叫还在继续。改成停下来、告诉玩家，点一下重新加载
+  const onLost = c.renderer.onDeviceLost.bind(c.renderer);
+  c.renderer.onDeviceLost = (info) => {
+    onLost(info); // 原处理会标记设备已丢失，render 才会停止调用它
+    started = false;
+    audio.setMuted(true);
+    hud.showError(STRINGS.deviceLost);
+    addEventListener('pointerdown', () => location.reload(), { once: true });
+  };
   const r = (rig = createCameraRig(canvas));
   const fit = () => {
     c.resize(canvas.clientWidth, canvas.clientHeight);
     r.resize(canvas.clientWidth, canvas.clientHeight);
   };
   new ResizeObserver(fit).observe(canvas);
+  // 窗口拖到另一块缩放比例不同的屏幕时只有 devicePixelRatio 变、尺寸不变，ResizeObserver 不会触发
+  const watchDpr = () => {
+    matchMedia(`(resolution: ${devicePixelRatio}dppx)`).addEventListener('change', () => { fit(); watchDpr(); }, { once: true });
+  };
+  watchDpr();
   fit();
 
   const props = createPropsView(c);
@@ -135,7 +145,7 @@ async function boot() {
   };
   await characters.prewarm(compile).catch((err) => console.warn('预编译着色器失败，改为边画边编', err));
 
-  const frameWatch = watchFrameTime(() => { if (quality === 'high') setQuality('low'); });
+  const frameWatch = watchFrameTime(() => { if (quality === 'high' && !qualityPicked) setQuality('low'); });
   let last = performance.now();
   let time = 0;
   c.renderer.setAnimationLoop(() => {
@@ -157,4 +167,8 @@ async function boot() {
   if (wantBegin) start();
 }
 
-void boot();
+// 渲染器建好之后的任何一步抛错（某些浏览器 / 显卡不支持某个节点等），都要告诉玩家，而不是让开场按钮永远停在加载中
+boot().catch((err) => {
+  console.error(err);
+  hud.showError(STRINGS.bootFailed);
+});

@@ -228,7 +228,8 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
         const c = m.clone();
         c.userData.baseTransparent = c.transparent;
         const s = c as THREE.MeshStandardMaterial;
-        if (s.isMeshStandardMaterial) {
+        // 模型本身没有自发光时才补这层光；吉祥物自带的发光（比如会亮的眼睛）原样保留
+        if (s.isMeshStandardMaterial && !s.emissiveMap && s.emissive.getHex() === 0) {
           // 自发光 = 底色 × BOUNCE_LIGHT（有贴图就用贴图，保住花纹）
           s.emissive.copy(s.color).multiplyScalar(BOUNCE_LIGHT);
           if (s.map) {
@@ -314,6 +315,8 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     if (time - v.lastJump < 0.5) return; // 事件和状态切换可能同时到，只跳一次
     v.lastJump = time;
     v.jumpT = 0;
+    // 只播一次的受惊片段：还在受惊时又被吓，状态没变、play() 会当成同一个动作直接返回，这里让它从头重播
+    if (v.action && v.action === v.actions.scared) v.action.reset().play();
   };
 
   /** 按状态挑动画片段；没有对应片段时返回 null（走路改用程序化弹跳，待机就停在绑定姿势上呼吸） */
@@ -440,6 +443,8 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
         step(v, 0, 0);
         await compile();
       } finally {
+        // 试过只移出场景、不 dispose 材质（怕 three 回收刚编好的管线），实测第一个访客进门的卡顿没有变化（都是约 150 ms），
+        // 所以照常释放（2026-10-27）
         v.leaving = true;
         destroy(v);
       }

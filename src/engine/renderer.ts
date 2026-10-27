@@ -17,8 +17,12 @@ export const EXPOSURE = 1.0;
  */
 const PIXEL_RATIO: Record<Quality, number> = { high: 2, low: 0.75 };
 
-/** 自动降档：开始后 [from, to] 秒这段的平均帧时间超过 slowMs 就降一次（设计文档：测 3 秒、超过 22 ms） */
-const FRAME_WATCH = { from: 1, to: 4, slowMs: 22 };
+/**
+ * 自动降档：开始后 [from, to] 秒这段的平均帧时间超过 slowMs 就降一次。
+ * 设计文档原定 22 ms；改成 40 ms（低于 25 fps）：浏览器省电模式会把帧率锁在 30 fps（约 33 ms），
+ * 22 ms 会把这些快机器也降到 Low，而降了也还是 30 fps，只白白损失画质（代码审查发现，2026-10-27）
+ */
+const FRAME_WATCH = { from: 1, to: 4, slowMs: 40 };
 
 /** 画面短边小于这么多 CSS 像素时不开泛光（半分辨率起算、再降 4 级，最小一级要 ≥ 1 像素还得有意义） */
 const BLOOM_MIN_PX = 64;
@@ -118,7 +122,7 @@ export async function createRenderCore(canvas: HTMLCanvasElement, opts: RenderCo
   return core;
 }
 
-/** 返回每帧要调用的函数（参数为这一帧的 dt 秒）；开始后第 1–4 秒的平均帧时间超过 22 ms 时调用一次 onSlow */
+/** 返回每帧要调用的函数（参数为这一帧的 dt 秒）；开始后第 1–4 秒的平均帧时间超过 FRAME_WATCH.slowMs 时调用一次 onSlow */
 export function watchFrameTime(onSlow: () => void): (dt: number) => void {
   let t = 0, sum = 0, n = 0, done = false;
   return (dt) => {

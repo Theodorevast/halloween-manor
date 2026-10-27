@@ -32,6 +32,8 @@ export interface AudioSys extends Module {
   unlock(): Promise<void>;
   setMuted(m: boolean): void;
   readonly muted: boolean;
+  /** 标签页隐藏时暂停整个 AudioContext（静音的话混响、持续音、噪声还在算，挂几小时很耗电），回来时恢复 */
+  setSuspended(s: boolean): void;
 }
 
 /** 主音量 */
@@ -323,6 +325,12 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
       // 'suspended'，或 Safari 的 'interrupted'（来电、切到别的 App）
       if (ac.state !== 'running' && ac.state !== 'closed') return ac.resume().catch(() => {});
       return Promise.resolve();
+    },
+
+    setSuspended(s) {
+      if (!ac || ac.state === 'closed') return;
+      // 恢复不需要手势：这个 AudioContext 当初是在点击里启动的。Safari 不让的话，下一次点击 / 按键里的 unlock 会补上
+      void (s ? ac.suspend() : ac.resume()).catch(() => {});
     },
 
     setMuted(m) {
