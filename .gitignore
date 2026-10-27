@@ -6,3 +6,9 @@ test-results/
 playwright-report/
 shots/
 .logs/
+
+# 本地密钥（Tripo API key 等），永远不提交
+.env
+.env.*
+# Tripo 生成过程的原始下载和参考图
+assets-src/
