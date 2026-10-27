@@ -31,19 +31,38 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
   const prevTouchAction = canvas.style.touchAction;
   canvas.style.touchAction = 'none';
 
-  /** 屏幕点下的物件 id：取第一个能沿 parent 链找到 userData.propId 的命中 */
+  const box = new THREE.Box3();
+  const center = new THREE.Vector3();
+  const propIdOf = (obj: THREE.Object3D): string | null => {
+    for (let o: THREE.Object3D | null = obj; o; o = o.parent) {
+      const id = o.userData.propId;
+      if (typeof id === 'string') return id;
+    }
+    return null;
+  };
+
+  /**
+   * 屏幕点下的物件 id。点击盒故意做得比物件大，相邻物件的盒子会互相重叠（转了镜头以后厨房门的盒子会挡住摇椅、
+   * 台灯的盒子会挡住八音盒）。所以不取第一个命中，而是在射线穿过的所有盒子里，选盒子中心离射线最近的那个
+   */
   const idAt = (clientX: number, clientY: number): string | null => {
     const r = canvas.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return null;
     ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     ray.setFromCamera(ndc, rig.camera);
+    let best: string | null = null;
+    let bestD = Infinity;
     for (const hit of ray.intersectObjects(getTargets(), true)) {
-      for (let o: THREE.Object3D | null = hit.object; o; o = o.parent) {
-        const id = o.userData.propId;
-        if (typeof id === 'string') return id;
+      const id = propIdOf(hit.object);
+      if (!id || id === best) continue;
+      box.setFromObject(hit.object).getCenter(center);
+      const d = ray.ray.distanceSqToPoint(center);
+      if (d < bestD) {
+        bestD = d;
+        best = id;
       }
     }
-    return null;
+    return best;
   };
 
   const setHover = (id: string | null) => {

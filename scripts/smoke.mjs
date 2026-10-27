@@ -99,9 +99,27 @@ try {
   const lit = await litRatio(page, shot);
   check('画面不是一片黑', lit > 0.01, `亮像素 ${(lit * 100).toFixed(1)}%`);
 
-  await page.evaluate(() => window.__haunt.rotate(1));
-  await sleep(800);
-  await page.screenshot({ path: 'shots/smoke-2-rotated.png' });
+  // 4 个镜头方位下逐个点每个物件的屏幕位置：附身的必须是它自己（点击盒互相遮挡时会附身到旁边的物件）
+  const misses = [];
+  for (let q = 0; q < 4; q++) {
+    if (q > 0) {
+      await page.evaluate(() => window.__haunt.rotate(1));
+      await sleep(800);
+    }
+    if (q === 1) await page.screenshot({ path: 'shots/smoke-2-rotated.png' });
+    const ids = await page.evaluate(() => window.__haunt.raw().objects.map((o) => o.id));
+    for (const id of ids) {
+      await page.evaluate(() => window.__haunt.step(25000)); // 等所有冷却走完
+      const pt = await page.evaluate((x) => window.__haunt.screenOf(x), id);
+      await page.mouse.move(pt.x, pt.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await sleep(50);
+      const fired = await page.evaluate(() => window.__haunt.raw().objects.filter((o) => o.cooldown > 0).map((o) => o.id));
+      if (fired.length !== 1 || fired[0] !== id) misses.push(`q${q} ${id} → ${fired.join('+') || '没反应'}`);
+    }
+  }
+  check('4 个方位下点每个物件都附身到它自己', misses.length === 0, misses.join('；'));
   console.log(await page.evaluate(() => window.__haunt.state()));
   check('没有页面报错', errors.length === 0, errors.slice(0, 5).join(' | '));
 
