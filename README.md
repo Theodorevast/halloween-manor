@@ -14,11 +14,14 @@
 | `npm test` | 模拟层单测 + 平衡测试（机器人自动玩，约 1–2 秒） |
 | `npm run typecheck` | 类型检查 |
 | `npm run build` | 构建到 `dist/`（相对路径，放到任何静态托管的任何子路径下都能打开） |
-| `npm run smoke` | 构建 → 预览 → 本机 Chrome 无头打开 → 逐项断言，截图在 `shots/` |
+| `npm run smoke` | 构建 → 预览 → 本机 Chrome 无头打开 → 逐项断言（含触屏点击、390 px 宽），截图在 `shots/`。加 `-- --webgl` 测 WebGL2 回退路径 |
+| `node scripts/perf.mjs` | 放满 4 个访客量帧时间，看自动降档。`--cpu` 用纯 CPU 软件渲染模拟最差的机器，`--low` 测 Low 档，`--empty` 是没有访客的对照组 |
 
 用 `./node_modules/.bin/<工具>` 而不是 `npx`：这台机器上 `npx` 可能会找到别的项目里的版本。
 
-地址加 `?debug` 会挂出 `window.__haunt`：`state()` 看文字版状态，`step(ms)` 快进，`trigger(id)` 附身，`spawn({...})` 放访客，`setTimeScale(n)` 加速。
+地址参数：
+- `?debug` 挂出 `window.__haunt`：`state()` 看文字版状态，`step(ms)` 快进，`trigger(id)` 附身，`spawn({...})` 放访客，`setTimeScale(n)` 加速，`screenOf(id)` 取物件的屏幕坐标
+- `?webgl` 强制走 WebGL2。有人反馈画面不对时，先让对方加上它，看是不是 WebGPU 的问题
 
 ## 玩法速览
 
@@ -58,3 +61,11 @@ Claude 听不到声音，下面这些按「最没把握」排序。打开 `/dev/
 - 门厅和走廊没有物件，新访客要走进房间才会被吓（布局调整的取舍，见设计文档）
 - 平衡是机器人测出来的：会玩的机器人每 5 分钟吓跑约 9 人，真人大概会慢一些，需要试玩确认
 - 门廊灯不投影，门厅地板靠南墙处有一点暖光
+- 第一个访客进门时还有一下约 150 ms 的卡顿（只有第一次）。页面 JS 侧已经预编译过，剩下的开销在浏览器 GPU 进程里
+- 性能：本机显卡上 4 个访客满载约 7 ms/帧；纯 CPU 软件渲染下 Low 档约 8 fps（最差情况）。场景约 14 盏灯，每个像素都要算一遍，开销主要和分辨率成正比，所以 Low 档按 75% 分辨率渲染
+
+## 部署前还要做的
+
+- 选托管平台并部署（需要你同意）。`npm run build` 的 `dist/` 是纯静态文件，放哪儿都行
+- 确定域名后，在 `index.html` 加 `og:image`（完整的绝对地址，1200×630 的游戏截图），分享链接时才有预览图
+- 换上吉祥物后重跑 `npm run smoke` 和 `node scripts/perf.mjs`
