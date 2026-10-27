@@ -104,7 +104,7 @@ export async function createHarness(opts: { ambient?: number } = {}): Promise<Ha
     setQuality(q) { core.quality = q; },
     resize(w, h) { renderer.setSize(w, h, false); },
     render(camera) { renderer.render(scene, camera); },
-    fx: { vignettePulse() {} },
+    fx: { vignettePulse() {}, focus() {}, setReveal() {} },
   };
   const rig = makeRig(canvas);
 

@@ -74,7 +74,7 @@ interface Mark {
 export function createOverlays(
   root: HTMLElement,
   rig: Pick<CameraRig, 'toScreen'>,
-): Module & { setHover(id: string | null): void } {
+): Module & { setHover(id: string | null): void; setHidden(hidden: boolean): void } {
   root.classList.add('ov');
 
   // ── 名牌池 ───────────────────────────────────────────
@@ -297,6 +297,10 @@ export function createOverlays(
     },
     setHover(id) {
       hoverId = id;
+    },
+    // 电影段落（吓跑黑边）期间整层淡出：名牌、眼睛、冷却圆环、悬停标签都先让开
+    setHidden(hidden) {
+      root.classList.toggle('is-hidden', hidden);
     },
     dispose() {
       removeEventListener('resize', onResize);

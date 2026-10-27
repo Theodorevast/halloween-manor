@@ -5,6 +5,7 @@ import { createAudio, type AudioSys } from './audio/engine';
 import { STRINGS } from './config/strings';
 import { installDebug } from './debug';
 import { createCameraRig } from './engine/camera';
+import { createCinematic, type Cinematic } from './engine/cinematic';
 import { createJuice } from './engine/juice';
 import { createPicker } from './engine/picking';
 import { createRenderCore, watchFrameTime } from './engine/renderer';
@@ -16,6 +17,7 @@ import { createCharactersView } from './view/characters';
 import { createFogView } from './view/fog';
 import { createHouseView } from './view/house';
 import { createOverlays } from './view/overlays';
+import { createParticlesView } from './view/particles';
 import { createPropsView } from './view/props';
 
 const stage = document.getElementById('stage')!;
@@ -25,6 +27,7 @@ stage.appendChild(canvas);
 
 let core: RenderCore | undefined;
 let rig: CameraRig | undefined;
+let cinematic: Cinematic | undefined;
 let quality: Quality = 'high';
 let qualityPicked = false;
 /** boot 全部完成（模型加载完）才算 ready；开场点击可能早于 ready，先记下 wantBegin */
@@ -85,7 +88,7 @@ function begin() {
 
 function start() {
   started = true;
-  rig?.intro(2.5);
+  cinematic?.intro(2.5);
 }
 
 async function boot() {
@@ -124,12 +127,17 @@ async function boot() {
   const props = createPropsView(c);
   const overlays = createOverlays(document.getElementById('overlay')!, r);
   const characters = await createCharactersView(c);
-  modules.push(createHouseView(c, r), createFogView(c, r), props, characters, createJuice(r, c), audio, overlays, hud);
+  const cine = (cinematic = createCinematic(r, c, overlays));
+  modules.push(
+    createHouseView(c, r), createFogView(c, r), props, characters, createParticlesView(c),
+    createJuice(r, c), cine, audio, overlays, hud,
+  );
 
   const picker = createPicker(canvas, r, () => props.pickTargets());
   picker.onHover((id) => {
     props.setHover(id);
     overlays.setHover(id);
+    cine.setHover(id);
   });
   picker.onPick((id) => { if (started) world.trigger(id); });
 

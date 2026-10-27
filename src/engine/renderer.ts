@@ -116,6 +116,9 @@ export async function createRenderCore(canvas: HTMLCanvasElement, opts: RenderCo
       vignettePulse(strength, color = PALETTE.dread) {
         post?.vignettePulse(strength, color);
       },
+      // 景深和开场显影：画面管线任务实现（2026-10-27 电影感升级），先占位
+      focus() {},
+      setReveal() {},
     },
   };
   core.setQuality('high');

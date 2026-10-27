@@ -37,6 +37,17 @@ export interface RenderCore {
   fx: {
     /** 暗角泛起一圈颜色再退去（吓跑瞬间用暗红） */
     vignettePulse(strength: number, color?: number): void;
+    /**
+     * 景深焦点。target 为房屋米坐标（opts.height 为离地高度，默认 0.8 米）；opts.strength 0..1 决定焦外虚化多强
+     * （1 = 惊吓推近时的强度，悬停时用小一些的值）。传 null 回到常态：高画质下是常开的微缩景深，低画质下没有景深。
+     * 焦点位置和强度在 fx 内部平滑过渡（opts.smoothTime 秒，默认 0.25），调用方可以每帧调也可以只在变化时调
+     */
+    focus(target: Vec2 | null, opts?: { height?: number; strength?: number; smoothTime?: number }): void;
+    /**
+     * 开场显影：progress 0 = 画面里只剩月光照亮的窗户和门廊灯，1 = 正常画面。origin 为光从哪里铺开
+     * （房屋米坐标，默认前门外）。由镜头编排每帧驱动，fx 自己不做动画
+     */
+    setReveal(progress: number, origin?: Vec2): void;
   };
 }
 

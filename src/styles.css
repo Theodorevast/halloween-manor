@@ -650,3 +650,16 @@ body {
     transform: none;
   }
 }
+
+/* 电影段落期间场景叠层整体淡出（view/overlays.ts 的 setHidden） */
+.ov {
+  transition: opacity 0.4s ease;
+}
+.ov.is-hidden {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ov {
+    transition: none;
+  }
+}
