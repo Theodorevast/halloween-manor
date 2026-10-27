@@ -56,6 +56,10 @@ interface Plate {
   fleeing: boolean;
   /** 最近一次被用到的帧号；不等于当前帧就说明访客已离开 */
   frame: number;
+  /** 名牌内容宽度（像素），只在 acquire 时量一次 */
+  w: number;
+  /** 为了不和别的名牌重叠而上移的距离（平滑追赶目标值） */
+  lift: number;
 }
 
 interface Mark {
@@ -90,7 +94,7 @@ export function createOverlays(
     const fill = div('ov-bar-fill', bar);
     // 「紧张」门槛的刻度：过了这条线访客走得更快、手电发抖
     div('ov-bar-tick', bar).style.left = `${(FEAR.nervous / FEAR.max) * 100}%`;
-    return { el, name, tag, fill, shown: 0, color: '', fleeing: false, frame: -1 };
+    return { el, name, tag, fill, shown: 0, color: '', fleeing: false, frame: -1, w: 0, lift: 0 };
   };
 
   const acquire = (n: NpcState): Plate => {
@@ -102,6 +106,11 @@ export function createOverlays(
     p.fleeing = false;
     p.el.classList.remove('is-fleeing');
     p.el.classList.add('is-on');
+    // 只在访客进门时读一次布局：名字定了宽度就不变，之后每帧只改 transform
+    const box = (p.el.firstElementChild as HTMLElement).getBoundingClientRect();
+    p.w = box.width;
+    if (box.height > 0) plateH = box.height;
+    p.lift = 0;
     plates.set(n.id, p);
     return p;
   };
@@ -147,6 +156,38 @@ export function createOverlays(
   addEventListener('resize', onResize);
 
   let frame = 0;
+  /** 名牌内容的高度（像素），第一次 acquire 时量到 */
+  let plateH = 26;
+  const placed: { x: number; y: number; w: number }[] = [];
+  const pending: { p: Plate; x: number; y: number }[] = [];
+
+  /**
+   * 名牌互相避让：访客站得近时名牌会叠成一团。从画面最下面的（离镜头最近的）开始摆，
+   * 后面的碰到已摆好的就往上挪到它上方。名牌的锚点在底边中点（styles.css 的 .ov-plate-in）
+   */
+  const layoutPlates = (dt: number) => {
+    pending.sort((a, b) => b.y - a.y);
+    placed.length = 0;
+    const gap = 3;
+    for (const it of pending) {
+      let y = it.y;
+      for (let moved = true; moved; ) {
+        moved = false;
+        for (const q of placed) {
+          const overlapX = Math.abs(it.x - q.x) < (it.p.w + q.w) / 2 + gap;
+          const overlapY = y > q.y - plateH - gap && y - plateH < q.y + gap;
+          if (overlapX && overlapY) {
+            y = q.y - plateH - gap;
+            moved = true;
+          }
+        }
+      }
+      placed.push({ x: it.x, y, w: it.p.w });
+      it.p.lift += (it.y - y - it.p.lift) * Math.min(1, dt * 12);
+      it.p.el.style.transform = at(it.x, it.y - it.p.lift);
+    }
+    pending.length = 0;
+  };
 
   const updatePlates = (npcs: NpcState[], dt: number) => {
     for (const n of npcs) {
@@ -154,7 +195,7 @@ export function createOverlays(
       const p = plates.get(n.id) ?? acquire(n);
       p.frame = frame;
       const s = rig.toScreen(n.pos, PLATE_Y);
-      p.el.style.transform = at(s.x, s.y);
+      pending.push({ p, x: s.x, y: s.y });
 
       p.shown += (n.fear - p.shown) * Math.min(1, dt * 10);
       if (Math.abs(n.fear - p.shown) < 0.05) p.shown = n.fear;
@@ -170,6 +211,7 @@ export function createOverlays(
         p.el.classList.toggle('is-fleeing', fleeing);
       }
     }
+    layoutPlates(dt);
     // 这一帧没被用到的名牌：访客已经离开，收回池子
     for (const [id, p] of plates) {
       if (p.frame === frame) continue;

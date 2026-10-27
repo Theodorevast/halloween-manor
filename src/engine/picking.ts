@@ -9,6 +9,8 @@ const CLICK_PX = 6;
 /** 镜头动起来后多久内跟着刷新悬停：旋转过渡 0.45 秒、缩放平滑约 0.4 秒，各留一点余量 */
 const REFRESH_ROTATE_MS = 600;
 const REFRESH_ZOOM_MS = 500;
+/** 触屏轻点后，悬停标签停留多久（毫秒） */
+const TOUCH_HOVER_MS = 1500;
 
 export interface Picker {
   onHover(cb: (id: string | null) => void): void;
@@ -23,6 +25,7 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
   const pickCbs: ((id: string) => void)[] = [];
   let hover: string | null = null;
   let down: { id: number; x: number; y: number; t: number } | null = null;
+  let touchHoverTimer = 0;
 
   // 触屏上不让浏览器把手指拖动当成滚动 / 缩放（否则会发 pointercancel，抬起事件收不到）
   const prevTouchAction = canvas.style.touchAction;
@@ -89,7 +92,12 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
     if (performance.now() - d.t >= CLICK_MS) return;
     if (Math.hypot(e.clientX - d.x, e.clientY - d.y) >= CLICK_PX) return;
     const id = idAt(e.clientX, e.clientY);
-    if (e.pointerType === 'touch') setHover(id);
+    if (e.pointerType === 'touch') {
+      // 触屏没有悬停：轻点时借悬停标签显示物件名和冷却，1.5 秒后自己收起，不然会一直挂在屏幕上
+      setHover(id);
+      clearTimeout(touchHoverTimer);
+      if (id) touchHoverTimer = window.setTimeout(() => setHover(null), TOUCH_HOVER_MS);
+    }
     if (id) for (const cb of pickCbs) cb(id);
   };
   const onCancel = () => { down = null; };
@@ -116,6 +124,7 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
       canvas.removeEventListener('pointercancel', onCancel);
       canvas.removeEventListener('pointerleave', onLeave);
       canvas.removeEventListener('wheel', onWheel);
+      clearTimeout(touchHoverTimer);
       disposed = true;
       canvas.style.cursor = '';
       canvas.style.touchAction = prevTouchAction;
