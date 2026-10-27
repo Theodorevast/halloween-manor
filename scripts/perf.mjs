@@ -14,7 +14,8 @@ const CHROME = process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Applic
 const argv = process.argv.slice(2);
 const CPU = argv.includes('--cpu');
 const LOW = argv.includes('--low');
-const SECONDS = Number(argv[argv.indexOf('--seconds') + 1] || 6);
+// 没给 --seconds 时 indexOf 是 -1，argv[0] 会被当成秒数（比如 '--cpu' → NaN），所以要先判断
+const SECONDS = argv.includes('--seconds') ? Number(argv[argv.indexOf('--seconds') + 1]) : 6;
 
 const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js', 'preview', '--port', String(PORT), '--strictPort', '--host', '127.0.0.1'], { stdio: 'ignore' });
 process.on('exit', () => server.kill());
