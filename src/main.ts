@@ -5,16 +5,18 @@ import { createAudio, type AudioSys } from './audio/engine';
 import { STRINGS } from './config/strings';
 import { installDebug } from './debug';
 import { createCameraRig } from './engine/camera';
+import { createGhostRig } from './engine/ghostRig';
 import { createCinematic, type Cinematic } from './engine/cinematic';
 import { createJuice } from './engine/juice';
 import { createPicker } from './engine/picking';
 import { createRenderCore, watchFrameTime } from './engine/renderer';
-import type { CameraRig, FrameCtx, Module, Quality, RenderCore } from './engine/types';
+import { isGhostRig, type CameraRig, type FrameCtx, type Module, type Quality, type RenderCore } from './engine/types';
 import type { Object3D } from 'three/webgpu';
 import type { SimEvent } from './sim/types';
 import { createWorld } from './sim/world';
 import { createHud } from './ui/hud';
 import { createCharactersView } from './view/characters';
+import { createGhostView } from './view/ghost';
 import { createFogView } from './view/fog';
 import { createHouseView } from './view/house';
 import { createOverlays } from './view/overlays';
@@ -84,6 +86,8 @@ function begin() {
   if (wantBegin) return;
   wantBegin = true;
   void audio.unlock();
+  // 指针锁定也必须在这次点击的调用栈里
+  if (rig && isGhostRig(rig)) rig.lockPointer();
   if (ready) start();
 }
 
@@ -112,7 +116,9 @@ async function boot() {
     hud.showError(STRINGS.deviceLost);
     addEventListener('pointerdown', () => location.reload(), { once: true });
   };
-  const r = (rig = createCameraRig(canvas));
+  // 有鼠标和键盘的设备用第三人称操控鬼魂；触屏设备（没有精确指针）继续用娃娃屋俯视。?dollhouse 强制俯视
+  const ghostMode = matchMedia('(pointer: fine)').matches && !new URLSearchParams(location.search).has('dollhouse');
+  const r = (rig = ghostMode ? createGhostRig(canvas) : createCameraRig(canvas));
   const fit = () => {
     c.resize(canvas.clientWidth, canvas.clientHeight);
     r.resize(canvas.clientWidth, canvas.clientHeight);
@@ -131,6 +137,7 @@ async function boot() {
   const cine = (cinematic = createCinematic(r, c, overlays));
   modules.push(
     createHouseView(c, r), createFogView(c, r), props, characters, createParticlesView(c),
+    ...(isGhostRig(r) ? [createGhostView(c, r)] : []),
     createJuice(r, c), cine, audio, overlays, hud,
   );
 
@@ -174,6 +181,8 @@ async function boot() {
     const dt = Math.min(0.1, (now - last) / 1000);
     last = now;
     time += dt;
+    // 鬼魂位置先交给模拟（贴近发毛），再推进模拟
+    world.setGhost(isGhostRig(r) && started ? { x: r.ghost.x, z: r.ghost.z } : null);
     if (started) dispatch(world.step(dt * control.timeScale));
     const ctx: FrameCtx = { dt, time, state: world.state };
     r.update(dt);

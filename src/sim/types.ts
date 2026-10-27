@@ -81,6 +81,11 @@ export type SimEvent =
   | { type: 'flee'; npc: number }
   /** 走出前门。total = 今晚累计吓跑人数 */
   | { type: 'exit'; npc: number; name: string; total: number }
+  /**
+   * 鬼魂贴近带来的寒意（第三人称改版）。neck = true 时是「后颈一凉」的惊吓（贴得很近停留够久），
+   * 否则是持续发毛的一小步。amount 为这一下涨的恐惧值
+   */
+  | { type: 'chill'; npc: number; amount: number; neck: boolean }
   /** 物件从「被破坏」状态复原（台灯亮回、肖像立回画架） */
   | { type: 'reset'; object: string };
 
@@ -92,6 +97,11 @@ export interface World {
   trigger(objectId: string): boolean;
   /** 立刻放进一个访客（测试和调试用；正常游戏由生成器自动放）。默认在门外、状态 entering */
   spawn(opts?: SpawnOptions): NpcState;
+  /**
+   * 玩家操控的鬼魂在哪（房屋米坐标，第三人称模式每帧调一次）；null = 没有鬼魂（触屏的俯视模式）。
+   * 访客看不见鬼魂，但鬼魂贴近时会发毛（2026-10-28 第三人称改版）
+   */
+  setGhost(pos: Vec2 | null): void;
 }
 
 export interface SpawnOptions {

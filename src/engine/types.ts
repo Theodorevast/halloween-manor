@@ -21,6 +21,31 @@ export interface Module {
   dispose?(): void;
 }
 
+/**
+ * 第三人称模式下玩家操控的鬼魂（2026-10-28 改版）。位置为房屋米坐标（x 向东、z 向南、y 为离地高度）。
+ * 由 engine/ghostRig.ts 每帧更新；画面（鬼魂外形、墙的溶解）、声音、模拟（贴近发毛）都读它
+ */
+export interface GhostState {
+  x: number;
+  y: number;
+  z: number;
+  /** 朝向（方向角，约定见 lib/angle.ts） */
+  heading: number;
+  /** 当前水平速度（米/秒） */
+  speed: number;
+  /** 鬼魂身体此刻是否在墙里（穿墙效果用） */
+  inWall: boolean;
+}
+
+/** 第三人称镜头：仍然实现 CameraRig（rotate / punch 等对它可以是空操作），多一个鬼魂状态 */
+export interface GhostRig extends CameraRig {
+  readonly ghost: GhostState;
+  /** 指针锁定后鼠标转向；开场点击时调用（必须在用户手势里） */
+  lockPointer(): void;
+}
+
+export const isGhostRig = (r: CameraRig): r is GhostRig => 'ghost' in r;
+
 /** 渲染器（engine/renderer.ts 产出） */
 export interface RenderCore {
   renderer: THREE.WebGPURenderer;

@@ -171,6 +171,9 @@ export function createWorld(opts: WorldOptions): World {
   return {
     state,
 
+    // 占位：贴近发毛由模拟层任务实现（2026-10-28 第三人称改版）
+    setGhost() {},
+
     step(dt: number): SimEvent[] {
       const events = pending;
       pending = [];
