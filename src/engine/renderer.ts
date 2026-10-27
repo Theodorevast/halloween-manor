@@ -30,11 +30,19 @@ const BLOOM_MIN_PX = 64;
 export interface RenderCoreOptions {
   /** 调试：强制走 WebGL2 后端 */
   forceWebGL?: boolean;
+  /** 调试 / 量性能：开 GPU 时间戳查询（每个渲染 pass 的 GPU 耗时），见 EngineCore.gpuTime */
+  gpuTime?: boolean;
 }
 
 /** createRenderCore 的实际产物：契约里的 RenderCore，外加后处理对象（调试和 dev 页面用） */
 export interface EngineCore extends RenderCore {
   post: PostFx | null;
+  /**
+   * 调试：上次清零以来每帧 GPU 时间的平均（毫秒，一帧里所有渲染 pass 之和，含阴影图和后处理；frames 是样本数，
+   * 每次异步读回取一帧，不是每帧都有样本）。只有 opts.gpuTime / 地址带 ?gputime 且浏览器支持 timestamp-query 时有数，
+   * 否则 null。reset 为 true 时读完清零
+   */
+  gpuTime(reset?: boolean): { ms: number; frames: number } | null;
 }
 
 const webgl2Available = () => {
@@ -51,7 +59,9 @@ export async function createRenderCore(canvas: HTMLCanvasElement, opts: RenderCo
   // 探测用临时画布：在正式画布上 getContext 会把它锁死在 WebGL，WebGPU 就用不了了
   if (!('gpu' in navigator) && !webgl2Available()) throw new Error('no-webgl2');
 
-  const renderer = new THREE.WebGPURenderer({ canvas, antialias: true, forceWebGL: opts.forceWebGL ?? false });
+  const renderer = new THREE.WebGPURenderer({
+    canvas, antialias: true, forceWebGL: opts.forceWebGL ?? false, trackTimestamp: opts.gpuTime ?? new URLSearchParams(location.search).has('gputime'),
+  });
   try {
     await renderer.init();
   } catch (err) {
@@ -75,7 +85,7 @@ export async function createRenderCore(canvas: HTMLCanvasElement, opts: RenderCo
   // 后处理建不起来（例如某个后端不支持其中的节点）就直接渲染，至少画面在
   let post: PostFx | null = null;
   try {
-    post = createPostFx(renderer, scene);
+    post = createPostFx(renderer, scene, { houseRoot });
   } catch (err) {
     console.warn('后处理不可用，改为直接渲染', err);
   }
@@ -84,8 +94,21 @@ export async function createRenderCore(canvas: HTMLCanvasElement, opts: RenderCo
   let width = Math.max(1, canvas.clientWidth || window.innerWidth);
   let height = Math.max(1, canvas.clientHeight || window.innerHeight);
   const pixelRatio = (q: Quality) => Math.min(window.devicePixelRatio || 1, PIXEL_RATIO[q]);
-  // 泛光只在 high 档开；画面太小时 BloomNode 的 5 级降采样会降到 0 尺寸，也关掉
-  const applyBloom = () => post?.setBloom(core.quality === 'high' && Math.min(width, height) >= BLOOM_MIN_PX);
+  // 泛光只在 high 档的管线里；画面太小时 BloomNode 的 5 级降采样会降到 0 尺寸，关掉
+  const applyBloom = () => post?.setBloom(Math.min(width, height) >= BLOOM_MIN_PX);
+
+  // GPU 计时：上一次读回完成后再发起下一次。three 每次读回的是「这一批里最后一帧」所有 pass 的总时长，
+  // 所以每次读回算一个样本。浏览器默认把时间戳量化到 0.1 毫秒，单帧不准，样本多了平均值是无偏的
+  const gpu = { ms: 0, frames: 0, pending: false };
+  const trackGpu = () => {
+    if (gpu.pending) return;
+    gpu.pending = true;
+    renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER).then((ms) => {
+      gpu.pending = false;
+      if (typeof ms === 'number' && Number.isFinite(ms)) { gpu.ms += ms; gpu.frames += 1; }
+    }, () => { gpu.pending = false; });
+  };
+  const gpuOn = () => (renderer.backend as { trackTimestamp?: boolean }).trackTimestamp === true;
 
   const core: EngineCore = {
     renderer,
@@ -96,6 +119,7 @@ export async function createRenderCore(canvas: HTMLCanvasElement, opts: RenderCo
     post,
     setQuality(q) {
       core.quality = q;
+      post?.setQuality(q);
       renderer.setPixelRatio(pixelRatio(q));
       renderer.setSize(width, height, false);
       applyBloom();
@@ -111,14 +135,25 @@ export async function createRenderCore(canvas: HTMLCanvasElement, opts: RenderCo
     render(camera) {
       if (post) post.render(camera);
       else renderer.render(scene, camera);
+      if (gpuOn()) trackGpu();
+    },
+    gpuTime(reset = false) {
+      if (!gpuOn()) return null;
+      const r = { ms: gpu.frames > 0 ? gpu.ms / gpu.frames : 0, frames: gpu.frames };
+      if (reset) { gpu.ms = 0; gpu.frames = 0; }
+      return r;
     },
     fx: {
       vignettePulse(strength, color = PALETTE.dread) {
         post?.vignettePulse(strength, color);
       },
-      // 景深和开场显影：画面管线任务实现（2026-10-27 电影感升级），先占位
-      focus() {},
-      setReveal() {},
+      // 景深焦点、开场显影：见 postfx.ts 的 DOF / REVEAL。没有后处理（极少数后端）时这两个是空操作
+      focus(target, o) {
+        post?.focus(target, o);
+      },
+      setReveal(progress, origin) {
+        post?.setReveal(progress, origin);
+      },
     },
   };
   core.setQuality('high');

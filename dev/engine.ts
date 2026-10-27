@@ -2,7 +2,7 @@
 // 一块 16 × 12 米的地板（每米一条格线）、四角 2.4 米高的柱子（检查取景装得下墙高）、
 // 四个可拾取方块（userData.propId）、房屋 (8, 6) 处一块亮青色方片（对 toScreen）、一盏手电 + 一盏台灯 + 发光块（看泛光）。
 // 按键：Q / E 旋转；Z / X 缩小 / 放大；S 小震；F 模拟吓跑（juice：大震 + 暗角脉冲）；V 只放暗角脉冲；B 切画质；I 开场镜头；T 换色调映射；
-// P 冲镜（依次冲向四个方块，满幅）
+// P 冲镜（依次冲向四个方块，满幅）；G 景深对焦到下一个方块（强度 1），H 回到常态微缩景深；R 开场显影（2.5 秒从 0 到 1，从前门外铺开）
 // URL 参数：?tm=agx|neutral|aces|reinhard|none  ?ambient=0.35  ?webgl（强制 WebGL2）  ?quality=low  ?marker（在 toScreen(8, 6) 画红圈）
 import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W, WALL_H } from '../src/config/house';
@@ -174,6 +174,10 @@ const emit = (e: SimEvent) => juice.onEvent?.(e, fakeState);
 
 // —— 输入 ——
 let punches = 0;
+let focuses = 0;
+/** 开场显影的进度计时（秒）；null = 不在播 */
+let revealT: number | null = null;
+const REVEAL_TIME = 2.5;
 const toggleQuality = () => core.setQuality(core.quality === 'high' ? 'low' : 'high');
 addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
@@ -186,6 +190,12 @@ addEventListener('keydown', (e) => {
   else if (k === 'v') core.fx.vignettePulse(1);
   else if (k === 'b') toggleQuality();
   else if (k === 'i') rig.intro(2.5);
+  else if (k === 'g') {
+    const b = BOXES[focuses++ % BOXES.length];
+    core.fx.focus({ x: b.x, z: b.z }, { strength: 1, height: BOX / 2 });
+  }
+  else if (k === 'h') core.fx.focus(null);
+  else if (k === 'r') revealT = 0;
   else if (k === 'p') {
     const b = BOXES[punches++ % BOXES.length];
     rig.punch({ x: b.x, z: b.z }, 1);
@@ -228,6 +238,11 @@ const frame = () => {
   for (const b of boxes) {
     b.bump = Math.max(0, b.bump - dt * 3);
     b.mesh.position.y = BOX / 2 + Math.sin(b.bump * Math.PI) * 0.4;
+  }
+  if (revealT !== null) {
+    revealT += dt;
+    core.fx.setReveal(Math.min(1, revealT / REVEAL_TIME));
+    if (revealT >= REVEAL_TIME) revealT = null;
   }
   rig.update(dt);
   core.render(rig.camera);
