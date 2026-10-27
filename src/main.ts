@@ -112,7 +112,8 @@ async function boot() {
 
   const props = createPropsView(c);
   const overlays = createOverlays(document.getElementById('overlay')!, r);
-  modules.push(createHouseView(c, r), props, await createCharactersView(c), createJuice(r, c), audio, overlays, hud);
+  const characters = await createCharactersView(c);
+  modules.push(createHouseView(c, r), props, characters, createJuice(r, c), audio, overlays, hud);
 
   const picker = createPicker(canvas, r, () => props.pickTargets());
   picker.onHover((id) => {
@@ -122,6 +123,17 @@ async function boot() {
   picker.onPick((id) => { if (started) world.trigger(id); });
 
   installDebug({ world, dispatch, control, rig: r, core: c });
+
+  // 先把场景里所有材质的渲染管线异步编好，再开始渲染。不预编译的话，管线是第一次画到时同步编译的，
+  // 开局头几秒会连着卡好几下（实测单帧最长 0.5–0.7 秒），正好撞上开场镜头下降。
+  // 访客的材质要等第一个人进门才出现，所以先放一个临时访客一起编（prewarm 内部各编一次不透明、半透明）。
+  // compileAsync 只编主相机那一遍，阴影那几遍（狐狸投到月光和手电的阴影图里）不管，所以再真画一帧：
+  // 这时开场遮罩还写着「Lighting the candles…」，多花的这点时间玩家看不见
+  const compile = async () => {
+    await c.renderer.compileAsync(c.scene, r.camera);
+    c.render(r.camera);
+  };
+  await characters.prewarm(compile).catch((err) => console.warn('预编译着色器失败，改为边画边编', err));
 
   const frameWatch = watchFrameTime(() => { if (quality === 'high') setQuality('low'); });
   let last = performance.now();

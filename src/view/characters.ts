@@ -161,6 +161,11 @@ export interface CharactersView extends Module {
   inspect(): CharacterDebug[];
   /** 加载到的是 GLB 还是备用小人 */
   readonly source: 'glb' | 'fallback';
+  /**
+   * 预热渲染管线：临时放一个点亮手电的访客，不透明、半透明各调一次 compile（主会话传入 renderer.compileAsync），再移除。
+   * 不预热的话第一个访客进门时会卡一下：淡入用半透明管线，淡入完成切回不透明，两批都是当场同步编译的
+   */
+  prewarm(compile: () => Promise<void>): Promise<void>;
 }
 
 const sineOut = (u: number) => Math.sin((u * Math.PI) / 2);
@@ -421,6 +426,24 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
 
   const view: CharactersView = {
     get source() { return asset ? 'glb' : 'fallback'; },
+    async prewarm(compile) {
+      const fake: NpcState = {
+        id: -1, name: '', personality: 'average', pos: { x: 8, z: 6 }, heading: 0, lookDir: 0, mode: 'wander', modeTime: 0,
+        fear: 0, nervous: false, speed: 0, screaming: 0, path: [],
+      };
+      const v = create(fake);
+      try {
+        setAlpha(v, 1);
+        step(v, 0, 0); // 摆好位置、点亮手电（手电的光锥材质也要编）
+        await compile();
+        setAlpha(v, 0.5);
+        step(v, 0, 0);
+        await compile();
+      } finally {
+        v.leaving = true;
+        destroy(v);
+      }
+    },
     onEvent(e: SimEvent) {
       if (e.type === 'startle' && e.object !== null) {
         const v = visuals.get(e.npc);
