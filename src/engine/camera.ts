@@ -1,5 +1,7 @@
-// 正交斜俯视相机：90° 旋转（缓入缓出、可连按）、滚轮缩放、屏幕震动、开场下降镜头、惊吓落下时的冲镜。
-// 画面始终按「整栋房子 + 边距」取景（横屏按高度、竖屏按宽度），缩放在这个基准上乘
+// 正交斜俯视相机：90° 旋转（缓入缓出、可连按）、滚轮缩放、开场下降镜头、惊吓落下时的冲镜，
+// 再加两种只转不移的小动作：没人操作时极慢的「呼吸」，受惊时摄影师式地一抖（创伤值震动）。
+// 画面始终按「整栋房子 + 边距」取景（横屏按高度、竖屏按宽度），缩放在这个基准上乘。
+// 正交相机平移只是整张画平着滑，看不出纵深；只有小角度的转动能让前后的东西互相错开，所以呼吸和震动都只用旋转
 import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W, WALL_H } from '../config/house';
 import type { Vec2 } from '../sim/types';
@@ -19,16 +21,17 @@ const ZOOM_MAX = 1.6;
 const ZOOM_RATE = 12;
 /** 取景边距：房子外接框每边多留的比例 */
 const MARGIN = 0.07;
-/** 相机离房子中心的距离：正交相机只影响裁剪面，够远就行 */
+/** 相机离转动中心的距离：正交相机只影响裁剪面，够远就行 */
 const DIST = 40;
 /**
  * 冲镜：惊吓落在访客身上时，镜头推近并偏向那个物件，停一下再退回。下面是 strength = 1 的幅度，弱的按比例缩小。
- * - 推近 1.3 倍：物件明显大一圈，房子的大部分仍在画面里，看得出是在哪个房间
+ * - 推近 1.2 倍：景深拉焦（juice.ts）分担了一部分强调，推近本身收一点（Nesky「50 个镜头错误」#41 视野快速变化、#45 快速换机位）
  * - 画面中心往物件挪 60%：比「以物件为中心缩放」（物件原地不动）多走一截，物件被拉向画面中间
  * - 0.12 秒推进（像倒吸一口气），停 0.5 秒让人看清，0.8 秒缓缓退回：退得比进得慢很多，余韵比冲击长
+ * juice.ts 的拉焦按这里的推进 + 停留时长松开，所以导出
  */
-const PUNCH = {
-  zoom: 1.3,
+export const PUNCH = {
+  zoom: 1.2,
   pan: 0.6,
   attack: 0.12,
   hold: 0.5,
@@ -38,12 +41,72 @@ const PUNCH = {
   /** 焦点离地高度（米），大致是物件中部（和调试接口 screenOf 一样） */
   height: 0.8,
 };
+/** 呼吸和震动绕着转的点：房子中心、离地这么高（米）。和冲镜焦点一样在物件、人的中部，地板和墙头朝相反方向错开 */
+const PIVOT_Y = 0.8;
+/**
+ * 呼吸：没人操作时镜头极慢地漂，像三脚架后面有人在呼吸（《小小梦魇》娃娃屋镜头的轻微晃动、Henry Heffernan 作品集的待机绕转）。
+ * - 只转不移：方位角最多 ±0.5°、仰角最多 ±0.25°，绕上面的转动中心转；取景框不变，画面不会跟着缩放「呼吸」
+ * - 每个轴两条正弦，频率互不成整数比（周期 19–43 秒），几分钟内不重复；最快约 0.12°/秒，盯着看才察觉得到
+ *   （Messenger 的教训：自动运镜要极慢、速度连续）
+ * - 幅度按缩放倍数反比缩小：推近时画面放大，同样的角度在屏幕上走得更远
+ * - 旋转、冲镜、开场期间 0.35 秒淡出，结束后 2.5 秒淡回；系统设置了「减少动态效果」时不呼吸
+ */
+const BREATH = {
+  yaw: 0.5 * DEG,
+  pitch: 0.25 * DEG,
+  yawHz: [0.031, 0.053],
+  pitchHz: [0.023, 0.041],
+  /** 各条正弦的初相（弧度）：两个轴不同时过零 */
+  yawPhase: [0, 1.7],
+  pitchPhase: [0.6, 2.9],
+  /** 两条正弦的权重（和为 1，叠加后不超过上面的幅度） */
+  mix: [0.65, 0.35],
+  fadeOut: 0.35,
+  fadeIn: 2.5,
+};
+/**
+ * 震动：Squirrel Eiserloh「Juicing Your Cameras With Math」的创伤值模型。事件往创伤值（0..1）里加（juice.ts），
+ * 创伤值每秒线性减 1；画面转角 = 最大角 × 创伤值² × 平滑噪声（不用随机数，不会一帧一跳）。
+ * 平方让小惊吓几乎不晃、吓跑才明显，尾巴也自然收掉。只转不移：横滚为主，方位、仰角各带一点，
+ * 读起来是摄影师被吓得手一缩，不是地震。幅度同样按缩放倍数反比缩小
+ */
+const SHAKE = {
+  roll: 0.6 * DEG,
+  yaw: 0.25 * DEG,
+  pitch: 0.2 * DEG,
+  /** 来回的频率（Hz）：手抖大约 8–12 Hz。三个轴频率略错开、在噪声里错开位置取样，彼此不同步 */
+  hz: [9.3, 10.7, 8.1],
+  /** 三个轴（横滚、方位、仰角）在噪声里的取样起点 */
+  seed: [83, 11, 47],
+  /** 创伤值每秒减少多少 */
+  decay: 1,
+};
 
 const azimuthOf = (quarterUnwrapped: number) => Math.PI / 4 + (quarterUnwrapped * Math.PI) / 2;
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
 const easeOutCubic = (t: number) => 1 - (1 - t) ** 3;
 const smoothstep = (t: number) => t * t * (3 - 2 * t);
+const TAU = Math.PI * 2;
+
+/** 整数 → 0..1 的伪随机数（整数哈希，同一个格点永远同一个值） */
+const hash01 = (i: number) => {
+  let h = Math.imul(i | 0, 0x27d4eb2d) ^ 0x165667b1;
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+  h ^= h >>> 13;
+  return (h >>> 0) / 0xffffffff;
+};
+/**
+ * 抖动用的一维平滑噪声，x 每走 1 是半个来回：格点上的值正负交替、大小在 0.4–1 之间随机，格点之间五次平滑插值。
+ * 和普通的 Perlin 噪声一样连续、不重复，但每个来回都真的摆得开（Perlin 一维大多在 ±0.3 以内，乘上创伤值² 就看不见了）
+ */
+const tremor = (x: number) => {
+  const i = Math.floor(x), f = x - i;
+  const u = f * f * f * (f * (f * 6 - 15) + 10);
+  const v0 = (i & 1 ? -1 : 1) * (0.4 + 0.6 * hash01(i));
+  const v1 = (i & 1 ? 1 : -1) * (0.4 + 0.6 * hash01(i + 1));
+  return v0 + (v1 - v0) * u;
+};
 
 /** 一段方位角过渡：三次 Hermite，起点带上一段的速度、终点速度为 0。
  *  第一次按旋转时起点速度为 0，就是标准的缓入缓出；过渡中再按，从当前位置和速度接着转，不跳、不顿 */
@@ -57,12 +120,12 @@ const segVel = (s: RotSeg, u: number) => {
   return ((6 * u2 - 6 * u) * s.p0 + (3 * u2 - 4 * u + 1) * ROT_TIME * s.v0 + (-6 * u2 + 6 * u) * s.p1) / ROT_TIME;
 };
 
-interface Shake { strength: number; duration: number; t: number; px: number; py: number }
 /** 一段冲镜：幅度从 a0 推到 peak、停、退回 0；焦点（房屋米坐标）从 from 滑到 to */
 interface Punch { from: Vec2; to: Vec2; a0: number; peak: number; glide: number; t: number }
 
 export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, DIST * 2.5);
+  const reducedMotion = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
   let quarterU = 0; // 不取模的累计值，方位角跟着它连续走，绕一圈也不会反向转回去
   let az = azimuthOf(0);
   let seg: RotSeg | null = null;
@@ -71,7 +134,10 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
   let intro: { t: number; dur: number } | null = null;
   let elev = ELEV;
   let introZoom = 1;
-  const shakes: Shake[] = [];
+  /** 创伤值 0..1 */
+  let trauma = 0;
+  /** 呼吸的淡入淡出进度 0..1（线性走，用的时候过一遍 smoothstep，起停都没有速度突变） */
+  let breathW = 0;
   let punch: Punch | null = null;
   /** 此刻的冲镜幅度 0..1 和焦点。焦点存房屋坐标而不是屏幕坐标：冲镜中转镜头，焦点仍跟着那个物件 */
   let punchA = 0;
@@ -80,6 +146,7 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
   let width = Math.max(1, canvas.clientWidth);
   let height = Math.max(1, canvas.clientHeight);
   const cbs: ((q: number) => void)[] = [];
+  // viewDir 只跟着旋转走，不含呼吸和震动：月光方向、降墙都按它算，不该跟着晃
   const viewDir: Vec2 = { x: Math.cos(az), z: Math.sin(az) };
 
   // 取景：房子外接盒（16 × 12 米、高到 WALL_H）在相机视平面上的范围。
@@ -114,24 +181,13 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
   const place = () => {
     viewDir.x = Math.cos(az);
     viewDir.z = Math.sin(az);
-    const ce = Math.cos(elev);
-    camera.position.set(viewDir.x * ce * DIST, Math.sin(elev) * DIST, viewDir.z * ce * DIST);
-    camera.up.set(0, 1, 0);
-    camera.lookAt(0, 0, 0);
 
-    // 震动：在视平面里平移取景框（单位：米）。每次震动用平滑的正弦叠加，按剩余时长的平方衰减
-    let ox = 0, oy = 0;
-    for (const s of shakes) {
-      const k = s.strength * (1 - s.t / s.duration) ** 2;
-      ox += k * (0.65 * Math.sin(clock * 83 + s.px) + 0.35 * Math.sin(clock * 131 + s.py * 1.7));
-      oy += k * (0.65 * Math.sin(clock * 97 + s.py) + 0.35 * Math.sin(clock * 151 + s.px * 1.3));
-    }
-
+    // 取景框（视平面坐标，原点 = 房子中心的地面点，和 computeFit 同一套）
     const z = zoomCur * introZoom;
     let hw = fit.hw / z, hh = fit.hh / z;
     let cx = fit.cx, cy = fit.cy;
     if (punchA > 0) {
-      // 冲镜：焦点投到视平面（和 computeFit 同一套坐标），画面中心往它挪，再推近。
+      // 冲镜：焦点投到视平面，画面中心往它挪，再推近。
       // 挪动量限制在「推近后的框仍落在推近前的框里」：只是往里裁，不会把房子推出画面，也不会露出原本看不到的黑边
       const zp = 1 + punchA * (PUNCH.zoom - 1);
       const se = Math.sin(elev), ce = Math.cos(elev);
@@ -144,10 +200,44 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
       hw /= zp;
       hh /= zp;
     }
-    camera.left = cx + ox - hw;
-    camera.right = cx + ox + hw;
-    camera.top = cy + oy + hh;
-    camera.bottom = cy + oy - hh;
+
+    // 呼吸 + 震动：取景算完之后再叠上去，只改相机朝向，不改取景框的大小
+    const zs = 1 / zoomCur;
+    const b = smoothstep(breathW) * zs;
+    const [m0, m1] = BREATH.mix;
+    const sway = (hz: number[], ph: number[]) => m0 * Math.sin(TAU * hz[0] * clock + ph[0]) + m1 * Math.sin(TAU * hz[1] * clock + ph[1]);
+    let yaw = b * BREATH.yaw * sway(BREATH.yawHz, BREATH.yawPhase);
+    let pitch = b * BREATH.pitch * sway(BREATH.pitchHz, BREATH.pitchPhase);
+    let roll = 0;
+    if (trauma > 0) {
+      const s = trauma * trauma * zs;
+      const { hz, seed } = SHAKE;
+      // 噪声的 x 每走 1 是半个来回，所以乘 2
+      roll = s * SHAKE.roll * tremor(clock * hz[0] * 2 + seed[0]);
+      yaw += s * SHAKE.yaw * tremor(clock * hz[1] * 2 + seed[1]);
+      pitch += s * SHAKE.pitch * tremor(clock * hz[2] * 2 + seed[2]);
+    }
+
+    // 绕转动中心（房子中心离地 PIVOT_Y）摆相机：转动中心永远在视轴上，转多少它在画面上都不动
+    const a = az + yaw, e = elev + pitch;
+    const ce = Math.cos(e);
+    camera.position.set(Math.cos(a) * ce * DIST, PIVOT_Y + Math.sin(e) * DIST, Math.sin(a) * ce * DIST);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(0, PIVOT_Y, 0);
+    // 视平面原点从地面中心换成转动中心：不转的时候画面和以前一模一样
+    cy -= Math.cos(elev) * PIVOT_Y;
+    if (roll !== 0) {
+      // 横滚绕画面中心：相机绕自己的视轴转 roll 后，原来在画面中心的点的视平面坐标转了 −roll，取景框中心跟过去
+      camera.rotateZ(roll);
+      const c = Math.cos(roll), s = Math.sin(roll);
+      const rx = cx * c + cy * s;
+      cy = -cx * s + cy * c;
+      cx = rx;
+    }
+    camera.left = cx - hw;
+    camera.right = cx + hw;
+    camera.top = cy + hh;
+    camera.bottom = cy - hh;
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
   };
@@ -177,17 +267,16 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
     zoom(factor) {
       zoomTarget = clamp(zoomTarget * factor, ZOOM_MIN, ZOOM_MAX);
     },
-    shake(strength, duration) {
-      if (strength <= 0 || duration <= 0) return;
-      shakes.push({ strength, duration, t: 0, px: Math.random() * 100, py: Math.random() * 100 });
+    shake(amount) {
+      if (amount > 0) trauma = Math.min(1, trauma + amount);
     },
     punch(target, strength) {
       const s = clamp(strength, 0, 1);
-      if (!(s > 0)) return;
+      if (!(s > 0)) return false;
       // 画面上正在播更强的（推进、停留中按峰值算，退回中按此刻的幅度算）：不被弱的打断。
       // 一样强的照常接上：同一个物件又吓到一个人，等于把停留延长
       const level = punch && punch.t < PUNCH.attack + PUNCH.hold ? punch.peak : punchA;
-      if (s < level - 1e-6) return;
+      if (s < level - 1e-6) return false;
       // 从此刻的幅度和焦点接着走，不跳。镜头还没推进去时焦点直接放到目标上（幅度为 0，看不出来）
       const showing = punchA > 0.02;
       punch = {
@@ -198,11 +287,13 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
         glide: showing ? PUNCH.glide : PUNCH.attack,
         t: 0,
       };
+      return true;
     },
     intro(seconds) {
       intro = { t: 0, dur: Math.max(0.01, seconds) };
       elev = INTRO_ELEV;
       introZoom = INTRO_ZOOM;
+      breathW = 0;
       computeFit();
       place();
     },
@@ -228,10 +319,7 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
         if (intro.t >= intro.dur) intro = null;
         computeFit();
       }
-      for (let i = shakes.length - 1; i >= 0; i--) {
-        shakes[i].t += dt;
-        if (shakes[i].t >= shakes[i].duration) shakes.splice(i, 1);
-      }
+      trauma = Math.max(0, trauma - dt * SHAKE.decay);
       if (punch) {
         const p = punch;
         p.t += dt;
@@ -248,6 +336,9 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
         punchF.x = p.from.x + (p.to.x - p.from.x) * k;
         punchF.z = p.from.z + (p.to.z - p.from.z) * k;
       }
+      // 镜头在做别的动作（旋转、冲镜、开场）时呼吸让开，做完再慢慢回来
+      const busy = seg !== null || punch !== null || intro !== null || reducedMotion?.matches === true;
+      breathW = busy ? Math.max(0, breathW - dt / BREATH.fadeOut) : Math.min(1, breathW + dt / BREATH.fadeIn);
       place();
     },
     resize(w, h) {

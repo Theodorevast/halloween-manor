@@ -61,13 +61,16 @@ export interface CameraRig {
   rotate(dir: 1 | -1): void;
   /** 乘法缩放，结果限制在 0.75–1.6 */
   zoom(factor: number): void;
-  /** 叠加一次屏幕震动 */
-  shake(strength: number, duration: number): void;
+  /**
+   * 震动：往创伤值（0..1，加完封顶 1）里加 amount。创伤值每秒线性减 1，镜头按创伤值² 小角度地抖（只转不移），
+   * 像摄影师被吓得手一缩。吓跑 0.6，惊吓 0.3–0.5，尖叫传染 0.25（juice.ts 的 TRAUMA）
+   */
+  shake(amount: number): void;
   /**
    * 冲镜：快速推近并偏向 target（房屋米坐标），停一下再缓缓退回。strength 0..1 决定推多近、偏多少。
-   * 播放中再来一次：从当前位置平滑转向新目标；比画面上正在播的弱的忽略
+   * 播放中再来一次：从当前位置平滑转向新目标；比画面上正在播的弱的忽略。返回这次是否被采用（被忽略时 false）
    */
-  punch(target: Vec2, strength: number): void;
+  punch(target: Vec2, strength: number): boolean;
   /** 开场：镜头从高处、拉远的位置缓缓降到正常位置 */
   intro(seconds: number): void;
   /** quarter 改变时（旋转开始时）回调 */

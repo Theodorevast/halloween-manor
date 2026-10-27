@@ -663,3 +663,64 @@ body {
     transition: none;
   }
 }
+
+/* ── 电影黑边（engine/cinematic.ts）：吓跑一个人时上下两条黑边滑入、停住、滑出 ───────
+ * 容器和 #overlay 同为 z-index 1、DOM 在它之后：盖住画布和场景叠层，在 HUD（z-index 2）之下，按钮照常能点。
+ * 不接收指针，黑边期间照样能附身。时长由 JS 写进 --lb-in / --lb-out（cinematic.ts 的 LETTERBOX）。
+ * 滑入用指数缓出（快进、轻落，不回弹），滑出用缓入缓出 */
+.lb {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+}
+
+.lb-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 7%;
+  background: #000;
+  transition: transform var(--lb-out, 0.8s) cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+.lb-top {
+  top: 0;
+  transform: translateY(-101%);
+}
+
+.lb-bottom {
+  bottom: 0;
+  transform: translateY(101%);
+}
+
+.lb.is-on .lb-bar {
+  transform: none;
+  transition-duration: var(--lb-in, 0.45s);
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 手机竖屏：画面本来就窄，黑边收细 */
+@media (orientation: portrait) and (max-width: 640px) {
+  .lb-bar {
+    height: 4%;
+  }
+}
+
+/* 减弱动态：不滑，原地淡入淡出 */
+@media (prefers-reduced-motion: reduce) {
+  .lb-bar,
+  .lb-top,
+  .lb-bottom,
+  .lb.is-on .lb-bar {
+    transform: none;
+    opacity: 0;
+    transition-property: opacity;
+  }
+
+  .lb.is-on .lb-bar {
+    opacity: 1;
+  }
+}
