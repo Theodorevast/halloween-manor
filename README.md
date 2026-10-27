@@ -22,6 +22,7 @@
 地址参数：
 - `?debug` 挂出 `window.__haunt`：`state()` 看文字版状态，`step(ms)` 快进，`trigger(id)` 附身，`spawn({...})` 放访客，`setTimeScale(n)` 加速，`screenOf(id)` 取物件的屏幕坐标
 - `?webgl` 强制走 WebGL2。有人反馈画面不对时，先让对方加上它，看是不是 WebGPU 的问题
+- `?nofog` 关掉贴地雾气（对比效果、排查性能时用）
 
 ## 玩法速览
 
