@@ -180,7 +180,7 @@ async function boot() {
     overlays.setHover(id);
   });
   picker.onPick((id) => { if (started) world.trigger(id); });
-  // 第三人称：按住设机关；右键或 F 现身（冷却中、正在现身时模拟自己不理）
+  // 第三人称：按住设机关；右键或 F 现身（冷却中、正在现身、鬼魂在墙格里时模拟自己不理）
   picker.onArm((id) => { if (started) world.arm(id); });
   if (isGhostRig(r)) r.onManifest(() => { if (started) world.manifest(); });
 
