@@ -76,6 +76,8 @@ export interface BotRun {
   /** 现身：落下了几次、一共吓到几人次 */
   manifests: number;
   manifestScares: number;
+  /** 鬼魂机器人穿墙（告诉模拟的 inWall 由假变真）的次数；模拟去抖、每人冷却以后，真正被听见的会少一些 */
+  wallPasses: number;
 }
 
 export interface RunOptions {
@@ -139,7 +141,8 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
     return ok;
   };
   const lastHeard = new Map<number, number>();
-  const ghost: GhostBot | null = opts.ghost === 'hover' || opts.ghost === 'manifest' ? { pos: { ...GHOST_BOT.start }, target: null } : null;
+  const ghost: GhostBot | null =
+    opts.ghost === 'hover' || opts.ghost === 'manifest' ? { pos: { ...GHOST_BOT.start }, target: null, wasInWall: null, passes: 0 } : null;
   const steer = opts.ghost === 'manifest' ? manifestGhost : moveGhost;
   const reach = opts.reach ?? Infinity;
   const inReach = (o: ScareObjectState) => !ghost || Math.hypot(o.pos.x - ghost.pos.x, o.pos.z - ghost.pos.z) <= reach;
@@ -185,7 +188,7 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
   const lifetimes = list.filter((v) => v.exitedAt !== null).map((v) => v.exitedAt! - v.spawnedAt);
   return {
     seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares, landing,
-    chills, necks, ghostFear, maxNeck, manifests, manifestScares,
+    chills, necks, ghostFear, maxNeck, manifests, manifestScares, wallPasses: ghost?.passes ?? 0,
   };
 }
 
@@ -193,6 +196,9 @@ interface GhostBot {
   pos: Vec2;
   /** 正跟着的访客 id */
   target: number | null;
+  /** 上一步告诉模拟的 inWall（还没告诉过为 null）；穿墙的次数 */
+  wasInWall: boolean | null;
+  passes: number;
 }
 
 /** 跟定的人：还在屋里（没逃跑、没离开）就接着跟，否则换离鬼魂最近的 */
@@ -233,7 +239,10 @@ function driftTo(g: GhostBot, hx: number, hz: number): number {
  */
 function placeGhost(w: World, g: GhostBot) {
   const [i, j] = cellOf(g.pos.x, g.pos.z);
-  w.setGhost({ x: g.pos.x, z: g.pos.z, inWall: grid.isOpaque(i, j) });
+  const inWall = grid.isOpaque(i, j);
+  if (inWall && g.wasInWall === false) g.passes++;
+  g.wasInWall = inWall;
+  w.setGhost({ x: g.pos.x, z: g.pos.z, inWall });
 }
 
 /**

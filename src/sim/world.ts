@@ -9,7 +9,7 @@ import { FEAR, GHOST, HIT_STOP, MANIFEST, TRAP, VISION } from '../config/visitor
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
 import { createManifest, idleManifest, manifestFear } from './manifest';
-import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhost, notice, retreat, separate, startle, startleWith, updateNpc, walkTo } from './npc';
+import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhostWall, notice, retreat, separate, startle, startleWith, updateNpc, walkTo } from './npc';
 import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
@@ -52,9 +52,13 @@ export function createWorld(opts: WorldOptions): World {
   let acc = 0;
   /** 玩家操控的鬼魂（setGhost 给的，复制一份）；null = 没有鬼魂 */
   let ghost: Vec2 | null = null;
-  /** 上一次 setGhost 时鬼魂在不在墙里；刚穿进墙的那一刻（由假变真）记下位置，下一步结算谁听见 */
-  let ghostInWall = false;
+  /**
+   * 上一次 setGhost 时鬼魂在不在墙里（null = 那时没有鬼魂）；刚穿进墙的那一刻（由假变真）记下位置，下一步结算谁听见。
+   * 去抖：上一次算作穿墙的模拟时间，GHOST.wallGap 秒内不再算（墙角、门框边上 inWall 会来回跳）
+   */
+  let ghostInWall: boolean | null = null;
   let wallSound: Vec2 | null = null;
+  let lastWallAt = -Infinity;
 
   // 尖叫传染：这一步里开始尖叫的人排队结算，每人每步最多传染一次
   const screamQueue: Npc[] = [];
@@ -220,12 +224,13 @@ export function createWorld(opts: WorldOptions): World {
     stepManifest(events);
     flushScreams();
 
-    // 鬼魂穿墙的声音（设计文档 2.3）：GHOST.hearWall 米内听得见的人（隔墙按 canHear 打折）察觉、涨一点点恐惧值，盯完去查看
+    // 鬼魂穿墙的声音（设计文档 2.3）：GHOST.hearWall 米内听得见的人（隔墙按 canHear 打折）察觉、涨一点点恐惧值，盯完去查看。
+    // 每人听见一次以后 GHOST.hearCooldown 秒内不再算，涨的量按习惯化减弱（见 hearGhostWall）
     if (wallSound) {
       const src = wallSound;
       wallSound = null;
       for (const n of npcs) {
-        if (canBeScared(n) && canHear(grid, n.s.pos, src, GHOST.hearWall)) hearGhost(n, ctx, GHOST.hearFear * n.mult, src);
+        if (canBeScared(n) && canHear(grid, n.s.pos, src, GHOST.hearWall)) hearGhostWall(n, ctx, src);
       }
     }
     // 鬼魂贴近：发毛、察觉、后退、后颈一凉。在移动之前：被吹了一口凉气的人这一步就僵住；没有鬼魂时什么都不变
@@ -290,13 +295,17 @@ export function createWorld(opts: WorldOptions): World {
     setGhost(g: GhostInput | null) {
       if (!g) {
         ghost = null;
-        ghostInWall = false;
+        ghostInWall = null;
         wallSound = null;
         return;
       }
       ghost = { x: g.x, z: g.z };
       const inWall = g.inWall === true;
-      if (inWall && !ghostInWall) wallSound = { x: g.x, z: g.z };
+      // 和声音那边的穿墙声一样：上一次在墙外（不是刚出现）、这一次在墙里，而且离上一次算作穿墙过了 GHOST.wallGap 秒
+      if (inWall && ghostInWall === false && state.time - lastWallAt >= GHOST.wallGap - EPS) {
+        wallSound = { x: g.x, z: g.z };
+        lastWallAt = state.time;
+      }
       ghostInWall = inWall;
     },
 

@@ -139,8 +139,8 @@ const avoided = (ctx: PathCtx, p: Vec2) => !!ctx.avoid && ctx.avoid.length > 0 &
 /** walk = 沿 s.path 走；look = 原地停留（闲逛到达后左右照 / 警觉到达后查看） */
 type Act = 'walk' | 'look';
 
-/** 习惯化按「种类」记：各种物件，加上鬼魂的「后颈一凉」和主动现身 */
-type HabitKey = ScareType | 'ghost' | 'manifest';
+/** 习惯化按「种类」记：各种物件，加上鬼魂的「后颈一凉」、穿墙声和主动现身 */
+type HabitKey = ScareType | 'ghost' | 'ghostWall' | 'manifest';
 
 /** 受惊结束后要恢复的状态 */
 interface Resume {
@@ -245,6 +245,8 @@ export interface Npc {
   retreatFrom: Vec2 | null;
   /** 上一步他的手电照没照着鬼魂（world.ts 写；变了就发 reveal） */
   litGhost: boolean;
+  /** 穿墙声：听见一次以后到什么时候（模拟时间）之前不再算（GHOST.hearCooldown） */
+  wallReadyAt: number;
 }
 
 export interface NpcInit {
@@ -320,6 +322,7 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     backedOff: false,
     retreatFrom: null,
     litGhost: false,
+    wallReadyAt: -Infinity,
   };
   if (o.mode === 'entering') {
     const inside = { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z };
@@ -610,12 +613,23 @@ export function feelGhost(npc: Npc, ctx: NpcCtx): void {
 }
 
 /**
- * 听到鬼魂穿墙的声音（world.ts 在 inWall 由假变真的那一步调）：恐惧值涨 amount（算「被吓」，回落重新计时），
+ * 听到鬼魂穿墙的声音（hearGhostWall 过了每人的冷却、算好习惯化以后调）：恐惧值涨 amount（算「被吓」，回落重新计时），
  * 其余和 hear 一样：先察觉那一拍（kind sound，来源是穿墙的地方），盯完走过去查看；受惊中只改恢复目标。
  * 不发 heard 事件：heard 的 object 是物件 id，界面的滚动提示会按它查物件名
  */
 export function hearGhost(npc: Npc, ctx: NpcCtx, amount: number, src: Vec2): void {
   listen(npc, ctx, amount, src, null);
+}
+
+/**
+ * 鬼魂穿墙的声音传到这个人（world.ts 在去抖过的那一步，对听得见的人调）：听见过一次以后 GHOST.hearCooldown 秒内不再算；
+ * 恐惧值 = hearFear × 性格倍率 × 习惯化（按 'ghostWall' 这一种算，和物件一样随时间恢复）。算了返回 true
+ */
+export function hearGhostWall(npc: Npc, ctx: NpcCtx, src: Vec2): boolean {
+  if (ctx.now < npc.wallReadyAt - 1e-9) return false;
+  npc.wallReadyAt = ctx.now + GHOST.hearCooldown;
+  hearGhost(npc, ctx, exposure(npc, 'ghostWall', GHOST.hearFear, ctx.now), src);
+  return true;
 }
 
 /** 后退时落脚点的搜索：远离方向左右各偏几档、每档多少弧度（最多偏 90°）；离来源的距离往外最多再找多远、每圈多远（米） */

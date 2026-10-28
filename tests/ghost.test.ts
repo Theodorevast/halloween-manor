@@ -429,4 +429,103 @@ describe('鬼魂：World', () => {
     for (let k = 0; k < 90 && a.mode !== 'alert'; k++) w.step(DT);
     expect(a.mode).toBe('alert');
   });
+
+  // ——— 穿墙声的去抖、每人冷却、习惯化（lane S 审查 I1）———
+  // 门厅北边的门洞（第 14 行第 15、16 列）西侧门框：鬼魂身体（半径 0.16 米）刚碰到 / 刚离开门框那段墙体（墙格中间 0.2 米）时，
+  // 中心还在门洞格里（不挡视线），在 x = 7.50 和 7.52 之间。真鬼魂蹭着门框时 inWall 就在这里来回跳
+  const DOOR_IN = { x: 7.5, z: 7.25 }, DOOR_OUT = { x: 7.52, z: 7.25 };
+  /** 门厅里、背对门洞（2.3 米）；走廊里、朝西（2.1 米）：都听得见门框，又都在胆小的发毛范围（1.8 米）外 */
+  const FOYER_SPOT = { x: 8, z: 9.5 }, HALL_SPOT = { x: 6, z: 5.75 };
+  /** 鬼魂在门框边上：先不在墙里一步，再在墙里一步（一次穿墙），然后拿走鬼魂。返回在墙里那一步的事件和那一步开始的时间 */
+  function brush(w: World) {
+    w.setGhost({ ...DOOR_OUT, inWall: false });
+    w.step(DT);
+    const at = w.state.time;
+    w.setGhost({ ...DOOR_IN, inWall: true });
+    const ev = w.step(DT);
+    w.setGhost(null);
+    return { ev, at };
+  }
+  const soundNotices = (ev: SimEvent[], n: NpcState) => ofType(ev, 'notice').filter((e) => e.npc === n.id && e.kind === 'sound');
+  const putBack = (n: NpcState, p: Vec2) => {
+    n.pos.x = p.x;
+    n.pos.z = p.z;
+  };
+
+  test('门框边上 inWall 一秒里由假变真 10 次：附近每人最多察觉一次，恐惧值最多涨一次 hearFear × 性格倍率', () => {
+    const w = createWorld({ seed: 86, autoSpawn: false });
+    const a = w.spawn({ pos: FOYER_SPOT, personality: 'average', lookDir: Math.PI / 2 });
+    const b = w.spawn({ pos: HALL_SPOT, personality: 'timid', lookDir: Math.PI });
+    const ev: SimEvent[] = [];
+    let inWall = true, edges = 0;
+    for (let k = 0; k < 60; k++) {
+      if (k % 3 === 0) {
+        inWall = !inWall;
+        if (inWall) edges++;
+      }
+      w.setGhost({ ...(inWall ? DOOR_IN : DOOR_OUT), inWall });
+      ev.push(...w.step(DT));
+    }
+    expect(edges).toBe(10);
+    for (const n of [a, b]) {
+      expect(ofType(ev, 'notice').filter((e) => e.npc === n.id).map((e) => e.kind)).toEqual(['sound']);
+      expect(n.fear).toBeGreaterThan(0);
+      expect(n.fear).toBeLessThanOrEqual(GHOST.hearFear * PERSONALITIES[n.personality].fearMult + 1e-9);
+    }
+  });
+
+  test('每人听过一次以后 GHOST.hearCooldown 秒内不再算（没听过的人照样算），过了冷却又算', () => {
+    const w = createWorld({ seed: 87, autoSpawn: false });
+    const a = w.spawn({ pos: FOYER_SPOT, personality: 'average', lookDir: Math.PI / 2 });
+    expect(soundNotices(brush(w).ev, a).length).toBe(1);
+    drive(w, GHOST.wallGap + 1, () => null); // 过了全局去抖的间隔
+    const c = w.spawn({ pos: HALL_SPOT, personality: 'average', lookDir: Math.PI });
+    putBack(a, FOYER_SPOT);
+    const second = brush(w).ev;
+    expect(soundNotices(second, a)).toEqual([]); // a 还在冷却里
+    expect(soundNotices(second, c).length).toBe(1); // c 没听过
+    drive(w, GHOST.hearCooldown - GHOST.wallGap - 1, () => null); // 从 a 第一次听见算起，过了冷却；c 还没过
+    putBack(a, FOYER_SPOT);
+    putBack(c, HALL_SPOT);
+    const third = brush(w).ev;
+    expect(soundNotices(third, a).length).toBe(1);
+    expect(soundNotices(third, c)).toEqual([]);
+  });
+
+  test('同一个人反复听见：涨的恐惧值按习惯化减弱（hearFear × 性格倍率 × habituation^n，n 每 habituationRecover 秒恢复 1）', () => {
+    const w = createWorld({ seed: 88, autoSpawn: false });
+    const a = w.spawn({ pos: FOYER_SPOT, personality: 'timid', lookDir: Math.PI / 2 });
+    const rises: number[] = [], at: number[] = [];
+    for (let k = 0; k < 3; k++) {
+      putBack(a, FOYER_SPOT);
+      w.setGhost({ ...DOOR_OUT, inWall: false });
+      w.step(DT);
+      const f = a.fear;
+      at.push(w.state.time);
+      w.setGhost({ ...DOOR_IN, inWall: true });
+      expect(soundNotices(w.step(DT), a).length).toBe(1);
+      w.setGhost(null);
+      rises.push(a.fear - f);
+      drive(w, GHOST.hearCooldown, () => null);
+    }
+    const base = GHOST.hearFear * PERSONALITIES.timid.fearMult, rec = FEAR.habituationRecover;
+    expect(rises[0]).toBeCloseTo(base, 9);
+    const n1 = Math.max(0, 1 - (at[1] - at[0]) / rec);
+    expect(rises[1]).toBeCloseTo(base * FEAR.habituation ** n1, 9);
+    const n2 = Math.max(0, n1 + 1 - (at[2] - at[1]) / rec);
+    expect(rises[2]).toBeCloseTo(base * FEAR.habituation ** n2, 9);
+    expect(rises[1]).toBeLessThan(rises[0]);
+    expect(rises[2]).toBeLessThan(rises[1]);
+  });
+
+  test('刚出现就在墙里（上一次没有鬼魂）不算穿墙；和声音那边一样，要先在墙外过', () => {
+    const w = createWorld({ seed: 89, autoSpawn: false });
+    const a = w.spawn({ pos: FOYER_SPOT, personality: 'average', lookDir: Math.PI / 2 });
+    w.setGhost({ ...DOOR_IN, inWall: true });
+    expect(soundNotices(w.step(DT), a)).toEqual([]);
+    w.setGhost({ ...DOOR_OUT, inWall: false });
+    w.step(DT);
+    w.setGhost({ ...DOOR_IN, inWall: true });
+    expect(soundNotices(w.step(DT), a).length).toBe(1);
+  });
 });

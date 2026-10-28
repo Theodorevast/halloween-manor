@@ -109,12 +109,17 @@ function report(): string {
     `ghost only (hover, no possessions): lone brave exits ${times(ghostLone)} (peak fear ${ghostLone.map((r) => r.visitors[0].peakFear.toFixed(0)).join(', ')}, ` +
       `${ghostLone[0].necks} necks / ${LONE_SECONDS} s); games ${games(ghostOnly)}`,
     `lone brave skilled + ghost: ${times(loneGhost)}`,
+    `wall passes per run (bot inWall false→true): ghost only lone ${avgOf(ghostLone, 'wallPasses')}, skilled + ghost lone ${avgOf(loneGhost, 'wallPasses')}, ` +
+      `ghost only games ${avgOf(ghostOnly, 'wallPasses')}, skilled + ghost games ${avgOf(skilledGhost, 'wallPasses')}, third person ${avgOf(skilledReach, 'wallPasses')}`,
     `games: skilled ${games(skilled)}; skilled + ghost ${games(skilledGhost)}; third person (ghost, reach ${REACH} m) ${games(skilledReach)}`,
     `manifest only, lone brave (s to exit, ${MANIFEST_SECONDS} s cap): ${times(manifestLone)} (drops that scared ${manifestLone.map((r) => `${r.manifestScares}/${r.manifests}`).join(' ')})`,
     `skilled + manifest, lone brave: ${times(skilledManifestLone)}`,
     ...margins(),
   ].join('\n');
 }
+
+/** 几局里某个计数的平均（报告用） */
+const avgOf = (runs: BotRun[], key: 'wallPasses') => (runs.reduce((a, r) => a + r[key], 0) / runs.length).toFixed(1);
 
 /** 单独一个 brave 被吓跑用了多久（秒；5 分钟没跑按 5 分钟算）的中位数 */
 const manifestLife = (runs: BotRun[]) => median(runs.map((r) => r.lifetimes[0] ?? MANIFEST_SECONDS));
