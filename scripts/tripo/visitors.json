@@ -118,10 +118,10 @@
   "variants": [
     {
       "id": "lantern-explorer",
-      "status": "draft",
+      "status": "approved",
       "label": "提灯夜行的探险家",
       "costume": "a Victorian night explorer: a small flat tweed cap perched on top of the ball, a short olive waxed shoulder cape with brass buttons draped over the back and shoulders, a narrow leather satchel strap across the ball, a small unlit brass lantern clipped at one side, leather gaiters over the sneakers",
-      "notes": "灯挂在身侧、手里空着：游戏会在访客手边画手电。"
+      "notes": "灯挂在身侧、手里空着：游戏会在访客手边画手电。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。"
     },
     {
       "id": "vampire",
@@ -132,18 +132,18 @@
     },
     {
       "id": "witch",
-      "status": "draft",
+      "status": "approved",
       "label": "女巫（尖帽和毛线披肩）",
       "costume": "a Victorian witch: a tall black felt witch hat with a slightly bent tip and a modest brim on top of the ball, a hand-knitted charcoal wool shawl with a fringe draped around the shoulders below the logo, a sprig of dried lavender in the hat band, dark striped socks above the sneakers",
-      "notes": "帽檐不宽：宽帽檐容易和球身粘成一块。"
+      "notes": "帽檐不宽：宽帽檐容易和球身粘成一块。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。"
     },
     {
       "id": "skeleton",
-      "status": "draft",
+      "status": "approved",
       "label": "手绘骷髅连身衣",
       "costume": "a homemade skeleton costume: the black ball body hand-painted with a slightly faded off-white ribcage and spine pattern around the logo without covering it, and painted bones along the arms and legs",
       "touchup": "2) Remove the top hat with its roses and brooches, the brooch above the logo, and the tattered lace cape with its lace trim, so that the round matte-black ball body is bare apart from the painted off-white bones; where those items were, show the same smooth matte-black ball surface and the same plain light grey background. Keep the painted ribcage, spine and the bones on the arms and legs exactly as they are.",
-      "notes": "轮廓完全不变、只加花纹：绑骨和动作最不容易出问题。2026-10-28：换装图自己加了礼帽、玫瑰和破蕾丝披风（没要），touchup 里去掉。"
+      "notes": "轮廓完全不变、只加花纹：绑骨和动作最不容易出问题。2026-10-28：换装图自己加了礼帽、玫瑰和破蕾丝披风（没要），touchup 里去掉。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。"
     }
   ]
 }

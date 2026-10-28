@@ -60,6 +60,43 @@ export const VISITOR_SPECS: CharacterSpec[] = [
     // 球身的手在胯和球心之间：手电拿在球的下半截前面，不是举在胸口
     flashlightHeight: 0.6,
   },
+  {
+    // 提灯夜行的探险家（同上，12952 三角面）。calibrate()：正面 1.567 / 1.642
+    url: `${import.meta.env.BASE_URL}assets/visitors/lantern-explorer.glb`,
+    targetHeight: 1.1,
+    maxLength: 1.4,
+    facingOffset: Math.PI / 2,
+    clips: { idle: 'idle', walk: 'walk', run: 'run', scared: 'scared_01' },
+    walkRateAt1ms: 2.364,
+    runRateAt1ms: 0.823,
+    measureIdle: true,
+    flashlightHeight: 0.6,
+  },
+  {
+    // 女巫（同上，11417 三角面）。calibrate()：正面 1.555 / 1.578
+    url: `${import.meta.env.BASE_URL}assets/visitors/witch.glb`,
+    targetHeight: 1.1,
+    maxLength: 1.4,
+    facingOffset: Math.PI / 2,
+    clips: { idle: 'idle', walk: 'walk', run: 'run', scared: 'scared_01' },
+    walkRateAt1ms: 2.039,
+    runRateAt1ms: 0.651,
+    measureIdle: true,
+    flashlightHeight: 0.6,
+  },
+  {
+    // 手绘骷髅（同上，13577 三角面）。calibrate()：正面 1.588。腿最短，步子小、步频快（脚踝骨被放在鞋子中间，
+    // calibrate 要放宽「贴地」的高度才认得出脚）
+    url: `${import.meta.env.BASE_URL}assets/visitors/skeleton.glb`,
+    targetHeight: 1.1,
+    maxLength: 1.4,
+    facingOffset: Math.PI / 2,
+    clips: { idle: 'idle', walk: 'walk', run: 'run', scared: 'scared_01' },
+    walkRateAt1ms: 3.467,
+    runRateAt1ms: 1.428,
+    measureIdle: true,
+    flashlightHeight: 0.6,
+  },
 ];
 
 /** 手电挂在角色身上的高度（米），按 targetHeight 的身高定；模型因 maxLength 变矮时按比例降低（占位狐狸约 0.52 米） */

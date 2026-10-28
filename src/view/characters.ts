@@ -15,6 +15,7 @@ import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { materialOpacity, uniform } from 'three/tsl';
 import { CHARACTER, FLASHLIGHT_HEIGHT, VISITOR_SPECS, type CharacterSpec } from '../config/character';
 import { FEAR, SPAWN } from '../config/visitors';
 import type { FrameCtx, Module, RenderCore } from '../engine/types';
@@ -217,7 +218,8 @@ interface Visual {
   body: THREE.Group;
   /** body 和模型之间：缩身、前探（剪切），矩阵手动设置 */
   pose: THREE.Group;
-  materials: THREE.Material[];
+  /** 每个网格的两份共用材质（不透明 / 淡入淡出）和来源材质；setAlpha 在两份之间换 */
+  parts: { mesh: THREE.Mesh; opaque: THREE.Material | THREE.Material[]; fade: THREE.Material | THREE.Material[]; sources: THREE.Material[] }[];
   mixer: THREE.AnimationMixer | null;
   actions: Partial<Record<Pose, THREE.AnimationAction>>;
   /** 各片段此刻的权重（受惊片段单独平滑，其余按平滑速度算） */
@@ -296,6 +298,17 @@ export interface CharactersView extends Module {
    * 不预热的话第一个访客进门时会卡一下：淡入用半透明管线，淡入完成切回不透明，两批都是当场同步编译的
    */
   prewarm(compile: () => Promise<void>): Promise<void>;
+  /**
+   * 所有造型的临时访客（每套不透明、半透明各一个，第一套多拿一支点亮的手电）站到地板下面（玩家看不见），不做视锥剔除，
+   * 一直留到 main.ts 在标题页后面把整栋房子真画一帧，那一帧把它们一起编好。返回 done()：那一帧画完调，收走临时访客，
+   * 其余几套从此才分给进门的人（开场时只有第一套可用）。试过只在那一帧前一刻才放进来：一能点就点开始的话，
+   * 标题收起后反而卡 1.3 秒（2026-10-28 实测），所以后台预编译一开始就放好。
+   * 为什么不放进开场前那次阻塞的预编译：每套多约 0.7 秒，第一套连同手电不剔除地编又多 1.6 秒；
+   * 也不交给 compileAsync：它编出来的访客管线和真画时的对不上，白编（2026-10-28 实测）
+   */
+  stageOutfits(): () => void;
+  /** 不编了，其余几套直接分给进门的人（玩家在整栋真画那一帧之前就开始了；没编到的，进门时现编） */
+  useAllOutfits(): void;
 }
 
 const sineOut = (u: number) => Math.sin((u * Math.PI) / 2);
@@ -387,8 +400,10 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     console.warn('[characters] 没有可用的角色模型，改用备用小人。');
     outfits = [{ spec: CHARACTER, asset: null }];
   }
+  /** 已经编好管线、可以分给进门的人的那几套（开场前只有第一套，其余的后台编完再加进来，见 stageRest） */
+  const usable: Outfit[] = [outfits[0]];
   /** 进门的人按编号轮流分一套：相邻两个人穿得不一样 */
-  const outfitFor = (id: number) => outfits[((id % outfits.length) + outfits.length) % outfits.length];
+  const outfitFor = (id: number) => usable[((id % usable.length) + usable.length) % usable.length];
 
   const torches: Flashlight[] = Array.from({ length: TORCH_SLOTS }, () => createFlashlight(parent, core.quality));
   const owner = new Map<Flashlight, number>();
@@ -396,6 +411,43 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
   /** 受惊事件到的时候这个人的角色还没建好（同一帧刚进门）：先记下，建好后再跳 */
   const pendingJump = new Map<number, { amount: number; src: Vec2 | null }>();
   let now = 0;
+
+  /**
+   * 访客的材质：同一套造型的所有访客共用（来源材质 → 不透明、淡入淡出两份）。
+   * 原来每人复制一份（为了各自改透明度），three.js 把每份复制都当成新材质，重新生成着色器、新建管线：
+   * 开场预编译编过的用不上，第一个访客进门卡 0.4–0.5 秒（2026-10-28 用 __haunt.fx.pipelines() 查到，两份着色器只差内部编号）。
+   * 现在透明度按物体传（fadeAlpha 读 mesh.userData.alpha），材质只有这两份，预编译时就编好了
+   */
+  const fadeAlpha = uniform(1).onObjectUpdate(({ object }: { object: THREE.Object3D | null }) => (object?.userData.alpha as number | undefined) ?? 1);
+  const sharedMats = new Map<THREE.Material, { opaque: THREE.Material; fade: THREE.Material }>();
+  const toNode = (m: THREE.Material): THREE.Material => {
+    if ((m as THREE.NodeMaterial).isNodeMaterial) return m.clone();
+    return core.renderer.library.fromMaterial(m.clone()) ?? m.clone();
+  };
+  const variantsOf = (m: THREE.Material) => {
+    let e = sharedMats.get(m);
+    if (e) return e;
+    const base = m.clone();
+    const s = base as THREE.MeshStandardMaterial;
+    // 模型本身没有自发光时才补这层光；吉祥物自带的发光（比如会亮的眼睛）原样保留
+    if (s.isMeshStandardMaterial && !s.emissiveMap && s.emissive.getHex() === 0) {
+      // 自发光 = 底色 × BOUNCE_LIGHT（有贴图就用贴图，保住花纹）
+      s.emissive.copy(s.color).multiplyScalar(BOUNCE_LIGHT);
+      if (s.map) {
+        s.emissive.setScalar(BOUNCE_LIGHT);
+        s.emissiveMap = s.map;
+      }
+    }
+    const opaque = toNode(base);
+    const fade = toNode(base) as THREE.NodeMaterial;
+    fade.transparent = true;
+    // 材质自己的不透明度（本来就半透明的部分）× 这个访客此刻的淡入淡出
+    fade.opacityNode = materialOpacity.mul(fadeAlpha);
+    base.dispose();
+    e = { opaque, fade };
+    sharedMats.set(m, e);
+    return e;
+  };
 
   const makeModel = ({ spec, asset }: Outfit, personality: Personality) => {
     if (asset) return { model: SkeletonUtils.clone(asset.template), front: asset.front, halfWidth: asset.halfWidth, height: asset.height };
@@ -407,30 +459,20 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
   const create = (npc: NpcState, outfit = outfitFor(npc.id)): Visual => {
     const { spec, asset } = outfit;
     const { model, front, halfWidth, height } = makeModel(outfit, npc.personality);
-    const materials: THREE.Material[] = [];
+    const parts: Visual['parts'] = [];
     model.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      // 每个访客自己一份材质：淡入淡出要单独改透明度
-      const own = (m: THREE.Material) => {
-        const c = m.clone();
-        c.userData.baseTransparent = c.transparent;
-        const s = c as THREE.MeshStandardMaterial;
-        // 模型本身没有自发光时才补这层光；吉祥物自带的发光（比如会亮的眼睛）原样保留
-        if (s.isMeshStandardMaterial && !s.emissiveMap && s.emissive.getHex() === 0) {
-          // 自发光 = 底色 × BOUNCE_LIGHT（有贴图就用贴图，保住花纹）
-          s.emissive.copy(s.color).multiplyScalar(BOUNCE_LIGHT);
-          if (s.map) {
-            s.emissive.setScalar(BOUNCE_LIGHT);
-            s.emissiveMap = s.map;
-          }
-        }
-        materials.push(c);
-        return c;
-      };
-      mesh.material = Array.isArray(mesh.material) ? mesh.material.map(own) : own(mesh.material);
+      const src = mesh.material;
+      const list = (Array.isArray(src) ? src : [src]).map(variantsOf);
+      parts.push({
+        mesh,
+        opaque: Array.isArray(src) ? list.map((x) => x.opaque) : list[0].opaque,
+        fade: Array.isArray(src) ? list.map((x) => x.fade) : list[0].fade,
+        sources: Array.isArray(src) ? src : [src],
+      });
       if ((mesh as THREE.SkinnedMesh).isSkinnedMesh) {
         // 动画会把四肢甩出绑定姿势的包围球：放大一点，免得被视锥剔除时一闪一闪
         const sk = mesh as THREE.SkinnedMesh;
@@ -474,7 +516,7 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     const torch = torches.find((t) => !owner.has(t)) ?? null;
     if (torch) owner.set(torch, npc.id);
     const v: Visual = {
-      id: npc.id, outfit, root, body, pose, materials, mixer, actions, weights: { idle: 1, walk: 0, run: 0, scared: 0 },
+      id: npc.id, outfit, root, body, pose, parts, mixer, actions, weights: { idle: 1, walk: 0, run: 0, scared: 0 },
       front, halfWidth, height, torch,
       x: npc.pos.x, z: npc.pos.z, heading: npc.heading, look: npc.lookDir, speed: npc.speed, mode: npc.mode, nervous: npc.nervous, fear: npc.fear, uneasy: npc.uneasy ?? 0,
       alpha: 0, leaving: false, jumpT: -1, lastJump: -10, jump: jumpShape(0), turnSrc: null, turn: { x: 0, v: 0 },
@@ -488,11 +530,11 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
 
   const setAlpha = (v: Visual, a: number) => {
     v.alpha = a;
-    for (const m of v.materials) {
-      m.opacity = a;
-      // 完全不透明时回到不透明队列（排序、阴影都正常）；换 transparent 时 three.js 会自动换渲染管线
-      const tr = a < 0.999 || m.userData.baseTransparent === true;
-      if (m.transparent !== tr) m.transparent = tr;
+    for (const p of v.parts) {
+      // 透明度按物体传给共用的半透明材质（fadeAlpha 读 userData.alpha）；完全不透明时换回不透明那份（排序、阴影、AO 都正常）
+      p.mesh.userData.alpha = a;
+      const want = a < 0.999 ? p.fade : p.opaque;
+      if (p.mesh.material !== want) p.mesh.material = want;
     }
   };
 
@@ -500,10 +542,18 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     parent.remove(v.root);
     v.mixer?.stopAllAction();
     v.mixer?.uncacheRoot(v.mixer.getRoot());
-    for (const m of v.materials) m.dispose();
     if (!v.outfit.asset) {
-      // 备用小人的几何体是每人一份的
+      // 备用小人的几何体、材质是每人一份的（共用材质表里它的那几项也一起删）
       v.root.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+      for (const p of v.parts) {
+        for (const m of p.sources) {
+          const e = sharedMats.get(m);
+          e?.opaque.dispose();
+          e?.fade.dispose();
+          sharedMats.delete(m);
+          m.dispose();
+        }
+      }
     }
     if (v.torch) {
       v.torch.park();
@@ -666,14 +716,44 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     }
   };
 
+  /** 预编译用的临时访客（屋子中间并排站着）。torch = false 时不分手电（手电只有 TORCH_SLOTS 支） */
+  const stageFake = (outfit: Outfit, i: number, torch = true) => {
+    const v = create({
+      id: -1 - i, name: '', personality: 'average', pos: { x: 8 + i * 0.9, z: 6 }, heading: 0, lookDir: 0, mode: 'wander', modeTime: 0,
+      fear: 0, nervous: false, speed: 0, screaming: 0, path: [],
+    }, outfit);
+    if (!torch && v.torch) {
+      v.torch.park();
+      owner.delete(v.torch);
+      v.torch = null;
+    }
+    return v;
+  };
+  /**
+   * 临时访客不做视锥剔除：compileAsync 和那一帧真画都只管镜头（和阴影相机）视锥里的物体，第三人称开场镜头在门口，
+   * 屋子中间的临时访客不在视锥里，等于没编（实测第一个访客进门卡 0.53 秒，新建的正是它的场景和阴影管线，2026-10-28）。
+   * 手上的手电（手柄、灯头、光锥）也一样。返回被关掉的那些，用完开回来（手电是常驻的，会给真访客用）
+   */
+  const uncullAll = (vs: Visual[]) => {
+    const out: THREE.Object3D[] = [];
+    const uncull = (root: THREE.Object3D) => root.traverse((o) => {
+      if (o.frustumCulled) {
+        o.frustumCulled = false;
+        out.push(o);
+      }
+    });
+    for (const v of vs) {
+      uncull(v.root);
+      if (v.torch) uncull(v.torch.hand);
+    }
+    return out;
+  };
+
   const view: CharactersView = {
     get source() { return outfits.some((o) => o.asset) ? 'glb' : 'fallback'; },
     async prewarm(compile) {
-      // 每套造型各放一个（贴图组合不同的材质可能各要一条管线），并排站着
-      const vs = outfits.map((outfit, i) => create({
-        id: -1 - i, name: '', personality: 'average', pos: { x: 8 + i * 0.9, z: 6 }, heading: 0, lookDir: 0, mode: 'wander', modeTime: 0,
-        fear: 0, nervous: false, speed: 0, screaming: 0, path: [],
-      }, outfit));
+      // 只编第一套、只编镜头看得见的部分（不关视锥剔除，见 stageOutfits）
+      const vs = [stageFake(outfits[0], 0)];
       try {
         for (const v of vs) {
           setAlpha(v, 1);
@@ -686,13 +766,44 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
         }
         await compile();
       } finally {
-        // 试过只移出场景、不 dispose 材质（怕 three 回收刚编好的管线），实测第一个访客进门的卡顿没有变化（都是约 150 ms），
-        // 所以照常释放（2026-10-27）
+        // 材质是共用的（见 variantsOf），临时访客走了它们还在，真访客进门直接用编好的管线
         for (const v of vs) {
           v.leaving = true;
           destroy(v);
         }
       }
+    },
+    stageOutfits() {
+      // 每套两个：一个不透明、一个半透明（两份材质都要编）；第一套多一个拿着点亮手电的（手电的管线也要编）
+      const vs = outfits.flatMap((outfit, i) => {
+        const a = stageFake(outfit, 1 + 3 * i, i === 0);
+        const b = stageFake(outfit, 2 + 3 * i, false);
+        setAlpha(a, 1);
+        setAlpha(b, 0.5);
+        step(a, 0, 0);
+        step(b, 0, 0);
+        return [a, b];
+      });
+      // 站到地板下面：不做视锥剔除时它们照样画进场景和阴影图（管线就编了），玩家又看不见。手电不挪（它照向前方的地板）
+      for (const v of vs) {
+        v.root.position.y = -3;
+        v.root.updateMatrixWorld(true);
+      }
+      const unculled = uncullAll(vs);
+      let staged = true;
+      return () => {
+        if (!staged) return;
+        staged = false;
+        for (const o of unculled) o.frustumCulled = true;
+        for (const v of vs) {
+          v.leaving = true;
+          destroy(v);
+        }
+        view.useAllOutfits();
+      };
+    },
+    useAllOutfits() {
+      for (const o of outfits) if (!usable.includes(o)) usable.push(o);
     },
     onEvent(e: SimEvent, state: WorldState) {
       // object 为 null 是被别人的尖叫吓到（模拟里不僵住），不跳。

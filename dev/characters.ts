@@ -296,21 +296,25 @@ async function calibrate() {
       model.updateMatrixWorld(true);
       bones.forEach((b, k) => tracks[k].push(b.getWorldPosition(new THREE.Vector3())));
     }
-    // 着地的脚：整段里最低点贴近地面的骨骼；它贴地的那些帧里，相对身体往后滑的速度 = 身体应有的前进速度
+    // 着地的脚：整段里最低点贴近地面的骨骼；它贴地的那些帧里，相对身体往后滑的速度 = 身体应有的前进速度。
+    // 先找最低点在身高 12% 以下的骨骼；找不到再放宽到 25%（Tripo 给骷髅绑骨时踝骨放在鞋子中间，离地约 20%，2026-10-28）
     const vel: THREE.Vector2[] = [];
     const feet: string[] = [];
-    tracks.forEach((tr, k) => {
-      const minY = Math.min(...tr.map((p) => p.y));
-      if (minY > 0.12 * H) return;
-      // 根骨骼之类贴地但不动的骨骼不算脚
-      const xs = tr.map((p) => p.x), zs = tr.map((p) => p.z);
-      if (Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs)) < 0.05 * H) return;
-      feet.push(bones[k].name);
-      for (let i = 0; i < N; i++) {
-        if (tr[i].y > minY + 0.03 * H) continue;
-        vel.push(new THREE.Vector2((tr[i + 1].x - tr[i].x) / dt, (tr[i + 1].z - tr[i].z) / dt));
-      }
-    });
+    for (const limit of [0.12, 0.25]) {
+      tracks.forEach((tr, k) => {
+        const minY = Math.min(...tr.map((p) => p.y));
+        if (minY > limit * H) return;
+        // 根骨骼之类贴地但不动的骨骼不算脚
+        const xs = tr.map((p) => p.x), zs = tr.map((p) => p.z);
+        if (Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs)) < 0.05 * H) return;
+        feet.push(bones[k].name);
+        for (let i = 0; i < N; i++) {
+          if (tr[i].y > minY + 0.03 * H) continue;
+          vel.push(new THREE.Vector2((tr[i + 1].x - tr[i].x) / dt, (tr[i + 1].z - tr[i].z) / dt));
+        }
+      });
+      if (vel.length) break;
+    }
     if (!vel.length) {
       out[role] = '找不到贴地的骨骼（片段可能不是原地走）';
       continue;

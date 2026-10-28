@@ -1,7 +1,68 @@
 {
   "$comment": "由 scripts/tripo/visitors.mjs 生成，重跑 export 会覆盖对应条目。url 相对于 import.meta.env.BASE_URL；clips 的键对应 src/config/character.ts 的 clips，值是 GLB 里的片段原名（null = 没有）",
-  "updatedAt": "2026-10-28T07:49:15.523Z",
+  "updatedAt": "2026-10-28T08:32:46.979Z",
   "visitors": [
+    {
+      "id": "lantern-explorer",
+      "label": "提灯夜行的探险家",
+      "url": "assets/visitors/lantern-explorer.glb",
+      "clips": {
+        "idle": "idle",
+        "walk": "walk",
+        "run": "run",
+        "scared": "scared_01"
+      },
+      "clipMatch": "name",
+      "presets": {
+        "idle": "preset:biped:idle",
+        "walk": "preset:biped:walk",
+        "run": "preset:biped:run",
+        "scared": "preset:biped:scared_01"
+      },
+      "stats": {
+        "bytes": 1424524,
+        "triangles": 12952,
+        "textures": [
+          "1024x1024",
+          "2048x2048",
+          "1024x1024"
+        ],
+        "maxTexture": 2048,
+        "compression": "none",
+        "joints": 23,
+        "boneNaming": "mixamo（mixamorig 前缀）",
+        "durations": {
+          "idle": 15.367,
+          "run": 1.267,
+          "scared_01": 3.3,
+          "walk": 2.367
+        }
+      },
+      "game": {
+        "ok": true,
+        "problems": [],
+        "notes": []
+      },
+      "refine": {
+        "from": "assets-src/visitors/lantern-explorer/animated.glb",
+        "report": "assets-src/visitors/lantern-explorer/refine.json",
+        "sheet": "assets-src/visitors/lantern-explorer/refine-preview/lantern-explorer-sheet.png",
+        "warnings": []
+      },
+      "source": {
+        "from": "animate + Blender 精修",
+        "tasks": {
+          "costume": "ac63d3cb-80c8-421f-9fde-1d42bf877cf7",
+          "views": "5c66caeb-7346-493e-af9a-d58189e22373",
+          "model": "aaf3471f-7384-4a2c-9aec-d1223163eb67",
+          "rigcheck": "82a46ea2-abb1-461d-b86c-c2499216513b",
+          "rig": "e7491e33-fd80-49be-b426-2c5b235fb8b2",
+          "animate": "bf73cb7f-198b-4df5-b196-0d105e910270"
+        },
+        "credits": 205,
+        "exportedAt": "2026-10-28T08:32:23.390Z"
+      }
+    },
     {
       "id": "vampire",
       "label": "维多利亚吸血鬼",
@@ -20,12 +81,12 @@
         "scared": "preset:biped:scared_01"
       },
       "stats": {
-        "bytes": 3570160,
+        "bytes": 1756040,
         "triangles": 12247,
         "textures": [
+          "1024x1024",
           "2048x2048",
-          "2048x2048",
-          "2048x2048"
+          "1024x1024"
         ],
         "maxTexture": 2048,
         "compression": "none",
@@ -60,7 +121,129 @@
           "animate": "113a4862-514e-4260-a447-6d9816ae8aec"
         },
         "credits": 205,
-        "exportedAt": "2026-10-28T07:49:15.523Z"
+        "exportedAt": "2026-10-28T08:32:31.569Z"
+      }
+    },
+    {
+      "id": "witch",
+      "label": "女巫（尖帽和毛线披肩）",
+      "url": "assets/visitors/witch.glb",
+      "clips": {
+        "idle": "idle",
+        "walk": "walk",
+        "run": "run",
+        "scared": "scared_01"
+      },
+      "clipMatch": "name",
+      "presets": {
+        "idle": "preset:biped:idle",
+        "walk": "preset:biped:walk",
+        "run": "preset:biped:run",
+        "scared": "preset:biped:scared_01"
+      },
+      "stats": {
+        "bytes": 1674856,
+        "triangles": 11417,
+        "textures": [
+          "1024x1024",
+          "2048x2048",
+          "1024x1024"
+        ],
+        "maxTexture": 2048,
+        "compression": "none",
+        "joints": 23,
+        "boneNaming": "mixamo（mixamorig 前缀）",
+        "durations": {
+          "idle": 15.367,
+          "run": 1.267,
+          "scared_01": 3.3,
+          "walk": 2.367
+        }
+      },
+      "game": {
+        "ok": true,
+        "problems": [],
+        "notes": []
+      },
+      "refine": {
+        "from": "assets-src/visitors/witch/animated.glb",
+        "report": "assets-src/visitors/witch/refine.json",
+        "sheet": "assets-src/visitors/witch/refine-preview/witch-sheet.png",
+        "warnings": []
+      },
+      "source": {
+        "from": "animate + Blender 精修",
+        "tasks": {
+          "costume": "a2427898-839d-467a-b782-19cec3a54c89",
+          "views": "86a59441-5380-4b4a-8f76-3229a7f7929c",
+          "model": "95b398b1-269b-467e-9b5c-48a461587cf2",
+          "rigcheck": "0c57d693-9608-423f-a79d-ae1bf84da494",
+          "rig": "0c77c698-bde1-4217-988e-548512108767",
+          "animate": "23602ac4-a1f3-4525-8846-628f0f709304"
+        },
+        "credits": 205,
+        "exportedAt": "2026-10-28T08:32:39.582Z"
+      }
+    },
+    {
+      "id": "skeleton",
+      "label": "手绘骷髅连身衣",
+      "url": "assets/visitors/skeleton.glb",
+      "clips": {
+        "idle": "idle",
+        "walk": "walk",
+        "run": "run",
+        "scared": "scared_01"
+      },
+      "clipMatch": "name",
+      "presets": {
+        "idle": "preset:biped:idle",
+        "walk": "preset:biped:walk",
+        "run": "preset:biped:run",
+        "scared": "preset:biped:scared_01"
+      },
+      "stats": {
+        "bytes": 1169176,
+        "triangles": 13577,
+        "textures": [
+          "1024x1024",
+          "2048x2048",
+          "1024x1024"
+        ],
+        "maxTexture": 2048,
+        "compression": "none",
+        "joints": 23,
+        "boneNaming": "mixamo（mixamorig 前缀）",
+        "durations": {
+          "idle": 15.367,
+          "run": 1.267,
+          "scared_01": 3.3,
+          "walk": 2.367
+        }
+      },
+      "game": {
+        "ok": true,
+        "problems": [],
+        "notes": []
+      },
+      "refine": {
+        "from": "assets-src/visitors/skeleton/animated.glb",
+        "report": "assets-src/visitors/skeleton/refine.json",
+        "sheet": "assets-src/visitors/skeleton/refine-preview/skeleton-sheet.png",
+        "warnings": []
+      },
+      "source": {
+        "from": "animate + Blender 精修",
+        "tasks": {
+          "costume": "9d3c984a-a6f9-4f5a-8724-9c845985a68b",
+          "views": "609f95c5-b60e-4bd5-9a15-f5cd436061e9",
+          "model": "5fe4a3b5-85a7-4076-8a52-c918b116ae8e",
+          "rigcheck": "c121d2af-7aa2-4f35-9f8c-e25ad8077c8a",
+          "rig": "e7344fed-d863-4567-a8ed-6c7e734d0d4f",
+          "animate": "02f6319d-d9be-41b0-92d0-845945d96723"
+        },
+        "credits": 205,
+        "exportedAt": "2026-10-28T08:32:46.978Z"
       }
     }
   ]

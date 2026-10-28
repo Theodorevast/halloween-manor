@@ -14,6 +14,7 @@ import argparse
 import json
 import math
 import random
+import re
 import sys
 
 import bmesh
@@ -29,7 +30,10 @@ def parse_args():
     p.add_argument('--report')
     p.add_argument('--preview', help='预览图路径前缀（绝对路径），不给就不渲染')
     p.add_argument('--max-tris', type=int, default=15000)
-    p.add_argument('--max-texture', type=int, default=2048)
+    p.add_argument('--max-texture', type=int, default=2048, help='底色贴图的最大边长')
+    p.add_argument('--max-texture-aux', type=int, default=1024, help='其余贴图（法线、粗糙度金属度）的最大边长')
+    p.add_argument('--image-format', default='WEBP', choices=['AUTO', 'JPEG', 'WEBP'], help='导出贴图的格式；WEBP 带透明，体积最小')
+    p.add_argument('--image-quality', type=int, default=88)
     p.add_argument('--body-bone', default='auto', help='身体整块跟着的骨头；auto = 手臂分出去的那节脊柱骨')
     p.add_argument('--limb-scale', type=float, default=1.35, help='腿 / 手臂的「管子」半径放大多少倍以内算肢体')
     p.add_argument('--blend', type=float, default=0.6, help='肢体到身体的过渡宽度（相对管子半径）')
@@ -102,7 +106,27 @@ def descendants(b):
     return out
 
 
+def skeleton_by_name():
+    """Mixamo 命名的骨架（Tripo 绑骨 spec=mixamo 就是）按名字认，最可靠。
+    按位置认会被怪姿势骗：实测探险家的右大腿根比胯骨还高、右手臂根比脖子还高（2026-10-28）"""
+    bones = arm.data.bones
+    strip = lambda n: re.sub(r'^mixamorig\d*[:_]?', '', n)
+    by = {strip(b.name): b for b in bones}
+    if not all(k in by for k in ('Hips', 'Spine', 'LeftUpLeg', 'RightUpLeg', 'LeftArm', 'RightArm')):
+        return None
+    spine = [by[k] for k in ('Hips', 'Spine', 'Spine1', 'Spine2', 'Spine3', 'Neck', 'Head') if k in by]
+    legs = [[by[f'{s}UpLeg']] + descendants(by[f'{s}UpLeg']) for s in ('Left', 'Right')]
+    arms = []
+    for s in ('Left', 'Right'):
+        top = by.get(f'{s}Shoulder') or by[f'{s}Arm']
+        arms.append((top.parent, [top] + descendants(top)))
+    return by['Hips'], spine, legs, arms
+
+
 def analyse_skeleton():
+    named = skeleton_by_name()
+    if named:
+        return named
     bones = arm.data.bones
     size = max(arm.dimensions) or 1.0
     # 根（hips）：层级最浅、又至少分出 3 根子骨头的那个（Hips → 脊柱 + 两条腿；手有 5 根手指，但层级深）。
@@ -559,15 +583,36 @@ if root_fixed:
 
 # ---------------------------------------------------------------- 贴图限到 max-texture
 
+# 底色贴图（接在 Principled BSDF 的 Base Color 上的）保留到 --max-texture，其余（法线、粗糙度金属度）到 --max-texture-aux：
+# 四套访客每套 3 张 2048 贴图一共要 250 多 MB 显存，手机上扛不住；法线、粗糙度在昏暗的屋里看不出 1024 和 2048 的差别
+def base_color_images():
+    out = set()
+    for mat in bpy.data.materials:
+        if not mat.use_nodes:
+            continue
+        for node in mat.node_tree.nodes:
+            if node.type != 'BSDF_PRINCIPLED':
+                continue
+            stack = [l.from_node for l in node.inputs['Base Color'].links]
+            while stack:
+                n = stack.pop()
+                if n.type == 'TEX_IMAGE' and n.image:
+                    out.add(n.image.name)
+                stack += [l.from_node for i in n.inputs for l in i.links]
+    return out
+
+
+base_imgs = base_color_images()
 tex = []
 for img in bpy.data.images:
     if img.size[0] == 0:
         continue
     w, h = img.size
-    if max(w, h) > A.max_texture:
-        s = A.max_texture / max(w, h)
+    limit = A.max_texture if img.name in base_imgs else A.max_texture_aux
+    if max(w, h) > limit:
+        s = limit / max(w, h)
         img.scale(max(1, round(w * s)), max(1, round(h * s)))
-        tex.append(f'{img.name} {w}x{h} → {img.size[0]}x{img.size[1]}')
+        tex.append(f'{img.name} {w}x{h} → {img.size[0]}x{img.size[1]}{" (底色)" if img.name in base_imgs else ""}')
     else:
         tex.append(f'{img.name} {w}x{h}')
 report['textures'] = tex
@@ -681,7 +726,7 @@ want = dict(
     export_optimize_animation_size=True, export_skins=True, export_def_bones=False,
     export_yup=True, export_apply=False, export_texcoords=True, export_normals=True,
     export_tangents=False, export_morph=False, export_cameras=False, export_lights=False,
-    export_extras=False, export_image_format='AUTO', export_jpeg_quality=90,
+    export_extras=False, export_image_format=A.image_format, export_image_quality=A.image_quality, export_jpeg_quality=A.image_quality,
 )
 kw = {k: v for k, v in want.items() if k in op_props}
 skipped = sorted(set(want) - set(kw))

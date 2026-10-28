@@ -99,6 +99,14 @@ function watchErrors(page) {
 /** 等加载完、开场按钮可用，和真实玩家一样 */
 const waitReady = (page) =>
   page.waitForFunction(() => Boolean(window.__haunt) && !document.querySelector('.hud-begin')?.disabled, null, { timeout: 30000 });
+// 点了开始之后：后台预编译还没编完时开场遮罩会先留着（main.ts 的 begin），等它开始淡出，再等开场镜头走完
+const waitStarted = async (page) => {
+  const t0 = Date.now();
+  await page.waitForFunction(() => { const s = document.querySelector('[data-start]'); return !s || s.hidden || s.classList.contains('is-leaving'); }, null, { timeout: 30000 });
+  const held = Date.now() - t0;
+  await sleep(3500);
+  return held;
+};
 
 try {
   // ── 娃娃屋俯视（?dollhouse）：原有的各项检查 ─────────────────────────
@@ -111,7 +119,8 @@ try {
   await waitReady(page);
   check('?dollhouse 走娃娃屋俯视', await page.evaluate(() => window.__haunt.ghost === null));
   await page.locator('[data-start]').click();
-  await sleep(3500);
+  const heldDoll = await waitStarted(page);
+  check('开场遮罩点击后消失（后台预编译编完才收起，最多等 15 秒）', heldDoll < 15000, `等了 ${heldDoll} ms`);
   check('开场遮罩点击后消失', !(await page.locator('[data-start]').isVisible().catch(() => false)));
   check('俯视有旋转按钮', await page.locator('[data-act="left"]').isVisible());
   const backend = await page.evaluate(() => window.__haunt.backend);
@@ -175,7 +184,8 @@ try {
   // 鼠标放在画面正中，之后的点击都原地按下：锁定指针后移动鼠标就是转镜头
   await gp.mouse.move(640, 400);
   await gp.locator('[data-start]').click();
-  await sleep(3500);
+  const heldGhost = await waitStarted(gp);
+  check('第三人称：开场遮罩等后台预编译编完就收起（最多等 15 秒）', heldGhost < 15000, `等了 ${heldGhost} ms`);
   check('第三人称：开场遮罩点击后消失', !(await gp.locator('[data-start]').isVisible().catch(() => false)));
   check('第三人称：旋转按钮藏起来', !(await gp.locator('[data-act="left"]').isVisible()));
   const hint = await gp.evaluate(() => ({ on: document.querySelector('.hud-keys').classList.contains('is-on'), text: document.querySelector('.hud-keys').textContent }));
@@ -357,7 +367,7 @@ try {
   const sw = await phone.evaluate(() => document.documentElement.scrollWidth);
   check('390 px 宽没有横向滚动', sw <= 390, `scrollWidth=${sw}`);
   await phone.locator('[data-start]').tap();
-  await sleep(3500); // 等开场镜头落定，物件的屏幕位置才稳定
+  await waitStarted(phone); // 等开场遮罩收起、开场镜头落定，物件的屏幕位置才稳定
   const pt = await phone.evaluate(() => window.__haunt.screenOf('lamp-living'));
   await phone.touchscreen.tap(pt.x, pt.y);
   await sleep(300);

@@ -8,7 +8,8 @@ import type { FrameCtx, Module, Quality } from '../engine/types';
 import type { SimEvent, WorldState } from '../sim/types';
 
 export interface HudHandlers {
-  onBegin(): void;
+  /** 返回 false：先别收起开场遮罩（还在准备），准备好了 main.ts 自己调 hideStart() */
+  onBegin(): boolean | void;
   onRotate(dir: 1 | -1): void;
   /** 返回切换后是否静音 */
   onToggleMute(): boolean;
@@ -179,8 +180,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     if (!startShown || !ready || begun || errored) return;
     begun = true;
     // onBegin 必须在这次点击 / 按键的调用栈里同步执行：音频解锁要靠用户手势
-    h.onBegin();
-    hideStart();
+    if (h.onBegin() !== false) hideStart();
   };
   start.addEventListener('click', begin);
 

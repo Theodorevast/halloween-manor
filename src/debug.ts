@@ -76,6 +76,8 @@ export function installDebug(d: DebugDeps) {
   Object.assign(api, cameraDebug(d));
   Object.assign(api, postDebug(d));
   Object.assign(api, ghostDebug(d));
+  // ?pipelog：从加载起记下新建的渲染管线（含开场的预编译），window.__pipelog.stop() 取结果
+  if (new URLSearchParams(location.search).has('pipelog')) (window as unknown as { __pipelog: unknown }).__pipelog = (api as unknown as PostDebug).fx.pipelines();
   console.info('[debug] window.__haunt 已就绪：state() / raw() / step(ms) / trigger(id) / spawn(opts) / rotate(dir) / setTimeScale(n)');
 }
 
@@ -136,6 +138,11 @@ export interface PostDebug {
     aoStrength(v: number | null): void;
     /** 调参：改 postfx.ts 里某组常量（AO / GRADE / GRAIN / BLOOM / REVEAL）的字段，然后重建管线 */
     tune(group: string, values: Record<string, unknown>): unknown;
+    /**
+     * 记下从现在起新建的渲染管线（查卡顿：第一次画到某个物体时现编管线会卡一下）。
+     * 返回 stop()：停止记录，返回 [离开始的毫秒, 物体名, 材质类型, 画到哪（阴影图 / 场景 / 画布）]
+     */
+    pipelines(): { stop(): [number, string, string, string, string][]; code(): Record<string, [string, string]> };
   };
 }
 
@@ -168,6 +175,33 @@ function postDebug(d: DebugDeps): PostDebug {
         Object.assign(g, values);
         core.post?.setFlags({});
         return g;
+      },
+      pipelines() {
+        type RO = { object: { name: string; type: string; parent?: { name: string } | null }; material: { type: string; name: string }; context?: { depthTexture?: { name?: string } | null; textures?: { name?: string }[] | null }; pipeline?: { cacheKey?: string; vertexProgram?: { code?: string }; fragmentProgram?: { code?: string } } };
+        const backend = core.renderer.backend as unknown as { createRenderPipeline(ro: RO, p: unknown): void };
+        const orig = backend.createRenderPipeline;
+        const t0 = performance.now();
+        const log: [number, string, string, string, string][] = [];
+        backend.createRenderPipeline = function (ro, p) {
+          const target = ro.context?.textures?.length ? (ro.context.textures[0]?.name || 'texture') : ro.context?.depthTexture ? 'shadow/depth' : 'canvas';
+          log.push([Math.round(performance.now() - t0), ro.object.name || `${ro.object.parent?.name ?? ''}>${ro.object.type}`, ro.material.name || ro.material.type, target, String(ro.pipeline?.cacheKey ?? '')]);
+          return orig.call(this, ro, p);
+        };
+        const code: Record<string, [string, string]> = {};
+        const origRecord = backend.createRenderPipeline;
+        backend.createRenderPipeline = function (ro, p) {
+          const k = String(ro.pipeline?.cacheKey ?? '').split(',').slice(0, 2).join(',');
+          if (!code[k]) code[k] = [ro.pipeline?.vertexProgram?.code ?? '', ro.pipeline?.fragmentProgram?.code ?? ''];
+          return origRecord.call(this, ro, p);
+        };
+        return {
+          stop() {
+            backend.createRenderPipeline = orig;
+            return log;
+          },
+          /** 管线 cacheKey 前两项（顶点、片元程序 id）→ [顶点着色器, 片元着色器] 的源码 */
+          code: () => code,
+        };
       },
     },
   };

@@ -61,7 +61,10 @@ try {
   await page.locator('[data-start]').waitFor({ timeout: 30000 });
   await page.waitForFunction(() => Boolean(window.__haunt) && !document.querySelector('.hud-begin')?.disabled, null, { timeout: 30000 }); // 等加载完、开场按钮可用
   await page.locator('[data-start]').click();
-  if (LOW) await page.locator('[aria-label^="Quality"]').click();
+  // 后台预编译还没编完时开场遮罩会先留着（main.ts 的 begin）：等它开始淡出、淡完，再量、再点画质按钮
+  await page.waitForFunction(() => { const s = document.querySelector('[data-start]'); return !s || s.hidden; }, null, { timeout: 30000 });
+  // 第三人称锁定指针时画质按钮藏着、画布挡住点击：直接在页面里点它
+  if (LOW) await page.evaluate(() => document.querySelector('[data-act="quality"]').click());
   if (argv.includes('--empty')) {
     // 对照组：冻结模拟、不放访客，手电全部闲置（不画阴影图）
     await page.evaluate(() => window.__haunt.setTimeScale(0));

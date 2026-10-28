@@ -61,6 +61,8 @@ export interface Flashlight {
   park(): void;
   readonly parked: boolean;
   setQuality(q: Quality): void;
+  /** 手上那支手电的模型（手柄、灯头、光锥）：预编译时临时关掉它们的视锥剔除用 */
+  readonly hand: THREE.Object3D;
   dispose(): void;
 }
 
@@ -173,6 +175,7 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
 
   return {
     get parked() { return parked; },
+    hand,
     update(p, dt, time) {
       if (parked) {
         parked = false;

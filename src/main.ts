@@ -37,6 +37,10 @@ let qualityPicked = false;
 let ready = false;
 let wantBegin = false;
 let started = false;
+/** 开场按钮可用之后的后台预编译编完了没有（没编完时点开始，要等它，见 begin） */
+let bgDone = false;
+/** 收走后台预编译用的临时访客（boot 里设） */
+let releaseStaged: (() => void) | null = null;
 const modules: Module[] = [];
 
 // 音频最先建：开场点击时必须在手势里同步 unlock，不能等渲染器和模型加载完。
@@ -82,17 +86,26 @@ const dispatch = (evs: SimEvent[]) => {
   for (const e of evs) for (const m of modules) m.onEvent?.(e, world.state);
 };
 
-function begin() {
-  if (wantBegin) return;
+function begin(): boolean {
+  if (wantBegin) return true;
   wantBegin = true;
   void audio.unlock();
   // 指针锁定也必须在这次点击的调用栈里
   if (rig && isGhostRig(rig)) rig.lockPointer();
-  if (ready) start();
+  if (ready && bgDone) {
+    start();
+    return true;
+  }
+  // 后台还在编整栋房子：这时开场，镜头一动就要画还没编的东西，会卡死好几秒（2026-10-28 实测 2.5 秒）。
+  // 开场遮罩先留着、按钮写回「Lighting the candles…」，编完（再整栋真画一帧）就收起遮罩开场，见动画循环
+  hud.setReady(false);
+  return false;
 }
 
 function start() {
   started = true;
+  // 后台预编译用的临时访客（站在地板下面）：开始了就收走，不再白画
+  releaseStaged?.();
   cinematic?.intro(2.5);
 }
 
@@ -222,6 +235,12 @@ async function boot() {
     if (all) {
       for (const o of all) o.frustumCulled = true;
       warmAll = false;
+      releaseStaged?.();
+    }
+    // 点了开始、在等后台预编译：编完、整栋真画过一帧了，收起开场遮罩开场
+    if (wantBegin && !started && bgDone && !warmAll) {
+      hud.hideStart();
+      start();
     }
     if (was) {
       for (const [i, o] of deferred.entries()) o.visible = was[i];
@@ -231,7 +250,7 @@ async function boot() {
 
   ready = true;
   hud.setReady(true);
-  if (wantBegin) start();
+  if (wantBegin && bgDone) start();
 
   // 开场按钮已经可用：趁玩家读标题，把延后的物件编好。compileAsync 编的是渲染器默认的渲染目标，
   // 而场景是后处理管线自己的 pass 画的（格式、多重采样都不一样），编出来的管线用不上，所以和预热一样真画一帧。
@@ -249,12 +268,24 @@ async function boot() {
   // ?nobgcompile：不做后台预编译（对比卡顿用）
   const precompiled = new URLSearchParams(location.search).has('nobgcompile') ? Promise.resolve() : c.precompileAll(r.camera);
   for (const [i, o] of deferred.entries()) o.visible = deferredVisible[i];
+  // 访客造型（开场前只编了第一套、镜头看得见的部分）：上面收集完物体之后放临时访客（站在地板下面），
+  // 留到下面那一帧整栋真画时编好再收走（见动画循环）；玩家在那之前就开始了，开始时收走、直接都放出来
+  const outfitsDone = characters.stageOutfits();
+  releaseStaged = outfitsDone;
   precompiled.then(
     () => {
+      bgDone = true;
       warmAll = true;
+      // 玩家已经开始了就不会有整栋房子真画的那一帧（见动画循环），临时访客这时收走
+      if (started) releaseStaged?.();
       if (new URLSearchParams(location.search).has('debug')) console.info(`[boot] 后台预编译完成 ${Math.round(performance.now() - t0)} ms`);
     },
-    (err) => console.warn('[boot] 后台预编译失败，改为边画边编', err),
+    (err) => {
+      // 编不成也照样把其余几套放出来、照样开场：大不了画到的时候现编、卡一下
+      releaseStaged?.();
+      bgDone = true;
+      console.warn('[boot] 后台预编译失败，改为边画边编', err);
+    },
   );
 }
 
