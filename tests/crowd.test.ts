@@ -7,8 +7,9 @@ import { describe, expect, test } from 'vitest';
 import { createWorld } from '../src/sim/world';
 import { Grid } from '../src/sim/grid';
 import { cellCenter, cellOf, DOORWAYS, FRONT_DOOR, inGrid, PROPS } from '../src/config/house';
+import { SCARES } from '../src/config/scares';
 import { BEHAVIOR, CROWD, MOTION, SPEED } from '../src/config/visitors';
-import type { NpcState, SimEvent, Vec2, World } from '../src/sim/types';
+import type { NpcState, ScareObjectState, SimEvent, Vec2, World } from '../src/sim/types';
 
 const DT = 1 / 60;
 const grid = new Grid();
@@ -28,8 +29,18 @@ const standable = (p: Vec2) => {
   const [i, j] = cellOf(p.x, p.z);
   return grid.isWalkable(i, j) || (!inGrid(i, j) && Math.abs(p.x - FRONT_DOOR.outside.x) <= 0.5 && p.z >= 11.5);
 };
-/** 想走（有路、没吓呆）却几乎没动 */
-const blocked = (n: NpcState) => n.path.length > 0 && n.mode !== 'startled' && n.mode !== 'gone' && n.speed < 0.05;
+/** 想走（有路、没吓呆、没在察觉那一拍：那时是自己停下来盯着来源）却几乎没动 */
+const blocked = (n: NpcState) => n.path.length > 0 && n.mode !== 'startled' && n.mode !== 'gone' && !n.notice && n.speed < 0.05;
+/** 惊吓类物件还在蓄势（触发了、还没到 hitAt）：和 sim/scares.ts 的 windingUp 一样 */
+const windingUp = (o: ScareObjectState) => {
+  const s = SCARES[o.type];
+  return s.kind === 'sight' && o.active > 0 && s.active - o.active < s.hitAt - 1e-9;
+};
+/**
+ * 被蓄势的惊吓物件定住（自己停下来盯着它，不是被别人挡住；床要蓄势 2.6 秒）：
+ * NpcState 里看不出来，按「有物件在蓄势、他正看着它（在 seenBy 里）」算
+ */
+const transfixed = (w: World, n: NpcState) => w.state.objects.some((o) => windingUp(o) && o.seenBy.includes(n.id));
 /** 一个人走时每步速度变化的上限：加 / 减速度 × dt；落地那一步不足一整步，多给四分之一 */
 const WALK_JUMP = Math.max(MOTION.accel, MOTION.decel) * DT * 1.25;
 /** 人多时被别人逼着急刹 + 侧身减速同时发生的上限 */
@@ -126,10 +137,11 @@ describe('避让：长时间跑', () => {
         minD = Math.min(minD, minDistOf(w.state.npcs));
         for (const n of w.state.npcs) {
           if (!standable(n.pos)) throw new Error(`npc ${n.id} (${n.mode}) 在墙里：${n.pos.x}, ${n.pos.z}`);
-          const s = blocked(n) ? (stuck.get(n.id) ?? 0) + DT : 0;
+          const b = blocked(n) && !transfixed(w, n);
+          const s = b ? (stuck.get(n.id) ?? 0) + DT : 0;
           stuck.set(n.id, s);
           stuckMax = Math.max(stuckMax, s);
-          const dd = blocked(n) && inDoorway(n.pos) ? (door.get(n.id) ?? 0) + DT : 0;
+          const dd = b && inDoorway(n.pos) ? (door.get(n.id) ?? 0) + DT : 0;
           door.set(n.id, dd);
           doorStuckMax = Math.max(doorStuckMax, dd);
         }

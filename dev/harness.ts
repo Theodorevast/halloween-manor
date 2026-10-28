@@ -10,6 +10,7 @@ import { HOUSE_D, HOUSE_W, PROPS, propCenter } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
 import type { CameraRig, FrameCtx, Module, RenderCore } from '../src/engine/types';
 import { angleOf } from '../src/lib/angle';
+import { idleManifest } from '../src/sim/manifest';
 import type { NpcState, SimEvent, Vec2, WorldState } from '../src/sim/types';
 
 const ELEV = (35 * Math.PI) / 180;
@@ -117,7 +118,7 @@ export async function createHarness(opts: { ambient?: number } = {}): Promise<Ha
     objects: PROPS.map((p) => ({ id: p.id, type: p.type, pos: propCenter(p), facing: p.facing, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0 })),
     scaredOff: 0,
     hitStop: 0,
-    manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null },
+    manifest: idleManifest(),
     avoid: [],
   };
   const modules: Module[] = [];

@@ -3,13 +3,14 @@ import { createWorld } from '../src/sim/world';
 import { createRng } from '../src/sim/rng';
 import { Spawner, pickName } from '../src/sim/spawner';
 import { Grid } from '../src/sim/grid';
-import { createNpc, exposure } from '../src/sim/npc';
+import { createNav, createNpc, exposure, startle } from '../src/sim/npc';
+import type { Npc, NpcCtx } from '../src/sim/npc';
 import { facesToward } from '../src/sim/scares';
 import { cellCenter, cellOf, FRONT_DOOR, inGrid, PROPS, propCenter } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
-import { BEHAVIOR, FEAR, HIT_STOP, NAMES, PERSONALITIES, SPAWN, SPEED } from '../src/config/visitors';
+import { BEHAVIOR, FEAR, HIT_STOP, NAMES, NOTICE, PERSONALITIES, SPAWN, SPEED, TRAITS } from '../src/config/visitors';
 import { angleOf, wrapAngle } from '../src/lib/angle';
-import type { NpcState, SimEvent, Vec2, World } from '../src/sim/types';
+import type { NpcState, Personality, SimEvent, Vec2, World } from '../src/sim/types';
 
 const DT = 1 / 60;
 const prop = (id: string) => propCenter(PROPS.find((p) => p.id === id)!);
@@ -285,7 +286,8 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
           // 受惊结束后回到原来的状态，接着走原来的路。
           // 僵住期间听见别人的尖叫（同一面镜子也吓到了旁边的人）或引诱声的，按设计恢复成警觉（见「受惊中听到声音」）
           const after = [...hit, ...run(w, FEAR.startleTime + 0.05, DT)];
-          const heard = after.some((e) => (e.type === 'heard' || (e.type === 'startle' && e.object === null)) && e.npc === walker.id);
+          // 蓄势期间听到的也算：那时正被定住，声音只是记下（察觉那一拍等定住完），被吓完照样去查看
+          const heard = [...wind, ...after].some((e) => (e.type === 'heard' || (e.type === 'startle' && e.object === null)) && e.npc === walker.id);
           if (walker.mode !== 'fleeing') expect(walker.mode).toBe(heard ? 'alert' : mode0);
           cases++;
         }
@@ -417,13 +419,13 @@ describe('World：吓跑与 hit-stop（计划测试 4–5）', () => {
     const ns = ps.map((p) => w.spawn({ pos: p, personality: 'timid', lookDir: angleTo(p, mirror) }));
     w.trigger('kitchen-door');
     const ev = w.step(DT);
-    // 门：10 × 1.5 = 15；镜子：48 × 1.5 = 72；尖叫传染：5 × 1.5 = 7.5，两个同伴各一次 → 102 → 封顶 100
+    // 门：10 × 1.5 = 15；镜子：48 × 1.5 = 72；尖叫传染：contagion × 1.5（7 × 1.5 = 10.5），两个同伴各一次 → 封顶 100
     expect(ofType(ev, 'heard').length).toBe(3);
     expect(ofType(ev, 'startle').filter((e) => e.object === 'mirror').map((e) => e.amount)).toEqual([72, 72, 72]);
     const contagion = ofType(ev, 'startle').filter((e) => e.object === null);
     expect(contagion.length).toBeGreaterThanOrEqual(4);
     for (const e of contagion) {
-      expect(e.amount).toBe(7.5);
+      expect(e.amount).toBe(FEAR.contagion * PERSONALITIES.timid.fearMult);
       expect(e.scream).toBe(false);
     }
     expect(ofType(ev, 'flee').map((e) => e.npc).sort()).toEqual(ns.map((n) => n.id).sort());
@@ -456,7 +458,8 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     const a = w.spawn({ pos: A_POS, personality: 'average' });
     const b = w.spawn({ pos: B_POS, personality: 'average' });
     expect(w.trigger('music-box')).toBe(true);
-    const ev = w.step(0.1);
+    // 先察觉那一拍（停下盯着声源），盯完才转入警觉：等待时间加上最长的那一拍
+    const ev = w.step(0.1 + NOTICE.hold[1] * 1.5);
     expect(ofType(ev, 'heard')).toEqual([{ type: 'heard', npc: a.id, object: 'music-box' }]);
     expect(a.mode).toBe('alert');
     expect(a.fear).toBe(4);
@@ -467,12 +470,12 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     expect(a.screaming).toBe(0);
   });
 
-  test('警觉：走到离八音盒 investigateDist 以内、看得见它的地方停下，手电一直指着它；查看后回到闲逛', () => {
+  test('警觉：走到离八音盒 investigateDist（average）以内、看得见它的地方停下，手电一直指着它；查看后回到闲逛', () => {
     const w = createWorld({ seed: 8, autoSpawn: false });
     const a = w.spawn({ pos: A_POS, personality: 'average' });
     const mb = prop('music-box');
     w.trigger('music-box');
-    w.step(DT);
+    w.step(DT + NOTICE.hold[1] * 1.5); // 先察觉那一拍，盯完才转入警觉
     expect(a.mode).toBe('alert');
     const grid = new Grid();
     let arrivedAt = -1;
@@ -486,9 +489,9 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
       } else if (arrivedAt < 0 && a.path.length === 0) {
         arrivedAt = w.state.time;
         const d = Math.hypot(a.pos.x - mb.x, a.pos.z - mb.z);
-        // 走到查看点（离声源 investigateDist 以内）的 arrive 范围里就算到了
-        expect(d).toBeLessThanOrEqual(BEHAVIOR.investigateDist + BEHAVIOR.arrive + 1e-6);
-        expect(d).toBeGreaterThan(BEHAVIOR.investigateDist - 0.5); // 不贴到声源跟前
+        // 走到查看点（离声源 investigateDist 以内，按性格）的 arrive 范围里就算到了
+        expect(d).toBeLessThanOrEqual(TRAITS.average.investigateDist + BEHAVIOR.arrive + 1e-6);
+        expect(d).toBeGreaterThan(TRAITS.average.investigateDist - 0.5); // 不贴到声源跟前
         expect(grid.walkableAt(a.pos)).toBe(true);
         expect(grid.lineOfSight(a.pos, mb)).toBe(true);
       }
@@ -533,7 +536,7 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     expect(far.mode).toBe('wander');
   });
 
-  test('尖叫传染：书房里尖叫，旁边的人恐惧 +5、转入警觉（不僵住），发 object 为 null 的 startle', () => {
+  test('尖叫传染：书房里尖叫，旁边的人恐惧 +contagion、转入警觉（不僵住），发 object 为 null 的 startle', () => {
     const w = createWorld({ seed: 11, autoSpawn: false });
     const STUDY = { x: 2.75, z: 3.75 };
     const a = w.spawn({ pos: STUDY, personality: 'average', lookDir: angleTo(STUDY, prop('portrait')) });
@@ -543,10 +546,11 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     const ev = stepToHit(w, 'portrait', a);
     const st = ofType(ev, 'startle');
     expect(st).toContainEqual({ type: 'startle', npc: a.id, object: 'portrait', amount: 32, scream: true });
-    expect(st).toContainEqual({ type: 'startle', npc: b.id, object: null, amount: 5, scream: false });
+    expect(st).toContainEqual({ type: 'startle', npc: b.id, object: null, amount: FEAR.contagion, scream: false });
     expect(st.some((e) => e.npc === c.id)).toBe(false);
+    run(w, NOTICE.hold[1] * 1.5); // 先察觉那一拍，盯完才转入警觉
     expect(b.mode).toBe('alert');
-    expect(b.fear).toBe(5);
+    expect(b.fear).toBe(FEAR.contagion);
     expect(b.screaming).toBe(0);
     expect(c.mode).toBe('wander');
   });
@@ -600,6 +604,102 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
       run(w, 0.2);
       expect(n.mode).toBe(c.mode);
     }
+  });
+});
+
+describe('World：尖叫只留给吓破胆的时候、胆大的再照一眼（设计文档 2.4、2.5）', () => {
+  /** 直接调 startle 的小沙盒（不走状态机）：一个站在走廊里的人 */
+  const bench = (personality: Personality = 'average') => {
+    const events: SimEvent[] = [];
+    const ctx: NpcCtx = { nav: createNav(new Grid()), rng: createRng(1), now: 0, dt: DT, events, onScream: () => {}, onFlee: () => {}, crowd: [], ghost: null };
+    const npc: Npc = createNpc({ id: 1, name: 'Ada', personality, pos: { x: 8, z: 6 }, lookDir: 0, mode: 'wander', now: 0 }, ctx);
+    return { npc, ctx, events };
+  };
+  /** 被一个基础恐惧值 base 的台灯吓一下（average 第一次：涨的就是 base），返回这一下的 startle */
+  const scare = (b: ReturnType<typeof bench>, base: number) => {
+    startle(b.npc, b.ctx, 'lamp-living', 'lamp', prop('lamp-living'), base);
+    return ofType(b.events, 'startle').at(-1)!;
+  };
+
+  test('一次涨 FEAR.screamAt 以上才尖叫：涨 20 只是僵住、倒吸一口气，涨 25 尖叫', () => {
+    expect(FEAR.screamAt).toBe(25);
+    const a = bench(), b = bench();
+    expect(scare(a, 20)).toMatchObject({ amount: 20, scream: false });
+    expect(a.npc.s.screaming).toBe(0);
+    expect(a.npc.s.mode).toBe('startled');
+    expect(scare(b, 25)).toMatchObject({ amount: 25, scream: true });
+    expect(b.npc.s.screaming).toBe(FEAR.screamTime);
+  });
+
+  test('恐惧值到了 dread 以后再被吓，哪怕只涨 5 也尖叫；没到 dread 的涨 5 不叫', () => {
+    expect(FEAR.screamDread).toBe(true);
+    const a = bench();
+    a.npc.s.fear = FEAR.dread;
+    expect(scare(a, 5)).toMatchObject({ amount: 5, scream: true });
+    const b = bench();
+    b.npc.s.fear = 70;
+    expect(scare(b, 5)).toMatchObject({ amount: 5, scream: false });
+  });
+
+  /** 站在书房里看着肖像的人被肖像吓到（brave 19.2、average 32，都不尖叫），一直推进到僵住结束的那一步（含） */
+  function afterPortrait(seed: number, personality: Personality) {
+    const STUDY = { x: 2.75, z: 3.75 };
+    const w = createWorld({ seed, autoSpawn: false });
+    const n = w.spawn({ pos: STUDY, personality, lookDir: angleTo(STUDY, prop('portrait')) });
+    w.trigger('portrait');
+    expect(ofType(stepToHit(w, 'portrait', n), 'startle').map((e) => e.object)).toEqual(['portrait']);
+    while (n.mode === 'startled') w.step(DT);
+    return { n, w, freed: w.state.time };
+  }
+  const SEEDS = Array.from({ length: 16 }, (_, k) => 200 + k);
+
+  test('胆大的被惊吓物件吓完、僵住结束后，有 TRAITS.brave.recheck 的几率再照一眼那个物件（察觉 kind sound）才走；普通的不会', () => {
+    expect(TRAITS.brave.recheck).toBe(0.5);
+    // 僵住结束那一步就开始照（屋里只有他一个，没有别的声音）；之后 3 秒里不再有别的察觉
+    const brave = SEEDS.map((seed) => {
+      const r = afterPortrait(seed, 'brave');
+      const rechecking = r.n.notice ? { kind: r.n.notice.kind, src: { ...r.n.notice.src } } : null;
+      const later = ofType(run(r.w, 3, DT), 'notice').filter((e) => e.npc === r.n.id);
+      return { ...r, rechecking, later };
+    });
+    const rechecked = brave.filter((r) => r.rechecking !== null);
+    // 一半左右：16 个种子里不会全是、也不会全不是
+    expect(rechecked.length).toBeGreaterThanOrEqual(4);
+    expect(rechecked.length).toBeLessThanOrEqual(12);
+    for (const r of rechecked) {
+      expect(r.rechecking).toEqual({ kind: 'sound', src: prop('portrait') });
+      expect(r.n.mode).toBe('wander'); // 照完照常走，不是去查看
+    }
+    for (const r of brave) expect(r.later).toEqual([]);
+    for (const seed of SEEDS.slice(0, 6)) {
+      const r = afterPortrait(seed, 'average');
+      expect(r.n.notice ?? null).toBeNull();
+      expect(ofType(run(r.w, 3, DT), 'notice')).toEqual([]);
+    }
+  });
+
+  test('再照一眼：站着不动、手电一直对着那个物件，盯满 1 秒；不照的人马上照常走开', () => {
+    const seed = SEEDS.find((sd) => afterPortrait(sd, 'brave').n.notice)!;
+    const r = afterPortrait(seed, 'brave');
+    expect(r.n.notice!.hold).toBeCloseTo(1, 9);
+    let maxOff = 0, maxSpeed = 0;
+    while (r.n.notice) {
+      r.w.step(DT);
+      maxOff = Math.max(maxOff, Math.abs(wrapAngle(r.n.lookDir - angleTo(r.n.pos, prop('portrait')))));
+      maxSpeed = Math.max(maxSpeed, r.n.speed);
+    }
+    expect(r.w.state.time - r.freed).toBeCloseTo(1, 1);
+    expect(maxOff).toBeLessThan(0.05);
+    expect(maxSpeed).toBeLessThan(0.05);
+    // 对照：不照的种子，僵住结束后 1 秒里手电已经离开肖像（照常左右照）
+    const other = SEEDS.find((sd) => !afterPortrait(sd, 'brave').n.notice)!;
+    const q = afterPortrait(other, 'brave');
+    let off = 0;
+    for (let k = 0; k < 60; k++) {
+      q.w.step(DT);
+      off = Math.max(off, Math.abs(wrapAngle(q.n.lookDir - angleTo(q.n.pos, prop('portrait')))));
+    }
+    expect(off).toBeGreaterThan(0.2);
   });
 });
 
@@ -795,15 +895,16 @@ describe('World：闲逛、转向、不穿墙', () => {
     expect(rooms.size).toBeGreaterThan(3);
   });
 
-  test('转向限速：身体和手电每步最多转 turnRate × dt（受惊时除外；被惊吓蓄势定住时最多 transfixTurn 倍）', () => {
+  test('转向限速：身体和手电每步最多转 turnRate × dt（受惊时除外；被惊吓蓄势定住时最多 transfixTurn 倍；察觉那一拍时手电最多 torchTurn 倍）', () => {
     const ids = PROPS.map((p) => p.id);
     const normal = BEHAVIOR.turnRate * DT + 1e-9;
     const transfixed = BEHAVIOR.turnRate * BEHAVIOR.transfixTurn * DT + 1e-9;
+    const torchNotice = BEHAVIOR.turnRate * NOTICE.torchTurn * DT + 1e-9;
     let sawFast = false;
     // 每局都检查限速；「确实有人被定住、转得比平时快」要看运气（谁正好在蓄势时看见、要转多少），换几个种子直到出现
     for (let seed = 48; seed < 60 && !sawFast; seed++) {
       const w = createWorld({ seed });
-      const prev = new Map<number, { h: number; l: number; m: string }>();
+      const prev = new Map<number, { h: number; l: number; m: string; noticing: boolean }>();
       // 这一步开始前有没有惊吓物件在蓄势（只有这时才可能有人被定住、转得更快）
       const anyWindingUp = () =>
         w.state.objects.some((o) => {
@@ -818,11 +919,13 @@ describe('World：闲逛、转向、不穿墙', () => {
           const p = prev.get(n.id);
           if (p && p.m !== 'startled' && n.mode !== 'startled') {
             const dh = Math.abs(wrapAngle(n.heading - p.h)), dl = Math.abs(wrapAngle(n.lookDir - p.l));
+            // 这一步开始或结束时在察觉那一拍：手电可以转得快一些（身体照旧）
+            const noticing = p.noticing || !!n.notice;
             expect(dh).toBeLessThanOrEqual(limit);
-            expect(dl).toBeLessThanOrEqual(limit);
-            if (Math.max(dh, dl) > normal) sawFast = true;
+            expect(dl).toBeLessThanOrEqual(noticing ? Math.max(limit, torchNotice) : limit);
+            if (Math.max(dh, dl) > (noticing ? torchNotice : normal)) sawFast = true;
           }
-          prev.set(n.id, { h: n.heading, l: n.lookDir, m: n.mode });
+          prev.set(n.id, { h: n.heading, l: n.lookDir, m: n.mode, noticing: !!n.notice });
         }
       }
     }

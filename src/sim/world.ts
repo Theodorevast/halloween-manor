@@ -1,17 +1,23 @@
 // 把格子、感知、物件、访客状态机、生成器组合成一个 World。集成阶段只用 createWorld。
-// 每一步（1/60 秒）的顺序：引诱结算 → 惊吓结算 → 尖叫传染 → 鬼魂贴近（发毛、后颈一凉）→ 尖叫传染 →
-// 访客状态机（移动、互相避让）→ 兜底推开挤在一起的人 → 物件计时 → 时间前进 → 生成 → 移除离开的 → seenBy。
+// 每一步（1/60 秒）的顺序：过期的绕开圈 → 机关（到时机就触发，和玩家点一下一样）→ 引诱结算 → 惊吓结算 →
+// 主动现身（蓄力察觉 / 落下吓人 / 停留定住 / 收回）→ 尖叫传染 →
+// 鬼魂穿墙声 → 鬼魂贴近（发毛、察觉、后退、后颈一凉）→ 尖叫传染 →
+// 访客状态机（移动、互相避让）→ 兜底推开挤在一起的人 → 物件计时 → 时间前进 → 生成 → 移除离开的 → 手电照到鬼魂 → seenBy。
 // 先结算惊吓再移动：玩家点下去的那一刻，看着物件的人就会被吓到，不会因为同一步里转开了而落空。
 import { FRONT_DOOR } from '../config/house';
-import { FEAR, HIT_STOP, VISION } from '../config/visitors';
+import { FEAR, GHOST, HIT_STOP, MANIFEST, TRAP, VISION } from '../config/visitors';
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
-import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, separate, startle, updateNpc, walkTo } from './npc';
+import { createManifest, idleManifest, manifestFear } from './manifest';
+import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhostWall, notice, retreat, separate, startle, startleWith, updateNpc, walkTo } from './npc';
 import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
 import { createScareObjects, facesToward, tickObject, triggerObject, windingUp } from './scares';
+import type { ScareObject } from './scares';
+import { armTrap, startledByWindup, tickTraps, trapKind } from './traps';
 import { pickName, pickPersonality, Spawner } from './spawner';
+import { GHOST_SOURCE } from './types';
 import type { GhostInput, NpcState, SimEvent, SpawnOptions, Vec2, World, WorldOptions, WorldState } from './types';
 
 /** 模拟固定步长（秒）：设计文档「架构」 */
@@ -31,9 +37,12 @@ export function createWorld(opts: WorldOptions): World {
     objects: objects.map((o) => o.state),
     scaredOff: 0,
     hitStop: 0,
-    manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null },
+    manifest: idleManifest(),
     avoid: [],
   };
+  /** 主动现身的时间轴（state.manifest 就是它的状态）；这一次现身吓到了谁（落下时记下，停留期间不再定住他们） */
+  const manifestTl = createManifest(state.manifest);
+  const manifestScared = new Set<number>();
   /** 和 state.npcs 一一对应（同顺序），带内部状态 */
   const npcs: Npc[] = [];
   const spawner = opts.autoSpawn === false ? null : new Spawner(rng);
@@ -43,6 +52,13 @@ export function createWorld(opts: WorldOptions): World {
   let acc = 0;
   /** 玩家操控的鬼魂（setGhost 给的，复制一份）；null = 没有鬼魂 */
   let ghost: Vec2 | null = null;
+  /**
+   * 上一次 setGhost 时鬼魂在不在墙里（null = 那时没有鬼魂）；刚穿进墙的那一刻（由假变真）记下位置，下一步结算谁听见。
+   * 去抖：上一次算作穿墙的模拟时间，GHOST.wallGap 秒内不再算（墙角、门框边上 inWall 会来回跳）
+   */
+  let ghostInWall: boolean | null = null;
+  let wallSound: Vec2 | null = null;
+  let lastWallAt = -Infinity;
 
   // 尖叫传染：这一步里开始尖叫的人排队结算，每人每步最多传染一次
   const screamQueue: Npc[] = [];
@@ -64,9 +80,22 @@ export function createWorld(opts: WorldOptions): World {
     },
     crowd: npcs,
     ghost: null,
+    avoid: state.avoid,
   };
 
   const inHouse = () => npcs.reduce((c, n) => c + (canBeScared(n) ? 1 : 0), 0);
+
+  /**
+   * 机关到了时机：和玩家点一下一样附身（恐惧值 × TRAP.fearMult），发 trap sprung + trigger。
+   * 背后型：蓄势的声音让附近听得见、还没看着它的人察觉（kind sound）、回头——回过头来看见了，照常被吓到
+   */
+  function fireTrap(o: ScareObject) {
+    if (!triggerObject(o, TRAP.fearMult)) return;
+    ctx.events.push({ type: 'trap', object: o.state.id, phase: 'sprung' });
+    ctx.events.push({ type: 'trigger', object: o.state.id, scareType: o.state.type });
+    if (trapKind(o) !== 'behind') return;
+    for (const n of npcs) if (startledByWindup(o, n, grid)) notice(n, ctx, 'sound', o.state.pos);
+  }
 
   function addNpc(o: SpawnOptions, events: SimEvent[]): NpcState {
     const personality = o.personality ?? pickPersonality(rng);
@@ -109,11 +138,59 @@ export function createWorld(opts: WorldOptions): World {
     screamQueue.length = 0;
   }
 
+  /**
+   * 主动现身的这一步（设计文档 3.2）：
+   * - windup：发事件；MANIFEST.noticeRadius 米内的人察觉（kind manifest，隔墙也算：附近的灯在闪），盯着那里直到落下
+   * - drop：看得见那里（光锥 + 视线 + MANIFEST.range）的人被吓到：manifestFear × 性格倍率 × 习惯化（按 'manifest' 这一种算），
+   *   照常受惊（object = GHOST_SOURCE），僵住结束后后退到离那里至少 MANIFEST.backOff 米；
+   *   有人被吓到就加一个绕开圈（MANIFEST.avoidRadius 米、MANIFEST.avoidTime 秒），只有这一次被吓到的人绕它
+   * - 停留期间：没被这次吓到、看得见那里的人被定住盯着（不加恐惧值）；end 时放开，发事件
+   */
+  function stepManifest(events: SimEvent[]) {
+    const phase = manifestTl.tick(SIM_DT);
+    const at = state.manifest.pos;
+    if (!at) return;
+    if (phase === 'windup') {
+      manifestScared.clear();
+      events.push({ type: 'manifest', phase: 'windup', pos: { ...at }, scared: [] });
+      for (const n of npcs) {
+        if (!canBeScared(n) || Math.hypot(n.s.pos.x - at.x, n.s.pos.z - at.z) > MANIFEST.noticeRadius) continue;
+        // 盯到落下的那一步还在察觉（多留一步），落下时看得见的人这时被吓到，那一拍跟着作废
+        if (notice(n, ctx, 'manifest', at)) n.s.notice!.hold = Math.max(n.s.notice!.hold, MANIFEST.windup + SIM_DT);
+      }
+    } else if (phase === 'drop') {
+      const seen = npcs.filter((n) => canBeScared(n) && canSee(grid, n.s, at, MANIFEST.range));
+      const base = seen.map((n) => manifestFear(n.s, at));
+      events.push({ type: 'manifest', phase: 'drop', pos: { ...at }, scared: seen.map((n) => n.s.id) });
+      seen.forEach((n, k) => {
+        manifestScared.add(n.s.id);
+        startleWith(n, ctx, GHOST_SOURCE, exposure(n, 'manifest', base[k], state.time), at);
+        retreat(n, ctx, at, MANIFEST.backOff);
+      });
+      if (seen.length > 0) {
+        state.avoid.push({ pos: { ...at }, r: MANIFEST.avoidRadius, until: state.time + MANIFEST.avoidTime, who: seen.map((n) => n.s.id) });
+      }
+    } else if (phase === 'end') {
+      for (const n of npcs) n.transfixPos = null;
+      events.push({ type: 'manifest', phase: 'end', pos: { ...at }, scared: [] });
+      return;
+    }
+    if (state.manifest.phase !== 'hold') return;
+    for (const n of npcs) {
+      if (n.transfixPos || manifestScared.has(n.s.id) || !canBeScared(n)) continue;
+      if (canSee(grid, n.s, at, MANIFEST.range)) n.transfixPos = { ...at };
+    }
+  }
+
   function tick(events: SimEvent[]) {
     ctx.now = state.time;
     ctx.events = events;
     screamed.clear();
     screamQueue.length = 0;
+    // 看见现身以后的绕开圈：到期就去掉（原地删，ctx.avoid 是同一个数组）
+    for (let k = state.avoid.length - 1; k >= 0; k--) if (state.avoid[k].until <= state.time + EPS) state.avoid.splice(k, 1);
+    // 机关：在引诱、惊吓结算之前触发，这一步就照常结算（和玩家在这一步之前点了一下一样）
+    tickTraps(objects, npcs, grid, state.time, SIM_DT, fireTrap, events);
     // 尖叫倒计时放在最前面：这一步新开始的尖叫，步末仍是完整的 FEAR.screamTime
     for (const n of npcs) n.s.screaming = Math.max(0, n.s.screaming - SIM_DT);
 
@@ -123,7 +200,7 @@ export function createWorld(opts: WorldOptions): World {
       o.pendingLure = false;
       for (const n of npcs) {
         if (!canBeScared(n) || !canHear(grid, n.s.pos, o.state.pos, o.spec.range)) continue;
-        const amount = exposure(n, o.state.type, o.spec.fear, state.time);
+        const amount = exposure(n, o.state.type, o.spec.fear * o.fearMult, state.time);
         hear(n, ctx, amount, o.state.pos, { type: 'heard', npc: n.s.id, object: o.state.id });
       }
     }
@@ -143,12 +220,22 @@ export function createWorld(opts: WorldOptions): World {
         if (!canBeScared(n) || o.scared.has(n.s.id)) continue;
         if (!facesToward(o.state, n.s.pos) || !canSee(grid, n.s, o.state.pos, range)) continue;
         o.scared.add(n.s.id);
-        startle(n, ctx, o.state.id, o.state.type, o.state.pos, o.spec.fear);
+        startle(n, ctx, o.state.id, o.state.type, o.state.pos, o.spec.fear * o.fearMult);
       }
     }
+    stepManifest(events);
     flushScreams();
 
-    // 鬼魂贴近：发毛、后颈一凉。在移动之前：被吹了一口凉气的人这一步就僵住；没有鬼魂时什么都不变
+    // 鬼魂穿墙的声音（设计文档 2.3）：GHOST.hearWall 米内听得见的人（隔墙按 canHear 打折）察觉、涨一点点恐惧值，盯完去查看。
+    // 每人听见一次以后 GHOST.hearCooldown 秒内不再算，涨的量按习惯化减弱（见 hearGhostWall）
+    if (wallSound) {
+      const src = wallSound;
+      wallSound = null;
+      for (const n of npcs) {
+        if (canBeScared(n) && canHear(grid, n.s.pos, src, GHOST.hearWall)) hearGhostWall(n, ctx, src);
+      }
+    }
+    // 鬼魂贴近：发毛、察觉、后退、后颈一凉。在移动之前：被吹了一口凉气的人这一步就僵住；没有鬼魂时什么都不变
     ctx.ghost = ghost;
     for (const n of npcs) feelGhost(n, ctx);
     flushScreams();
@@ -178,6 +265,17 @@ export function createWorld(opts: WorldOptions): World {
       state.npcs.splice(k, 1);
     }
 
+    // 手电照到鬼魂（设计文档 3.1）：只显形、不吓人。照到的那一刻发 reveal on、愣一下（察觉 kind ghost），不涨恐惧值；
+    // 不再照着（转开了、鬼魂走了或没了、开始逃跑）发 reveal off。逃跑中的人不算
+    const g = ghost;
+    for (const n of npcs) {
+      const lit = g !== null && canBeScared(n) && canSee(grid, n.s, g, VISION.range);
+      if (lit === n.litGhost) continue;
+      n.litGhost = lit;
+      events.push({ type: 'reveal', npc: n.s.id, on: lit });
+      if (lit) notice(n, ctx, 'ghost', g);
+    }
+
     // seenBy：此刻看得见的人（逃跑中的不算，他们已经吓不到了）。每步给新数组，画面可以放心比较引用
     for (const o of objects) {
       if (o.spec.kind !== 'sight') {
@@ -197,17 +295,32 @@ export function createWorld(opts: WorldOptions): World {
     state,
 
     setGhost(g: GhostInput | null) {
-      // inWall（穿墙声）先不用，后面的任务接上
-      ghost = g ? { x: g.x, z: g.z } : null;
+      if (!g) {
+        ghost = null;
+        ghostInWall = null;
+        wallSound = null;
+        return;
+      }
+      ghost = { x: g.x, z: g.z };
+      const inWall = g.inWall === true;
+      // 和声音那边的穿墙声一样：上一次在墙外（不是刚出现）、这一次在墙里，而且离上一次算作穿墙过了 GHOST.wallGap 秒
+      if (inWall && ghostInWall === false && state.time - lastWallAt >= GHOST.wallGap - EPS) {
+        wallSound = { x: g.x, z: g.z };
+        lastWallAt = state.time;
+      }
+      ghostInWall = inWall;
     },
 
-    // 主动现身、设机关：接口先放着，行为后面的任务做（先一律返回 false）
     manifest(): boolean {
-      return false;
+      // 要有鬼魂（第三人称）；正在现身、冷却中时 start 返回 false
+      return ghost !== null && manifestTl.start(ghost);
     },
 
-    arm(_objectId: string): boolean {
-      return false;
+    arm(objectId: string): boolean {
+      const o = byId.get(objectId);
+      if (!o || !armTrap(o, objects.reduce((c, x) => c + (x.state.armed > 0 ? 1 : 0), 0))) return false;
+      pending.push({ type: 'trap', object: o.state.id, phase: 'armed' });
+      return true;
     },
 
     step(dt: number): SimEvent[] {

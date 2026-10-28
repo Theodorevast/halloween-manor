@@ -29,6 +29,7 @@ import { Snd, bandNoise, braam, lightClick, rng } from '../src/audio/sfx';
 import type { Vec3 } from '../src/audio/space';
 import { coldBreath, whimper } from '../src/audio/voices';
 import type { GhostState } from '../src/engine/types';
+import { idleManifest } from '../src/sim/manifest';
 import type { NpcMode, NpcState, Personality, ScareType, SimEvent, Vec2, WorldState } from '../src/sim/types';
 
 const SR = 48000;
@@ -47,7 +48,7 @@ const state: WorldState = {
   objects: PROPS.map((p) => ({ id: p.id, type: p.type, pos: propCenter(p), facing: p.facing, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0 })),
   scaredOff: 0,
   hitStop: 0,
-  manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null },
+  manifest: idleManifest(),
   avoid: [],
 };
 const objId = (type: ScareType) => state.objects.find((o) => o.type === type)!.id;

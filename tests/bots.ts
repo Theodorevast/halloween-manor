@@ -5,10 +5,14 @@
 //      途中或查看时会看见一个可用的惊吓物件，就拉响引诱。lureCoverage 统计这在多少位置成立
 //      （旧布局：厨房门 1/231、八音盒 10/86，几乎用不上；现布局见 tests/balance.test.ts 目标 5）
 //   3. 续恐惧：听得见的人已经在害怕、此刻没在警觉 / 受惊，也拉响引诱（恐惧值上涨、回落计时重来）
+//   4. 机关（2026-10-28）：每 TRAP_EVERY 步看一次，设下的不到 TRAP.max 个，就在没人看得见的背后型物件（摇椅、床）里
+//      挑离访客最近的那个设下（TRAP_NEAR 米以内有人才设：等人路过时在他背后发作）
 // - random：每 3 秒随机点一个能附身的物件，不看时机
 // - idle：不附身（只用来看鬼魂单独有多大用）
 // 鬼魂（第三人称改版，opts.ghost = 'hover'）：和上面任何一种叠加。每步把鬼魂飘向最近的访客、贴在他身后 GHOST_BOT.behind 米
 // （跟定一个人，直到他逃跑或离开），比真人跟得紧：是鬼魂效果的上限。opts.reach 限制只附身离鬼魂多近的物件（第三人称的准星）
+// 现身（2026-10-28，opts.ghost = 'manifest'）：鬼魂飘到跟定的人面前（他手电照的方向上）MANIFEST_BOT.front 米处，
+// 一冷却好就现身（现身期间不动）；也可以和 skilled 叠加（附身 + 现身）
 import { createWorld } from '../src/sim/world';
 import { createRng } from '../src/sim/rng';
 import type { Rng } from '../src/sim/rng';
@@ -16,22 +20,27 @@ import { Grid } from '../src/sim/grid';
 import { alertPath } from '../src/sim/npc';
 import { canHear, canSee } from '../src/sim/perception';
 import { facesToward } from '../src/sim/scares';
-import { cellCenter, FRONT_DOOR, GRID_H, GRID_W } from '../src/config/house';
+import { cellCenter, cellOf, FRONT_DOOR, GRID_H, GRID_W } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
-import { BEHAVIOR, VISION } from '../src/config/visitors';
+import { BEHAVIOR, TRAITS, TRAP, VISION } from '../src/config/visitors';
 import { angleOf } from '../src/lib/angle';
 import { GHOST_SOURCE } from '../src/sim/types';
-import type { Personality, ScareObjectState, Vec2, World } from '../src/sim/types';
+import type { NpcState, Personality, ScareObjectState, ScareType, Vec2, World } from '../src/sim/types';
 
 export type BotKind = 'skilled' | 'random' | 'idle';
-/** 鬼魂：none = 没有鬼魂（触屏的俯视模式），hover = 鬼魂机器人贴着最近的访客 */
-export type GhostPolicy = 'none' | 'hover';
+/** 鬼魂：none = 没有鬼魂（触屏的俯视模式），hover = 鬼魂机器人贴着最近的访客，manifest = 到他面前现身 */
+export type GhostPolicy = 'none' | 'hover' | 'manifest';
 
 /**
  * 鬼魂机器人：飘的速度（米/秒，大概是轻轻按着 WASD）、贴在身后多远（米，在后颈一凉的距离以内）、开局在哪
  * （和 engine/ghostRig.ts 的占位一样在门厅）
  */
 export const GHOST_BOT = { speed: 2, behind: 0.5, start: { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z } };
+/**
+ * 现身机器人：在跟定的人面前多远处现身（米，按他手电照的方向；先试第一个，中间隔着墙就近一点再试），
+ * 飘到离那一点多近就现身（米）。现身的冷却（MANIFEST.cooldown）一好就现身：大约每 20 秒一次
+ */
+export const MANIFEST_BOT = { front: [2, 1.5, 1], ready: 0.2 };
 /** skilled 用引诱的方式（只用于对比分析；正式测试用默认的 'both'） */
 export type LurePolicy = 'both' | 'predict' | 'topup' | 'none';
 
@@ -64,6 +73,11 @@ export interface BotRun {
   necks: number;
   ghostFear: number;
   maxNeck: number;
+  /** 现身：落下了几次、一共吓到几人次 */
+  manifests: number;
+  manifestScares: number;
+  /** 鬼魂机器人穿墙（告诉模拟的 inWall 由假变真）的次数；模拟去抖、每人冷却以后，真正被听见的会少一些 */
+  wallPasses: number;
 }
 
 export interface RunOptions {
@@ -85,6 +99,15 @@ const SIGHT_EVERY = 15;
 const LURE_EVERY = 60;
 /** 随机机器人每 3 秒点一次 */
 const RANDOM_EVERY = 180;
+/** skilled 每隔多少步考虑一次设机关：2 秒 */
+const TRAP_EVERY = 120;
+/** 离最近的访客多远以内（米）的物件才值得设：太远的等 TRAP.expire 秒也等不来人 */
+const TRAP_NEAR = 8;
+/**
+ * 只设背后型（摇椅、床）：迎面型的机关就是「手电照到它就附身」，这个机器人本来每 0.25 秒就盯着眼睛图标附身了，
+ * 设了也不多吓到谁，反倒让目标 6 统计的附身次数变少；背后型（在他背后发作、他回头）是它自己点不出来的
+ */
+const TRAP_TYPES: ReadonlySet<ScareType> = new Set<ScareType>(['rockingChair', 'bed']);
 /** 听见引诱声后多少秒内被吓到，算作引诱带来的惊吓 */
 const LURE_LED_WINDOW = 8;
 /** 预测路径时每隔多少米检查一次能不能看见惊吓物件 */
@@ -118,16 +141,19 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
     return ok;
   };
   const lastHeard = new Map<number, number>();
-  const ghost: GhostBot | null = opts.ghost === 'hover' ? { pos: { ...GHOST_BOT.start }, target: null } : null;
+  const ghost: GhostBot | null =
+    opts.ghost === 'hover' || opts.ghost === 'manifest' ? { pos: { ...GHOST_BOT.start }, target: null, wasInWall: null, passes: 0 } : null;
+  const steer = opts.ghost === 'manifest' ? manifestGhost : moveGhost;
   const reach = opts.reach ?? Infinity;
   const inReach = (o: ScareObjectState) => !ghost || Math.hypot(o.pos.x - ghost.pos.x, o.pos.z - ghost.pos.z) <= reach;
-  let chills = 0, necks = 0, ghostFear = 0, maxNeck = 0;
+  let chills = 0, necks = 0, ghostFear = 0, maxNeck = 0, manifests = 0, manifestScares = 0;
   const steps = Math.round(seconds / DT);
   for (let k = 0; k < steps; k++) {
-    if (ghost) moveGhost(w, ghost);
+    if (ghost) steer(w, ghost);
     if (kind === 'skilled') {
       if (k % SIGHT_EVERY === 0) fireLitEyes(w, fire, inReach);
       if (k % LURE_EVERY === 0 && lures !== 'none') fireLures(w, lures, fire, inReach);
+      if (k % TRAP_EVERY === 0) armTraps(w, inReach);
     } else if (kind === 'random' && k % RANDOM_EVERY === 0) randomMove(w, rng, fire);
     for (const e of w.step(DT)) {
       if (e.type === 'spawn') {
@@ -137,6 +163,9 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
         visitors.get(e.npc)!.exitedAt = w.state.time;
       } else if (e.type === 'heard') {
         lastHeard.set(e.npc, w.state.time);
+      } else if (e.type === 'manifest' && e.phase === 'drop') {
+        manifests++;
+        manifestScares += e.scared.length;
       } else if (e.type === 'chill') {
         ghostFear += e.amount;
         if (e.neck) {
@@ -157,20 +186,23 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
   }
   const list = [...visitors.values()];
   const lifetimes = list.filter((v) => v.exitedAt !== null).map((v) => v.exitedAt! - v.spawnedAt);
-  return { seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares, landing, chills, necks, ghostFear, maxNeck };
+  return {
+    seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares, landing,
+    chills, necks, ghostFear, maxNeck, manifests, manifestScares, wallPasses: ghost?.passes ?? 0,
+  };
 }
 
 interface GhostBot {
   pos: Vec2;
   /** 正跟着的访客 id */
   target: number | null;
+  /** 上一步告诉模拟的 inWall（还没告诉过为 null）；穿墙的次数 */
+  wasInWall: boolean | null;
+  passes: number;
 }
 
-/**
- * 鬼魂机器人走一步：跟定的人逃跑 / 离开了就换离鬼魂最近的（不算逃跑中的），飘向他身后 GHOST_BOT.behind 米处
- * （按他身体朝向的反方向；鬼魂能穿墙，直线飘），然后交给模拟
- */
-function moveGhost(w: World, g: GhostBot) {
+/** 跟定的人：还在屋里（没逃跑、没离开）就接着跟，否则换离鬼魂最近的 */
+function targetOf(w: World, g: GhostBot): NpcState | undefined {
   const alive = (id: number | null) => w.state.npcs.find((n) => n.id === id && n.mode !== 'fleeing' && n.mode !== 'gone');
   let t = alive(g.target);
   if (!t) {
@@ -185,18 +217,68 @@ function moveGhost(w: World, g: GhostBot) {
     }
     g.target = t ? t.id : null;
   }
+  return t;
+}
+
+/** 鬼魂直线飘向 (hx, hz)（能穿墙），这一步最多 GHOST_BOT.speed × DT；返回飘完离那一点多远 */
+function driftTo(g: GhostBot, hx: number, hz: number): number {
+  const dx = hx - g.pos.x, dz = hz - g.pos.z, d = Math.hypot(dx, dz), step = GHOST_BOT.speed * DT;
+  if (d <= step) {
+    g.pos.x = hx;
+    g.pos.z = hz;
+    return 0;
+  }
+  g.pos.x += (dx / d) * step;
+  g.pos.z += (dz / d) * step;
+  return d - step;
+}
+
+/**
+ * 把鬼魂的位置交给模拟。穿墙时访客听得见（GHOST.hearWall）：和真的鬼魂一样告诉模拟此刻在不在墙里。
+ * 按格子近似（中心在墙格、窗格里）：真的鬼魂按身体（半径 0.16 米）碰没碰到 0.2 米厚的墙体算，差不了几厘米
+ */
+function placeGhost(w: World, g: GhostBot) {
+  const [i, j] = cellOf(g.pos.x, g.pos.z);
+  const inWall = grid.isOpaque(i, j);
+  if (inWall && g.wasInWall === false) g.passes++;
+  g.wasInWall = inWall;
+  w.setGhost({ x: g.pos.x, z: g.pos.z, inWall });
+}
+
+/**
+ * 鬼魂机器人走一步：跟定的人逃跑 / 离开了就换离鬼魂最近的（不算逃跑中的），飘向他身后 GHOST_BOT.behind 米处
+ * （按他身体朝向的反方向；鬼魂能穿墙，直线飘），然后交给模拟
+ */
+function moveGhost(w: World, g: GhostBot) {
+  const t = targetOf(w, g);
+  if (t) driftTo(g, t.pos.x - Math.cos(t.heading) * GHOST_BOT.behind, t.pos.z - Math.sin(t.heading) * GHOST_BOT.behind);
+  placeGhost(w, g);
+}
+
+/**
+ * 现身机器人走一步：现身期间（蓄力、停留）不动；否则飘向跟定的人面前 MANIFEST_BOT.front 米处
+ * （他手电照的方向上、和他之间没有墙），到了而且冷却好了就现身
+ */
+function manifestGhost(w: World, g: GhostBot) {
+  const phase = w.state.manifest.phase;
+  const t = phase === 'windup' || phase === 'hold' ? undefined : targetOf(w, g);
   if (t) {
-    const hx = t.pos.x - Math.cos(t.heading) * GHOST_BOT.behind, hz = t.pos.z - Math.sin(t.heading) * GHOST_BOT.behind;
-    const dx = hx - g.pos.x, dz = hz - g.pos.z, d = Math.hypot(dx, dz), step = GHOST_BOT.speed * DT;
-    if (d <= step) {
-      g.pos.x = hx;
-      g.pos.z = hz;
-    } else {
-      g.pos.x += (dx / d) * step;
-      g.pos.z += (dz / d) * step;
+    let spot: Vec2 | null = null;
+    for (const f of MANIFEST_BOT.front) {
+      const p = { x: t.pos.x + Math.cos(t.lookDir) * f, z: t.pos.z + Math.sin(t.lookDir) * f };
+      const [i, j] = cellOf(p.x, p.z);
+      if (!grid.isOpaque(i, j) && grid.lineOfSight(t.pos, p)) {
+        spot = p;
+        break;
+      }
+    }
+    if (spot && driftTo(g, spot.x, spot.z) <= MANIFEST_BOT.ready && phase === 'idle') {
+      placeGhost(w, g);
+      w.manifest();
+      return;
     }
   }
-  w.setGhost(g.pos);
+  placeGhost(w, g);
 }
 
 const ready = (o: ScareObjectState) => o.cooldown === 0;
@@ -217,23 +299,30 @@ function fireLures(w: World, policy: LurePolicy, fire: Fire, reach: Reach) {
   for (const lure of w.state.objects) {
     if (isSight(lure) || !ready(lure) || !reach(lure)) continue;
     const range = SCARES[lure.type].range;
-    // 只考虑会被这一声拉走的人：听得见、没在逃跑 / 警觉 / 受惊
+    // 只考虑会被这一声拉走的人：听得见、没在逃跑 / 警觉 / 受惊，也没在察觉一个声音（那一拍完了就转入警觉）
     const hearers = w.state.npcs.filter(
-      (n) => n.mode !== 'fleeing' && n.mode !== 'alert' && n.mode !== 'startled' && canHear(grid, n.pos, lure.pos, range),
+      (n) =>
+        n.mode !== 'fleeing' && n.mode !== 'alert' && n.mode !== 'startled' && n.notice?.kind !== 'sound' && canHear(grid, n.pos, lure.pos, range),
     );
-    const predicted = policy !== 'topup' && hearers.some((n) => lureLeadsToScare(n.pos, lure.pos, sights));
+    const predicted = policy !== 'topup' && hearers.some((n) => lureLeadsToScare(n.pos, lure.pos, sights, grid, TRAITS[n.personality].investigateDist));
     const topUp = policy !== 'predict' && hearers.some((n) => n.fear > 0);
     if (predicted || topUp) fire(lure.id);
   }
 }
 
 /**
- * 预测：站在 from 的人听见 source 后会怎么走（和模拟用同一个 alertPath），走的时候手电指着声源，
- * 到了查看位置再左右扫（BEHAVIOR.investigateSweep）。途中或查看时能看见 sights 里的某一个（含正面朝向）就返回 true
+ * 预测：站在 from 的人听见 source 后会怎么走（和模拟用同一个 alertPath；dist 是他走到离声源多近，按性格），
+ * 走的时候手电指着声源，到了查看位置再左右扫（BEHAVIOR.investigateSweep）。途中或查看时能看见 sights 里的某一个（含正面朝向）就返回 true
  */
-export function lureLeadsToScare(from: Vec2, source: Vec2, sights: readonly ScareObjectState[], g: Grid = grid): boolean {
+export function lureLeadsToScare(
+  from: Vec2,
+  source: Vec2,
+  sights: readonly ScareObjectState[],
+  g: Grid = grid,
+  dist: number = TRAITS.average.investigateDist,
+): boolean {
   if (sights.length === 0) return false;
-  const path = alertPath(g, from, source);
+  const path = alertPath(g, from, source, dist);
   if (!path) return false;
   const sees = (p: Vec2, lookDir: number) =>
     sights.some((o) => facesToward(o, p) && canSee(g, { pos: p, lookDir }, o.pos, Math.min(SCARES[o.type].range, VISION.range)));
@@ -254,7 +343,7 @@ export function lureLeadsToScare(from: Vec2, source: Vec2, sights: readonly Scar
   return false;
 }
 
-/** 每个引诱物件：能听见它的可走格有多少，其中多少格的人被它引过去时会看见一个惊吓物件 */
+/** 每个引诱物件：能听见它的可走格有多少，其中多少格的人被它引过去时会看见一个惊吓物件（按最常见的 average 走到多近算） */
 export function lureCoverage(objects: readonly ScareObjectState[], g: Grid = grid): { id: string; hearing: number; leads: number }[] {
   const sights = objects.filter(isSight);
   return objects.filter((o) => !isSight(o)).map((lure) => {
@@ -270,6 +359,27 @@ export function lureCoverage(objects: readonly ScareObjectState[], g: Grid = gri
     }
     return { id: lure.id, hearing, leads };
   });
+}
+
+/**
+ * 设机关：设下的不到 TRAP.max 个时，在冷却好了、还没设下、此刻没人看得见（眼睛没亮）、够得着的惊吓物件里，
+ * 挑离最近的访客（不算逃跑中的）最近的那个设下，那人得在 TRAP_NEAR 米以内
+ */
+function armTraps(w: World, reach: Reach) {
+  if (w.state.objects.filter((o) => o.armed > 0).length >= TRAP.max) return;
+  const people = w.state.npcs.filter((n) => n.mode !== 'fleeing' && n.mode !== 'gone');
+  let best: ScareObjectState | null = null, bestD = TRAP_NEAR;
+  for (const o of w.state.objects) {
+    if (!TRAP_TYPES.has(o.type) || !ready(o) || o.armed > 0 || o.seenBy.length > 0 || !reach(o)) continue;
+    for (const n of people) {
+      const d = Math.hypot(n.pos.x - o.pos.x, n.pos.z - o.pos.z);
+      if (d < bestD) {
+        bestD = d;
+        best = o;
+      }
+    }
+  }
+  if (best) w.arm(best.id);
 }
 
 function randomMove(w: World, rng: Rng, fire: Fire) {
