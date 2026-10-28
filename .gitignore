@@ -14,3 +14,5 @@ shots/
 assets-src/
 # 素材中台（vmc）下载的原图母版，不进仓库
 assets/generated/
+# 并行 worktree 里开发服务器的依赖缓存（.logs/vite.lane.config.ts）
+.vite-lane/
