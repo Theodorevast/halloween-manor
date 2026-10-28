@@ -1,7 +1,8 @@
-// 粒子：手电光束里的浮尘、肖像砸地扬起的粉尘、受惊访客呼出的白气（2026-10-27 电影感升级）。
+// 粒子：手电光束里的浮尘、肖像砸地扬起的粉尘（床塌下去也用它）、受惊访客呼出的白气（2026-10-27 电影感升级）。
 // 三样都是「哈希 + 时间」驱动的实例化精灵（SpriteNodeMaterial），每样一次绘制：
 // - 浮尘（particles/motes.ts）：两千颗，只在手电光锥里、墙这一侧亮；
 // - 粉尘（particles/plaster.ts）：肖像砸地那一刻从画框四周喷出一团灰褐色的灰 + 几粒碎屑；
+//   床（被子下面的人塌下去那一刻，2026-10-28）从被子面中间扬起一小团灰，没有碎屑，同一套粒子换一套形状；
 // - 白气（particles/breath.ts）：恐惧值过了紧张线的人隔一会儿呼一小口，越怕喘得越急。
 // 灯光不走 three 的灯光系统（particles/light.ts，和雾同一套光锥和挡墙算法），材质都不受光照：灯的数量变了不重新编译。
 //
@@ -23,7 +24,8 @@ import { createBreath } from './particles/breath';
 import { makeScreenUniforms, updateScreenUniforms } from './particles/common';
 import { createLightReader } from './particles/light';
 import { MOTES, createMotes } from './particles/motes';
-import { PLASTER, createPlaster } from './particles/plaster';
+import { PLASTER, createPlaster, type BurstShape } from './particles/plaster';
+import { BED_TIMELINE, bedDustSpot } from './props/bed';
 import { PORTRAIT_TIMELINE } from './props/portrait';
 
 export { BREATH } from './particles/breath';
@@ -32,6 +34,10 @@ export { PLASTER } from './particles/plaster';
 
 /** 附身之后多久画框砸到地上（秒，和 props/portrait.ts 的时间线一致；那边用的也是真实时间 dt） */
 const PORTRAIT_IMPACT = PORTRAIT_TIMELINE.impact;
+/** 附身之后多久床塌平（秒，和 props/bed.ts 的时间线一致） */
+const BED_COLLAPSE = BED_TIMELINE.collapse;
+/** 床塌下去扬的灰：落点比画框小（半宽、半长，米）、一半以上从中间震起、灰少一点、小一点、慢一点、没有碎屑 */
+const BED_DUST: BurstShape = { halfW: 0.22, halfL: 0.26, edgeShare: 0.4, count: 0.5, size: 0.75, speed: 0.6, chips: false };
 
 export function createParticlesView(core: RenderCore): Module {
   const search = new URLSearchParams(location.search);
@@ -68,6 +74,8 @@ export function createParticlesView(core: RenderCore): Module {
   let driftT = Math.random() * 1000; // 浮尘的漂移时间：从随机处开始，每次开局灰的位置不一样
   let pendingImpact = -1; // 附身之后过了多久（秒）；-1 = 没有在等砸地
   let pendingObject = 'portrait';
+  let pendingBed = -1; // 同上，等床塌平；pendingBedObject 是附身的那个床
+  let pendingBedObject = 'bed';
   let plasterUntil = -1;
   let wasReduced: boolean | null = null;
 
@@ -88,6 +96,19 @@ export function createParticlesView(core: RenderCore): Module {
     const mid = (PLASTER.slab.z0 + PLASTER.slab.z1) / 2;
     center.set(c.x, 0, c.z).addScaledVector(axisL, mid);
     plaster.burst(t0, center, axisW, axisL);
+    plasterUntil = t0 + plaster.maxLife;
+    return true;
+  };
+
+  /** 床塌平：灰从躯干那个包正上方的被子面起来（被子面中心在 bedDustSpot，物件局部坐标 → 房屋坐标同 burstAt） */
+  const burstBed = (objectId: string, t0: number) => {
+    const p = PROPS.find((x) => x.id === objectId);
+    if (!p) return false;
+    const c = propCenter(p), yaw = yawFor(p.facing), spot = bedDustSpot();
+    axisW.set(Math.cos(yaw), 0, -Math.sin(yaw));
+    axisL.set(Math.sin(yaw), 0, Math.cos(yaw));
+    center.set(c.x, spot.y, c.z).addScaledVector(axisW, spot.x).addScaledVector(axisL, spot.z);
+    plaster.burst(t0, center, axisW, axisL, BED_DUST);
     plasterUntil = t0 + plaster.maxLife;
     return true;
   };
@@ -156,6 +177,13 @@ export function createParticlesView(core: RenderCore): Module {
           pendingImpact = -1;
         }
       }
+      if (pendingBed >= 0) {
+        pendingBed += ctx.dt;
+        if (pendingBed >= BED_COLLAPSE) {
+          burstBed(pendingBedObject, ctx.time - (pendingBed - BED_COLLAPSE));
+          pendingBed = -1;
+        }
+      }
       breath.update(ctx, core.houseRoot);
 
       motes.object.visible = on.motes && quality === 'high' && light.activeTorches > 0;
@@ -166,6 +194,10 @@ export function createParticlesView(core: RenderCore): Module {
       if (e.type === 'trigger' && e.scareType === 'portrait') {
         pendingImpact = 0;
         pendingObject = e.object;
+      }
+      if (e.type === 'trigger' && e.scareType === 'bed') {
+        pendingBed = 0;
+        pendingBedObject = e.object;
       }
       breath.onEvent(e, state);
     },

@@ -312,15 +312,11 @@ const rug: Maker = (k, { w, zb, zf }) => {
   for (const x of [-w / 2 + d, w / 2 - d]) for (const z of [zb + d, zf - d]) k.tilted(x, z, T, T + 0.002, 0.12, 0.12, 0, mixC(PALETTE.fabric, PALETTE.brass, 0.35), CLOTH);
 };
 
+/** 床：床架、床垫、枕头、床头板、床尾板。被子（连两侧垂下的一圈、床头翻折的床单）不在这里画：它是可附身的物件，在 props/bed.ts */
 const bed: Maker = (k, { w, zb, zf }) => {
-  const x0 = -w / 2, x1 = w / 2, top = FURNITURE_TOP.bed;
+  const x0 = -w / 2, x1 = w / 2;
   k.box(x0 + 0.04, 0.12, zb + 0.06, x1 - 0.04, 0.3, zf - 0.05, COL.woodDark, VARNISH); // 床架
   k.box(x0 + 0.06, 0.3, zb + 0.08, x1 - 0.06, 0.45, zf - 0.08, COL.linen, CLOTH); // 床垫
-  const cover = zb + 0.6;
-  k.box(x0 + 0.04, 0.45, cover, x1 - 0.04, top, zf - 0.06, COL.fabric, CLOTH); // 被子
-  k.box(x0 + 0.02, 0.24, cover, x0 + 0.04, top, zf - 0.06, COL.fabric, CLOTH); // 两侧垂下
-  k.box(x1 - 0.04, 0.24, cover, x1 - 0.02, top, zf - 0.06, COL.fabric, CLOTH);
-  k.box(x0 + 0.06, top - 0.005, cover - 0.12, x1 - 0.06, top + 0.015, cover + 0.02, COL.linen, CLOTH); // 翻折的床单
   for (const s of [-1, 1]) k.box(s * 0.08, 0.45, zb + 0.14, s * (w / 2 - 0.12), 0.56, zb + 0.46, COL.linen, CLOTH); // 枕头
   // 床头板、床尾板，四角立柱
   k.box(x0, 0, zb, x1, 1.15, zb + 0.06, COL.woodDark, VARNISH);
