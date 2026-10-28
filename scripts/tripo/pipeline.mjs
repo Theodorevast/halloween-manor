@@ -744,8 +744,11 @@ async function downloadOutputs(ctx, n, output = {}) {
     if (!url) throw new Error(`任务结果里没有图片链接（output 字段：${keys}）`);
     files.image = ctx.rel((await download(url, dest)).path);
   } else if (kind === 'views') {
+    // 实测（2026-10-28）四个链接套在 output.generate_multiview_image 里；文档没写结构，直接放在 output 上的也认
+    const nested = Object.values(output ?? {}).find((x) => x && typeof x === 'object' && typeof x.front_view_url === 'string');
+    const src = typeof output?.front_view_url === 'string' ? output : nested ?? {};
     for (const v of ['front', 'left', 'back', 'right']) {
-      const url = output?.[`${v}_view_url`];
+      const url = src[`${v}_view_url`];
       if (typeof url === 'string') files[v] = ctx.rel((await download(url, `${dest}-${v}`)).path);
     }
     if (!files.front) throw new Error(`四视图结果里没有 front_view_url（output 字段：${keys}）`);

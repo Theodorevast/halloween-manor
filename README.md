@@ -35,10 +35,22 @@
 - 点泛着幽绿光的物件附身。**引诱**（八音盒、厨房门）发出声音，把听见的人引过去；**惊吓**（台灯、摇椅、肖像、落地镜）必须被人看见才生效，物件上方的眼睛图标亮着就说明此刻有人看得见
 - 核心套路：先引诱，再惊吓。八音盒和卧室台灯是一对，厨房门和摇椅是一对
 
-## 换上吉祥物
+## 访客模型：吉祥物换装（Tripo 流水线）
+
+`scripts/tripo/visitors.mjs` 把翠宝换上万圣节服装、建 3D、绑骨、套动作，导出到 `public/assets/visitors/<id>.glb`。清单和每一步的参数在 `scripts/tripo/visitors.json`，选模型的依据在 `docs/research/2026-10-28-glimmerby-api-models.md`。
+
+1. 换装图（Tripo image-to-image）：`node scripts/tripo/visitors.mjs --run all --yes --until costume`，图在 `assets-src/visitors/<id>/costume.png`
+2. 修图（公司素材中台 vmc）：把手改回三指加拇指、去掉多出来的配件。挑好的图复制成 `assets-src/visitors/<id>/touchup.png`，母版留在 `assets/generated/vmc/<任务ID>/`
+3. 满意后把清单里这个访客的 `status` 改成 `approved`，再 `--run <id> --yes`：四视图 → 3D（P2-20260801）→ 绑骨检查 → 绑骨 → 4 个动作 → 导出
+4. 导出前自动用本机 Blender 精修（`scripts/blender/refine.mjs`，可以单独跑）：球身、帽子、披风整块跟着躯干，挂在腿边的配件不跟着腿拉伸，同时清碎片、限面数和贴图、去根运动。预览表在 `assets-src/visitors/<id>/refine-preview/<id>-sheet.png`，第一行是权重：蓝色跟身体，橙色跟腿和手臂
+5. 不联网的自测：`node scripts/tripo/selftest.mjs`。先看要花多少：`--dry-run`
+
+导出后在 `src/config/character.ts` 的 `VISITOR_SPECS` 里登记（片段名照 `public/assets/visitors/manifest.json` 填）。有几套就按编号轮流分给进门的人；一套都加载不到时用占位狐狸。
+
+## 换上别的模型
 
 1. 把 GLB 放进 `public/assets/mascot/`
-2. 先不改配置，直接预览：`/dev/characters.html?url=/assets/mascot/<文件名>.glb&ambient=1.2&focus=0&fzoom=3&arrows`，控制台会打印动画片段名、原始尺寸、三角面数
+2. 先不改配置，直接预览：`/dev/characters.html?url=/assets/mascot/<文件名>.glb&ambient=1.2&focus=0&fzoom=3&arrows`，控制台会打印动画片段名、原始尺寸、三角面数。加 `&clips=待机,走,跑,受惊`（片段名，没有的写 `-`）可以直接看动作
 3. 在页面控制台运行 `await __chars.calibrate()`，它会建议 `facingOffset`、`walkRateAt1ms`、`runRateAt1ms`。`rootMotion` 必须是 false（true 说明动画片段自己带位移，要重新导出原地动画）
 4. 改 `src/config/character.ts`：`url`、`facingOffset`、`clips`（片段名照控制台打印的原样写，没有的写 `null`），以及两个速率
 5. 检查：箭头和脸的朝向一致；按 1 看受惊跳起，按 F 看逃跑；`?visitors=4` 加 `__chars.perf(4)` 看性能
@@ -68,6 +80,7 @@ Claude 听不到声音，下面这些按「最没把握」排序。打开 `/dev/
 - 平衡是机器人测出来的：会玩的机器人每 5 分钟吓跑约 9 人，真人大概会慢一些，需要试玩确认
 - 门廊灯不投影，门厅地板靠南墙处有一点暖光
 - 第一个访客进门时还有一下约 150 ms 的卡顿（只有第一次）。页面 JS 侧已经预编译过，剩下的开销在浏览器 GPU 进程里
+- 别的房间的物体在开场按钮可用之后在后台编（约 4.5 秒）。玩家一出现开场按钮就点开始、马上飞到别的房间，头一两次可能还会卡 50–80 ms；第一次飞到落地镜跟前有一下约 0.13 秒（只有第一次，原因没查到）
 - 性能：本机显卡上 4 个访客满载约 7 ms/帧；纯 CPU 软件渲染下 Low 档约 8 fps（最差情况）。场景约 14 盏灯，每个像素都要算一遍，开销主要和分辨率成正比，所以 Low 档按 75% 分辨率渲染
 
 ## 部署前还要做的

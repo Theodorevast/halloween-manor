@@ -125,10 +125,10 @@
     },
     {
       "id": "vampire",
-      "status": "draft",
+      "status": "approved",
       "label": "维多利亚吸血鬼",
       "costume": "a restrained Victorian vampire: a tall stand-up black collar behind the ball and a short black cape lined with deep oxblood red draped down the back, ending above the legs; a white silk cravat with a small garnet pin just below the logo; no fangs, no blood, no bat wings",
-      "notes": "斗篷只搭在背后、不拖到腿上：绑骨后走路不会被扯着变形。"
+      "notes": "斗篷只搭在背后、不拖到腿上：绑骨后走路不会被扯着变形。 2026-10-28：用户同意做 3D（「Either is fine」），先做这一个试 P2 + 四视图 + Blender 精修。"
     },
     {
       "id": "witch",

@@ -120,7 +120,7 @@ function startMock() {
     };
     let output;
     if (type === 'image_to_image') output = { generated_image_url: dl(`${id}.png`, fakePng(2048, 2048)) };
-    else if (type === 'generate_multiview_image') output = Object.fromEntries(['front', 'left', 'back', 'right'].map((v) => [`${v}_view_url`, dl(`${id}-${v}.png`, fakePng(1024, 1024))]));
+    else if (type === 'generate_multiview_image') output = { generate_multiview_image: Object.fromEntries(['front', 'left', 'back', 'right'].map((v) => [`${v}_view_url`, dl(`${id}-${v}.png`, fakePng(1024, 1024))])) }; // 和真服务一样套一层（2026-10-28 实测）
     else if (type === 'animate_prerigcheck') output = { riggable: true, rig_type: 'biped' };
     else if (type === 'animate_retarget') output = { model_url: dl(`${id}.glb`, makeGlb({ anims: m.animNames, tris: 4000 })) };
     else output = { model_url: dl(`${id}.glb`, makeGlb({ tris: 4000 })), rendered_image_url: dl(`${id}-preview.webp`, fakePng(512, 512)) };
