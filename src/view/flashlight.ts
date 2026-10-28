@@ -17,7 +17,7 @@ import { CELL, GRID_H, GRID_W, blocksSight, buildTiles, type Tile } from '../con
 import { VISION } from '../config/visitors';
 import type { Quality } from '../engine/types';
 import { PALETTE } from './palette';
-import { TORCH_COUNT, torchDim, torches } from './torches';
+import { GHOST_SHADOW_LAYER, TORCH_COUNT, torchDim, torches } from './torches';
 
 /** 手电的全部手感参数（导出给 dev/characters.ts 调参用；正式代码不要在运行时改它） */
 export const TORCH = {
@@ -127,6 +127,8 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
   halo.shadow.bias = TORCH.shadow.bias;
   // 房子任务把「只投影的全高墙」放在 layer 1：让外圈的阴影相机也看见它们，光就不会从降低的墙上方漏到隔壁
   halo.shadow.camera.layers.enable(1);
+  // 鬼魂只进手电阴影图的那份影子（ghost.ts，被照出、现身时才不丢）
+  halo.shadow.camera.layers.enable(GHOST_SHADOW_LAYER);
   const target = new THREE.Object3D();
   halo.target = target;
   core.target = target;

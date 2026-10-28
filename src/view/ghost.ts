@@ -35,7 +35,7 @@ import type { SimEvent, WorldState } from '../sim/types';
 import type { Frost } from './frost';
 import { thermal, type LightFx } from './lightfx';
 import { ge, lt, makeSprite, rnd } from './particles/common';
-import { TORCH_COUNT, torches, type TorchSample } from './torches';
+import { GHOST_SHADOW_LAYER, TORCH_COUNT, torches, type TorchSample } from './torches';
 
 type F = THREE.Node<'float'>;
 type V3n = THREE.Node<'vec3'>;
@@ -169,6 +169,14 @@ export const GHOST = {
     neckBlend: 0.07,
     headPitch: [(8 * Math.PI) / 180, 0] as [number, number],
   },
+  /**
+   * 墙上的影子（调研 L2）：一份只进手电阴影图的网格（torches.ts 的 GHOST_SHADOW_LAYER：主画面、月光都看不见它），
+   * 形状跟着画面上那份（平时飘、拖，现身时不飘、头转）。uReveal 在 on 区间里由少到多地出现（从噪声最浓的地方开始），现身时整个都在；
+   * 边用和身体一样的侵蚀噪声蚀成一缕一缕，hemCut 以下的下摆不投影。
+   * 只挡手电外圈那盏（亮芯不投影），所以影子里还有一点亮芯的光，不是死黑。
+   * 不做半透明的灰影：shadowMap.transmitted 要开场就开、所有材质跟着变；逐像素抖动丢片元的办法试过，PCF 糊不匀，近看是一格一格的点
+   */
+  shadow: { on: [0.15, 0.3] as [number, number], hemCut: 0.12 },
 };
 
 /**
@@ -376,7 +384,37 @@ function makeGhostUniforms() {
     head: uniform(0),
     /** 「实」的那份颜色压暗到原来的几倍（GHOST.solid.dark；做成 uniform 是为了看样时能直接对比几档，不重编） */
     solidDark: uniform(GHOST.solid.dark),
+    /** 墙上的影子有多少（0 = 整个丢掉，1 = 全在；见 GHOST.shadow） */
+    shadow: uniform(0),
   };
+}
+
+/** 顶点：很慢的飘动（下摆飘得多）+ 走动时下摆往后拖（模型局部坐标）。画面上的身体、雾晕和影子共用 */
+function swayAndLean(u: GhostUniforms, P0: V3n, low2: F): V3n {
+  const S = GHOST.sway;
+  const swayN = mx_noise_vec3(vec3(P0.x.mul(S.freq), P0.y.mul(S.freq).sub(u.time.mul(S.speed)), P0.z.mul(S.freq)));
+  const sway = swayN.mul(low2.mul(S.low).add(S.base));
+  const lean = vec3(u.lean.x, 0, u.lean.y).mul(low2);
+  return sway.add(lean) as V3n;
+}
+
+/** 顶点：现身时头那一段绕脖子（身高 GHOST.solid.neck 处、过身体中轴）的 x 轴转 u.head，往下 neckBlend 内渐变。「实」的那份和影子共用 */
+function headPose(u: GhostUniforms, look: GhostLook, P0: V3n, h: F): V3n {
+  const S = GHOST.solid;
+  const pivot = look.bottom + (look.top - look.bottom) * S.neck;
+  const ang = u.head.mul(smoothstep(S.neck, S.neck + S.neckBlend, h));
+  const c = cos(ang), s = sin(ang);
+  const y0 = P0.y.sub(pivot);
+  return vec3(P0.x, y0.mul(c).sub(P0.z.mul(s)).add(pivot), y0.mul(s).add(P0.z.mul(c)));
+}
+
+/** 侵蚀用的噪声（模型局部坐标，往上飘；u.step = 1 时时间按 1 / stepRate 秒取整）：0..1 */
+function smokeNoise(u: GhostUniforms, P: V3n, layer: GhostLayer, stepped: boolean): F {
+  const rate = GHOST.manifest.stepRate;
+  const t = stepped ? mix(u.time, floor(u.time.mul(rate)).div(rate), u.step) : u.time;
+  const q = vec3(P.x.mul(layer.noise), P.y.mul(layer.noise * 0.8).sub(t.mul(layer.rise * layer.noise)), P.z.mul(layer.noise));
+  const n1 = mx_noise_float(q);
+  return (layer.octaves === 1 ? n1 : n1.mul(0.62).add(mx_noise_float(q.mul(2.3).add(5.3)).mul(0.38))).mul(0.5).add(0.5) as F;
 }
 export type GhostUniforms = ReturnType<typeof makeGhostUniforms>;
 
@@ -438,11 +476,7 @@ export function createGhostMaterial(
   const low2 = low.mul(low);
 
   // —— 顶点：很慢的飘动（下摆飘得多）+ 走动时下摆往后拖 + 这一层的外扩 ——
-  const S = GHOST.sway;
-  const swayN = mx_noise_vec3(vec3(P0.x.mul(S.freq), P0.y.mul(S.freq).sub(u.time.mul(S.speed)), P0.z.mul(S.freq)));
-  const sway = swayN.mul(low2.mul(S.low).add(S.base));
-  const lean = vec3(u.lean.x, 0, u.lean.y).mul(low2);
-  m.positionNode = P0.add(normalLocal.mul(layer.inflate)).add(sway).add(lean);
+  m.positionNode = P0.add(normalLocal.mul(layer.inflate)).add(swayAndLean(u, P0, low2));
 
   // —— 片元 ——
   // 被手电照着的程度（G1）：变浓、轮廓收紧、偏暖
@@ -452,10 +486,7 @@ export function createGhostMaterial(
   const facing = clamp(abs(dot(normalView, positionViewDirection)), 0, 1);
   const soft = smoothstep(mix(float(layer.soft[0]), float(Math.max(layer.soft[0], R.soft)), reveal), layer.soft[1], facing);
   // 往上飘的烟：模型局部坐标里取噪声，跟着鬼魂走、跟着它转
-  const P = positionLocal;
-  const q = vec3(P.x.mul(layer.noise), P.y.mul(layer.noise * 0.8).sub(u.time.mul(layer.rise * layer.noise)), P.z.mul(layer.noise));
-  const n1 = mx_noise_float(q);
-  const n = (layer.octaves === 1 ? n1 : n1.mul(0.62).add(mx_noise_float(q.mul(2.3).add(5.3)).mul(0.38))).mul(0.5).add(0.5);
+  const n = smokeNoise(u, positionLocal, layer, false);
   // 侵蚀阈值：越往下摆越高，轮廓附近再高一点（边缘先散成缕）
   const erode = mix(float(layer.erode[0]), float(layer.erode[1]), pow(low, 1.6)).add(float(1).sub(facing).mul(0.22));
   const wisp = smoothstep(erode.sub(0.1), erode.add(0.24), n);
@@ -489,21 +520,13 @@ export function createGhostSolidMaterial(u: GhostUniforms, look: GhostLook): THR
   const h = clamp(P0.y.sub(look.bottom).div(span), 0, 1);
   const low = float(1).sub(h);
 
-  // —— 顶点：头那一段绕脖子（身高 neck 处、过身体中轴）的 x 轴转，往下 neckBlend 内渐变 ——
-  const pivot = look.bottom + span * S.neck;
-  const ang = u.head.mul(smoothstep(S.neck, S.neck + S.neckBlend, h));
-  const c = cos(ang), s = sin(ang);
-  const y0 = P0.y.sub(pivot);
-  m.positionNode = vec3(P0.x, y0.mul(c).sub(P0.z.mul(s)).add(pivot), y0.mul(s).add(P0.z.mul(c)));
+  // —— 顶点：不飘、不拖；头那一段绕脖子转 ——
+  m.positionNode = headPose(u, look, P0, h);
 
   // —— 片元 ——
-  const rate = GHOST.manifest.stepRate;
-  const tq = mix(u.time, floor(u.time.mul(rate)).div(rate), u.step);
   const facing = clamp(abs(dot(normalView, positionViewDirection)), 0, 1);
   const soft = smoothstep(S.soft[0], S.soft[1], facing);
-  const P = positionLocal;
-  const q = vec3(P.x.mul(L.noise), P.y.mul(L.noise * 0.8).sub(tq.mul(L.rise * L.noise)), P.z.mul(L.noise));
-  const n = mx_noise_float(q).mul(0.62).add(mx_noise_float(q.mul(2.3).add(5.3)).mul(0.38)).mul(0.5).add(0.5);
+  const n = smokeNoise(u, positionLocal, L, true);
   const erode = mix(float(S.erode[0]), float(S.erode[1]), pow(low, 1.6)).add(float(1).sub(facing).mul(0.22));
   const wisp = smoothstep(erode.sub(0.1), erode.add(0.24), n);
   const hem = smoothstep(0, S.hemFade, h);
@@ -513,6 +536,27 @@ export function createGhostSolidMaterial(u: GhostUniforms, look: GhostLook): THR
   const c0 = GHOST.edge, c1 = GHOST.core, cw = R.warmColor;
   const base = mix(vec3(c0.r, c0.g, c0.b), vec3(c1.r, c1.g, c1.b), soft).mul(u.solidDark);
   m.colorNode = base.add(vec3(cw.r, cw.g, cw.b).mul(min(lit, 1).mul(S.lit)));
+  return m;
+}
+
+/**
+ * 墙上的影子（L2，参数见 GHOST.shadow）：只在阴影 pass 里用到它的 positionNode 和 maskShadowNode（网格放在 GHOST_SHADOW_LAYER，
+ * 主画面不画）。形状：平时的飘动、下摆拖，现身时换成头转的那个姿势（u.solid）；丢掉的：侵蚀噪声蚀掉的边、下摆、没被照着时整个
+ */
+export function createGhostShadowMaterial(u: GhostUniforms, look: GhostLook): THREE.MeshBasicNodeMaterial {
+  const B = GHOST.body, S = GHOST.solid, Sh = GHOST.shadow;
+  const m = new THREE.MeshBasicNodeMaterial({ colorWrite: false, depthWrite: false });
+  m.lights = false;
+  const span = look.top - look.bottom;
+  const P0 = positionLocal;
+  const h = clamp(P0.y.sub(look.bottom).div(span), 0, 1);
+  const low = float(1).sub(h);
+  m.positionNode = mix(P0.add(swayAndLean(u, P0, low.mul(low))), headPose(u, look, P0, h), u.solid);
+  const n = smokeNoise(u, positionLocal, B, true);
+  const lowK = pow(low, 1.6);
+  const erode = mix(mix(float(B.erode[0]), float(B.erode[1]), lowK), mix(float(S.erode[0]), float(S.erode[1]), lowK), u.solid);
+  // u.shadow = 0 时阈值 2（噪声最大 1）：整个丢掉；往 1 走时从噪声最浓的地方开始出现
+  m.maskShadowNode = n.greaterThan(mix(float(2), erode, u.shadow)).and(h.greaterThan(Sh.hemCut));
   return m;
 }
 
@@ -660,6 +704,15 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
   // 普通混合：画在冷雾（renderOrder − 0.05）之前，往下淌的雾落在它前面时盖得住
   solidMesh.renderOrder = GHOST.renderOrder - 0.1;
   figure.add(solidMesh);
+  // 墙上的影子（L2）：只进手电的阴影图（GHOST_SHADOW_LAYER），没被照着时着色器里整个丢掉。一直可见、不剔除：
+  // 开场第一帧每支手电都画一次阴影图（flashlight.ts 的 needsUpdate），它的阴影管线在那时就编好，第一次被照到时不卡
+  const shadowMesh = new THREE.Mesh(geometry, createGhostShadowMaterial(u, look));
+  shadowMesh.name = 'ghost-shadow';
+  shadowMesh.layers.set(GHOST_SHADOW_LAYER);
+  shadowMesh.castShadow = true;
+  shadowMesh.receiveShadow = false;
+  shadowMesh.frustumCulled = false;
+  figure.add(shadowMesh);
   root.add(figure);
 
   const mist = createMist(u.time);
@@ -906,8 +959,9 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       follow = thermal(follow, fx.lights ? fx.lights.level(g) : 1, dt);
       u.fade.value = lerp(GHOST.minAlpha, 1, near) * (solid ? 1 : breathe * lerp(1, follow, M.follow));
 
-      // 手电照出（houseRoot 的世界矩阵上面已经更新过）
+      // 手电照出（houseRoot 的世界矩阵上面已经更新过）；墙上的影子跟着被照出的程度出现，现身时整个都在
       writeTorches(dt);
+      u.shadow.value = solid ? 1 : smooth01(GHOST.shadow.on[0], GHOST.shadow.on[1], revealNow);
 
       // 冷雾：尾迹按速度连续出（现身停留时改成从下摆往下淌）；穿墙那一刻喷一团
       let dirty = false;
@@ -934,7 +988,7 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       holdRelease?.();
       core.houseRoot.remove(root);
       geometry.dispose();
-      for (const m of [body, ...hazes, solidMesh]) (m.material as THREE.Material).dispose();
+      for (const m of [body, ...hazes, solidMesh, shadowMesh]) (m.material as THREE.Material).dispose();
       mist.mat.dispose();
     },
   };
