@@ -18,7 +18,8 @@
 //   windup：环境声让路 —— bus.ambHush 在 0.5 秒里压低 12 dB（A1；吓跑静音用的 ambDuck 另算，两个乘在一起）；一个小二度的低持续音淡入（A2）：
 //     55 Hz 和 58.27 Hz 两个正弦（拍频 3.3 Hz），各带一点 Q 4 的带通噪声，再叠它们的二次、三次谐波（110 / 116.5、165 / 175 Hz，两对也都是小二度；
 //     小喇叭放不出 55 Hz，靠它们听得出有东西在嗡），过 tanh 轻微失真（多出一点互调，粗糙感）、低通 450 Hz；
-//     下面那个音在蓄力这 0.6 秒里往下滑 1.7 Hz（拍频变快：越来越近，音高不往上走）；0.5 秒淡入。
+//     下面那个音默认不滑（MANIFEST_SFX.drone.slide = 0）：用户的工具库写了「避免滑音」，设计里现身也只写了「一个小二度的低持续音淡入」，
+//     所以整个停留阶段两个音一直是小二度；要不要在蓄力里让它往下滑一点（拍频变快：越来越近，调研 A2）留给用户听过以后再定；0.5 秒淡入。
 //     灯每暗一下一声很轻的咔哒（lightClick，3D 放在现身的位置）：默认 0.2、0.4 秒各一下 —— 对着 lightfx 蓄力节奏表
 //     （"mmamam…"，每秒 10 个字母，a = 暗）里字母 a 的位置；画面那边的暗点改了，这两个数跟着改（MANIFEST_SFX.clicks）
 //   drop：低频冲击（sfx.ts 的 manifestHit，吓跑 braam 最低一层）+ 很近的一口冷气（voices.ts 的 coldBreath，3D 放在现身的位置）。
@@ -183,8 +184,13 @@ export const MANIFEST_SFX = {
   drone: {
     /** 两个正弦的频率（赫兹）：小二度，拍频 3.3 Hz */
     hz: [55, 58.27] as const,
-    /** 下面那个音在蓄力这段时间里往下滑多少赫兹（拍频变快：越来越近，音高不往上走）；0 = 不滑 */
-    slide: -1.7,
+    /**
+     * 下面那个音在蓄力这段时间里往下滑多少赫兹（拍频变快：越来越近，调研 A2 的菜单条款）；**默认 0 = 不滑**。
+     * 用户的工具库写了「避免滑音」，设计文档和简报里现身只写了「一个小二度的低持续音淡入」，没有下滑；滑了以后，停留阶段的音程就不再是小二度了
+     * （−1.7 Hz 时基音和两个谐波同比例下移 54 音分，保持阶段的音程是 154 音分）。参数留着，等用户听过以后再决定要不要试；
+     * 要试的话把它改成负数，tests/audio.test.ts 里「默认不滑音」那几条会跟着变红，提醒这是在改一条用户定过的规则
+     */
+    slide: 0,
     /**
      * 基音、二次谐波（八度）、三次谐波的相对音量。55 / 58.27 Hz 在笔记本小喇叭上放不出来，所以把一部分能量放到 110 / 116.5 和 165 / 175 Hz
      * （两对也都是小二度），小喇叭上也听得出有东西在嗡；基音压低一点，免得整体 RMS 全压在 55 Hz 一带
@@ -207,6 +213,26 @@ export const MANIFEST_SFX = {
   maxLife: MANIFEST.windup + MANIFEST.hold + 3,
 };
 
+/** 持续音的一根正弦：音量（相对）、蓄力开始时的频率 from、停留阶段（下滑走完以后）的频率 to；from = to 就是没有滑音 */
+export interface DroneTone {
+  amp: number;
+  from: number;
+  to: number;
+}
+
+/**
+ * 持续音每一根正弦的频率：lo = 下面那个音的基音、二次谐波、三次谐波，hi = 上面那个音的三个分音。
+ * 下面那个音的第 k 个分音在蓄力里滑 slide × k 赫兹（同比例，谐波跟着基音走），上面那个音不动。
+ * 声音（buildDrone）和测试都从这里取频率，所以测试量到的「停留阶段的音程」就是真正响出来的音程
+ */
+export function droneTones(D: typeof MANIFEST_SFX.drone = MANIFEST_SFX.drone): { lo: DroneTone[]; hi: DroneTone[] } {
+  const [lo, hi] = D.hz;
+  return {
+    lo: D.partials.map((amp, i) => ({ amp, from: lo * (i + 1), to: (lo + D.slide) * (i + 1) })),
+    hi: D.partials.map((amp, i) => ({ amp, from: hi * (i + 1), to: hi * (i + 1) })),
+  };
+}
+
 export interface ManifestSound {
   /** 蓄力开始：环境声让路、持续音淡入、灯的咔哒。at = 现身的位置（3D 或声像） */
   windup(t: number, at: Place): void;
@@ -228,18 +254,19 @@ export function createManifestSound(bus: Bus): ManifestSound {
     const s = new Snd(bus, { at: 0, wet: 0.2 });
     // 所有正弦的幅度加起来 ≤ 1：进失真之前不会被 WaveShaper 硬削
     const sum = s.gain(1 / (2 * D.partials.reduce((a, b) => a + b, 0)));
-    const tone = (hz: number, amp: number, slide: number) => {
-      const o = s.osc('sine', hz, t0, stop);
-      if (slide) {
-        o.frequency.setValueAtTime(hz, t0);
-        o.frequency.linearRampToValueAtTime(hz + slide, t0 + MANIFEST.windup);
+    // 频率从 droneTones 取；from ≠ to（slide 不为 0）时才在蓄力里排一段线性的频率渐变，默认没有
+    const tone = ({ amp, from, to }: DroneTone) => {
+      const o = s.osc('sine', from, t0, stop);
+      if (to !== from) {
+        o.frequency.setValueAtTime(from, t0);
+        o.frequency.linearRampToValueAtTime(to, t0 + MANIFEST.windup);
       }
       o.connect(s.gain(amp)).connect(sum);
     };
-    const [lo, hi] = D.hz;
-    D.partials.forEach((a, i) => {
-      tone(lo * (i + 1), a, D.slide * (i + 1));
-      tone(hi * (i + 1), a, 0);
+    const tones = droneTones(D);
+    tones.lo.forEach((lo, i) => {
+      tone(lo);
+      tone(tones.hi[i]);
     });
     // 各带一点带通噪声（窄，像低频的毛边）
     for (const f of D.hz) bandNoise(s, t0, stop, 'bandpass', f, 4).connect(s.gain(D.noise * D.partials[0])).connect(sum);

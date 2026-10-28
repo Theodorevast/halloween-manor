@@ -1,11 +1,14 @@
-// 声音的纯数值部分（WebAudio 节点在 node 里没有，合成本身靠 dev/audio.html 的离线渲染量；这里只守几个不该悄悄变掉的约定）
-import { describe, expect, it } from 'vitest';
+// 声音的纯数值部分（WebAudio 节点在 node 里没有，合成本身靠 dev/audio.html 的离线渲染量；这里只守几个不该悄悄变掉的约定），
+// 外加一组用 WebAudio 最小替身跑真的 Router 的测试：被手电照着的访客走了以后，压力声一定淡出
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CELL, FURNITURE } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
 import { FEAR, MANIFEST } from '../src/config/visitors';
 import { BREATH, breathPeriod, breathStrength, closeGain } from '../src/audio/breath';
-import { MANIFEST_SFX } from '../src/audio/ghost';
+import { createRouter, type MixBus } from '../src/audio/engine';
+import { MANIFEST_SFX, REVEAL, droneTones } from '../src/audio/ghost';
 import { BED, TRIGGER, pillowSpot } from '../src/audio/sfx';
+import type { NpcMode, NpcState, SimEvent, WorldState } from '../src/sim/types';
 
 const db = (x: number) => 20 * Math.log10(x);
 
@@ -104,5 +107,138 @@ describe('现身：声音的时间线', () => {
   it('持续音是小二度：两个频率差约 1 个半音', () => {
     const [lo, hi] = MANIFEST_SFX.drone.hz;
     expect(12 * Math.log2(hi / lo)).toBeCloseTo(1, 1);
+  });
+});
+
+describe('现身持续音：默认不滑音，停留阶段一直是小二度', () => {
+  /** 两根正弦之间的音程（音分） */
+  const cents = (hi: number, lo: number) => 1200 * Math.log2(hi / lo);
+
+  it('slide 默认是 0：每一根正弦的起头频率和停留阶段的频率一样，没有任何滑音', () => {
+    expect(MANIFEST_SFX.drone.slide).toBe(0);
+    const { lo, hi } = droneTones();
+    expect(lo.length).toBeGreaterThan(0);
+    for (const t of [...lo, ...hi]) expect(t.to).toBe(t.from);
+  });
+
+  it('停留阶段（下滑走完以后，也就是真正响着的那 1.5 秒 + 淡出）两个音的每个分音之间都是小二度：约 100 音分', () => {
+    const { lo, hi } = droneTones();
+    expect(lo).toHaveLength(MANIFEST_SFX.drone.partials.length);
+    lo.forEach((l, i) => {
+      expect(Math.abs(cents(hi[i].to, l.to) - 100)).toBeLessThan(1);
+      expect(Math.abs(cents(hi[i].from, l.from) - 100)).toBeLessThan(1);
+    });
+  });
+
+  it('对照：要是还滑 −1.7 Hz（原来的默认），停留阶段的音程会变成约 154 音分，不再是小二度', () => {
+    const { lo, hi } = droneTones({ ...MANIFEST_SFX.drone, slide: -1.7 });
+    lo.forEach((l, i) => expect(Math.abs(cents(hi[i].to, l.to) - 154)).toBeLessThan(1));
+  });
+});
+
+// ── 被照到的压力声：用 WebAudio 的最小替身跑真的 createRouter ──────────────────────────────
+
+/** 所有 AudioParam 上的 setTargetAtTime（压力声的淡入淡出就是它）：这一组测试里只有压力声会调它 */
+const fades: { target: number; at: number; tau: number }[] = [];
+class FakeParam {
+  constructor(public value = 0) {}
+  setValueAtTime() {
+    return this;
+  }
+  linearRampToValueAtTime() {
+    return this;
+  }
+  exponentialRampToValueAtTime() {
+    return this;
+  }
+  cancelScheduledValues() {
+    return this;
+  }
+  setTargetAtTime(target: number, at: number, tau: number) {
+    fades.push({ target, at, tau });
+    return this;
+  }
+}
+/** 只够 Snd / bandNoise 建图用：GainNode、StereoPannerNode、BiquadFilterNode、OscillatorNode、AudioBufferSourceNode 共用这一个 */
+class FakeNode {
+  gain: FakeParam;
+  frequency: FakeParam;
+  detune: FakeParam;
+  Q: FakeParam;
+  pan: FakeParam;
+  constructor(_ac?: unknown, o: { gain?: number; frequency?: number; detune?: number; Q?: number; pan?: number } = {}) {
+    this.gain = new FakeParam(o.gain ?? 1);
+    this.frequency = new FakeParam(o.frequency ?? 440);
+    this.detune = new FakeParam(o.detune ?? 0);
+    this.Q = new FakeParam(o.Q ?? 1);
+    this.pan = new FakeParam(o.pan ?? 0);
+  }
+  connect<T>(dest: T): T {
+    return dest;
+  }
+  disconnect() {}
+  start() {}
+  stop() {}
+}
+class FakePeriodicWave {}
+
+const npc = (id: number, mode: NpcMode = 'wander'): NpcState => ({
+  id, name: `N${id}`, personality: 'average', pos: { x: 8, z: 6 }, heading: 0, lookDir: 0, mode, modeTime: 0, fear: 0, nervous: false, speed: 0, screaming: 0, path: [],
+});
+const world = (...npcs: NpcState[]): WorldState => ({
+  time: 0, npcs, objects: [], scaredOff: 0, hitStop: 0, manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null }, avoid: [],
+});
+const reveal = (npc: number, on: boolean): SimEvent => ({ type: 'reveal', npc, on });
+/** 一个只够处理 reveal 事件的 Router：总线是假的，节点是替身 */
+const newRouter = () =>
+  createRouter({ ac: { sampleRate: 48000 }, sfx: {}, voice: {}, amb: {}, reverb: {}, noise: { duration: 4 }, pulse: {}, ambHush: new FakeNode(), space: { active: false } } as unknown as MixBus, () => 0);
+
+describe('被照到的压力声：照着鬼魂的访客走了，它不会一直响下去', () => {
+  beforeEach(() => {
+    fades.length = 0;
+    for (const name of ['GainNode', 'StereoPannerNode', 'BiquadFilterNode', 'OscillatorNode', 'AudioBufferSourceNode']) vi.stubGlobal(name, FakeNode);
+    vi.stubGlobal('PeriodicWave', FakePeriodicWave);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const IN = { target: 1, at: 1, tau: REVEAL.in / 3 };
+
+  it('手电照到鬼魂：压力声淡入（0.4 秒）；手电移开（off 事件）：淡出（0.8 秒）', () => {
+    const r = newRouter();
+    r.play([reveal(1, true)], world(npc(1)), 1);
+    expect(fades).toEqual([IN]);
+    r.play([reveal(1, false)], world(npc(1)), 2);
+    expect(fades).toEqual([IN, { target: 0, at: 2, tau: REVEAL.out / 3 }]);
+  });
+
+  it.each([
+    ['从 state.npcs 里消失了（走出前门、被删掉，不会再有 off 事件）', () => world()],
+    ['mode 变成 gone（下一步才从 npcs 里删）', () => world(npc(1, 'gone'))],
+    ['开始逃跑（逃跑中的人不理会鬼魂）', () => world(npc(1, 'fleeing'))],
+  ])('照着鬼魂的访客%s：下一次 sync 压力声淡出，之后不重复淡出', (_why, after) => {
+    const r = newRouter();
+    r.play([reveal(1, true)], world(npc(1)), 1);
+    r.sync(after(), 2);
+    expect(fades).toEqual([IN, { target: 0, at: 2, tau: REVEAL.out / 3 }]);
+    r.sync(after(), 3);
+    expect(fades).toHaveLength(2);
+  });
+
+  it('还在屋里、没逃跑的人不会被 sync 清掉：没有多余的淡出', () => {
+    const r = newRouter();
+    r.play([reveal(1, true)], world(npc(1)), 1);
+    r.sync(world(npc(1, 'startled'), npc(2)), 2);
+    expect(fades).toEqual([IN]);
+  });
+
+  it('两个人照着：走了一个还亮着，第二个也走了才淡出', () => {
+    const r = newRouter();
+    r.play([reveal(1, true)], world(npc(1), npc(2)), 1);
+    r.play([reveal(2, true)], world(npc(1), npc(2)), 1.2);
+    expect(fades).toEqual([IN]);
+    r.sync(world(npc(2)), 2);
+    expect(fades).toEqual([IN]);
+    r.sync(world(), 3);
+    expect(fades).toEqual([IN, { target: 0, at: 3, tau: REVEAL.out / 3 }]);
   });
 });

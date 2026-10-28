@@ -28,7 +28,9 @@
 //     紧张度也只由那个 startle 加（不重复加）。同一帧里他被吓跑了：只留 braam 和逃跑的尖叫（这口气会被 hit-stop 的静音吞掉）
 //   - 现身（2026-10-28，manifest 事件，配方在 ghost.ts 开头）：windup / drop / end 三个节拍转给 createManifestSound；drop 同一批里有人被吓跑时
 //     冲击让给吓跑的 braam，冷气挪到静音之后（现身的冲击不算 braamAt：否则现身后 0.8 秒内吓跑的人就没有 braam 了）
-//   - 被手电照到（reveal 事件）：lit 集合里有人就淡入压力声（ghost.ts 的 createRevealLayer），空了就淡出；离开的人 / 删掉的人由 sync 清掉（不靠 off 事件一定到）
+//   - 被手电照到（reveal 事件）：lit 集合里有人就淡入压力声（ghost.ts 的 createRevealLayer），空了就淡出。lit 不能只靠 on / off 事件：
+//     模拟那边走了的人（mode = gone，下一步就从 npcs 里删掉）不会再有 off，逃跑中的人又不理会鬼魂（canBeScared），所以 tick 每帧最先调 sync，
+//     把 lit 里「已经不在 state.npcs 里 / gone / fleeing」的人清掉，没人了压力声就淡出，不会一直响下去（tests/audio.test.ts 守着）
 //   - 察觉（notice 事件）：只有手电照到鬼魂（kind = ghost）时那个人倒吸一口很轻的气（调研 3.1），同一个人 NOTICE_GAP 秒内最多一次；其余种类没有声音
 //   - 机关（trap 事件）：armed 一声极轻的冰裂声（不定位，只有玩家听得见）；sprung 走物件本来的 trigger 声；expired 无声
 //   - 喘气、呜咽：不是事件，是恐惧值的函数，每帧由 breath.ts 排程（凑近才听得见，耳朵是鬼魂）
@@ -211,8 +213,8 @@ export function silence(bus: MixBus, t: number, hold: number) {
 export interface Router {
   play(batch: readonly SimEvent[], state: WorldState, t: number): void;
   /**
-   * 每帧：把事件攒不出来的状态对齐到模拟 —— 手电不再照着鬼魂的人（已经离开、被删掉）从 lit 里清掉，压力声跟着淡出。
-   * 离线测量里没有「每帧」，不用调
+   * 每帧：把 lit（手电照着鬼魂的人）对齐到模拟。不在 state.npcs 里的（走了、被删掉）、mode 是 gone 或 fleeing 的人一律清掉
+   * （他们不会再有 reveal off，或者根本不再理会鬼魂），清完没人了压力声就淡出。离线测量里没有「每帧」，不用调
    */
   sync(state: WorldState, t: number): void;
   /** 最近被吓的紧张度（环境层用；由调用方按 DREAD.tensionTau 衰减） */
@@ -263,7 +265,9 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
     sync(state, t) {
       let changed = false;
       for (const id of lit) {
-        if (state.npcs.some((n) => n.id === id && n.mode !== 'gone')) continue;
+        const n = state.npcs.find((x) => x.id === id);
+        // 还在屋里、没在逃跑的人才可能还照着鬼魂（sim/npc.ts 的 canBeScared：逃跑中和已离开的不算）
+        if (n && n.mode !== 'gone' && n.mode !== 'fleeing') continue;
         lit.delete(id);
         changed = true;
       }
@@ -557,9 +561,11 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
     },
   };
 
-  /** 每帧：紧张度衰减、按平均恐惧值推 dread（每 0.25 秒写一次参数）、安排环境层的嘎吱、对齐被照到的名单；3D 时挪声道、落脚步、排喘气、重算遮挡 */
+  /** 每帧：先对齐被照到的名单（sync）；紧张度衰减、按平均恐惧值推 dread（每 0.25 秒写一次参数）、安排环境层的嘎吱；3D 时挪声道、落脚步、排喘气、重算遮挡 */
   function tick(ctx: FrameCtx) {
     if (!ac || !amb || !router || !bus) return;
+    // 最先对一次「谁在照鬼魂」：下面任何一步抛了异常（guard 兜着），也不会让走了的人留在 lit 里把压力声一直开着
+    router.sync(ctx.state, ac.currentTime + LOOKAHEAD);
     router.tension *= Math.exp(-ctx.dt / DREAD.tensionTau);
     // 逃跑中的人不算：吓跑之后环境层跟着松下来，是一次「释放」
     let sum = 0;
@@ -578,7 +584,6 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
       amb.setDread(dread, now);
     }
     amb.update(now);
-    router.sync(ctx.state, now + LOOKAHEAD);
     const space = bus.space;
     if (!space.active) return;
     if (!presence) {
