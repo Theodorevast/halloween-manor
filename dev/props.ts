@@ -5,11 +5,14 @@
 //   ?focus=<物件 id>&size=1.2   镜头对准一个物件看细节（size = 半个画面高，米）
 //   ?house             用任务 3 的真房子（src/view/house.ts）代替示意轮廓（还没写好时自动退回轮廓）
 //   ?q=low             low 画质档
-// 按键：1–7 附身（harness 提供）；鼠标悬停 = setHover，点击 = 附身
+//   ?torch             一只手电（外圈 + 亮芯两盏聚光，参数同 flashlight.ts）从卧室门口照向床：看鼓包的明暗和影子
+//   ?torch=x,z,tx,tz   手电的位置和照向的点（房屋米坐标）
+// 按键：1–8 附身（harness 提供；床是 8）；鼠标悬停 = setHover，点击 = 附身
 // Playwright：window.__props = { ids(), targets(), hover(id), pause(), play(), advance(s), focus(id, size), drawCalls(), pick(x, y) }
 import * as THREE from 'three/webgpu';
 import { buildTiles, CELL, FURNITURE, GRID_H, GRID_W, HOUSE_D, HOUSE_W, idx, PROPS, propCenter, Tile, WALL_CUT_H } from '../src/config/house';
 import type { FrameCtx, RenderCore, CameraRig, Module } from '../src/engine/types';
+import { VISION } from '../src/config/visitors';
 import { PALETTE } from '../src/view/palette';
 import { createPropsView } from '../src/view/props';
 import { createHarness } from './harness';
@@ -83,16 +86,44 @@ h.add({
   },
 });
 
+// ── 手电：和 flashlight.ts 同一套参数（外圈宽而软、投影；亮芯窄、不投影），从卧室门口往床上照，看鼓包的明暗和影子 ──
+if (qs.has('torch')) {
+  const [x, z, tx, tz] = (qs.get('torch') || '2.6,7.9,1.4,9.9').split(',').map(Number);
+  const target = new THREE.Object3D();
+  target.position.set(tx, 0.45, tz);
+  const halo = new THREE.SpotLight(PALETTE.torchHalo, 40, VISION.range * 1.3, VISION.halfAngle * 1.1, 1, 1.1);
+  const core2 = new THREE.SpotLight(PALETTE.torchCore, 30, VISION.range * 1.3, VISION.halfAngle * 0.42, 0.8, 1.1);
+  halo.castShadow = true;
+  halo.shadow.mapSize.set(1024, 1024);
+  halo.shadow.camera.near = 0.1;
+  halo.shadow.bias = -0.0008;
+  halo.shadow.normalBias = 0.03;
+  for (const l of [halo, core2]) {
+    l.position.set(x, 0.8, z);
+    l.target = target;
+    core.houseRoot.add(l);
+  }
+  core.houseRoot.add(target);
+}
+
 // ── 物件（带一层时间控制：可以暂停、精确快进，截图拿到确定的中间态） ─────────────
+// 粒子（床塌下去的灰）在这里看不了：粒子材质要画进后处理的场景 pass（MRT），harness 直接画到画布上，会报着色器错。
+// 看灰用真页面：http://127.0.0.1:端口/?debug，__haunt.trigger('bed') + __haunt.step(ms)
 const props = createPropsView(core);
 if (qs.get('q') === 'low') props.setQuality?.('low');
 let timeScale = 1;
+/** 受 timeScale 控制的时间轴：暂停时不走，advance 才走 */
+let simTime = 0;
 let lastCtx: FrameCtx | null = null;
+const stepSim = (ctx: FrameCtx, dt: number) => {
+  simTime += dt;
+  props.update?.({ ...ctx, dt, time: simTime });
+};
 h.add({
   onEvent: (e, s) => props.onEvent?.(e, s),
   update(ctx: FrameCtx) {
     lastCtx = ctx;
-    props.update?.({ ...ctx, dt: ctx.dt * timeScale });
+    stepSim(ctx, ctx.dt * timeScale);
   },
 });
 
@@ -155,7 +186,7 @@ const advance = (s: number) => {
   const ctx = lastCtx;
   if (!ctx) return;
   const n = Math.round(s * 120);
-  for (let i = 0; i < n; i++) props.update?.({ ...ctx, dt: 1 / 120, time: ctx.time + i / 120 });
+  for (let i = 0; i < n; i++) stepSim(ctx, 1 / 120);
 };
 (window as unknown as { __props: unknown }).__props = {
   view: props,

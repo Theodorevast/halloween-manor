@@ -39,6 +39,11 @@ const GLOW = {
   hoverScale: 1.04,
 };
 
+/**
+ * 悬停时不整体放大的物件：床的被子盖在不动的床架上，放大 4% 会让被子比床架多漂出几厘米、边缘悬空
+ */
+const NO_HOVER_SCALE: ReadonlySet<ScareType> = new Set(['bed']);
+
 const builders: Record<ScareType, (i: number) => PropRig> = {
   portrait: () => createPortrait(),
   lamp: (i) => createLamp(i + 1),
@@ -161,7 +166,7 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
         e.glow.thickness.value = GLOW.thickness + (GLOW.hoverThickness - GLOW.thickness) * e.hover * e.ready + 0.018 * e.flash;
         const show = amount > 0.004;
         for (const s of e.shells) s.visible = show;
-        e.root.scale.setScalar(1 + (GLOW.hoverScale - 1) * e.hover);
+        if (!NO_HOVER_SCALE.has(e.p.type)) e.root.scale.setScalar(1 + (GLOW.hoverScale - 1) * e.hover);
       }
     },
     setQuality(q: Quality) {

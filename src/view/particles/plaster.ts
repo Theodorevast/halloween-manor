@@ -7,6 +7,8 @@
 // 灰本身不发光：颜色 = 灰的底色 × 这一点受到的手电 / 台灯光 + 一点月光底色。屋里黑，所以只有被手电照着的那团看得见，
 // 这一下正好是访客在看着画的时候（肖像是「被看见才生效」的惊吓）。
 // 贴地的面片做软粒子（common.ts，正交、透视相机都对），不出现插进地板 / 墙里的直线。
+// 床塌下去那一下也用它（2026-10-28，props/bed.ts）：burst 的最后一个参数换一套形状——落点小一点、灰少一点、喷得慢一点、没有碎屑，
+// 中心抬到被子面上。不给参数就是肖像砸地那一套，画面和以前完全一样。
 import * as THREE from 'three/webgpu';
 import {
   exp, float, instanceIndex, length, max, min, mix, mx_noise_float, mx_noise_vec3, pow, smoothstep, sqrt, uniform, uv,
@@ -92,12 +94,27 @@ export const PLASTER = {
   reducedMotion: 0.6,
 };
 
+/** 一次扬尘的形状；每一项不给就是肖像砸地的那一套（PLASTER.slab、PLASTER.dust、碎屑照常） */
+export interface BurstShape {
+  /** 灰从哪一圈起来：落点（矩形）的半宽、半长（米） */
+  halfW?: number;
+  halfL?: number;
+  /** 从四边喷出去的比例（其余从落点中间震起来） */
+  edgeShare?: number;
+  /** 灰的颗数、大小、喷射快慢，各乘这个比例 */
+  count?: number;
+  size?: number;
+  speed?: number;
+  /** false = 不崩碎屑 */
+  chips?: boolean;
+}
+
 export interface Plaster {
   object: THREE.Sprite;
   /** 最长的一颗能活多久（秒）：过了就把整个物体藏起来 */
   readonly maxLife: number;
-  /** 在 t0（ctx.time 的时间轴）砸地。center：画框中心（房屋坐标）；axisW / axisL：画框宽、长方向（长方向从转轴指向画框上沿） */
-  burst(t0: number, center: THREE.Vector3, axisW: THREE.Vector3, axisL: THREE.Vector3): void;
+  /** 在 t0（ctx.time 的时间轴）砸地。center：画框中心（房屋坐标）；axisW / axisL：画框宽、长方向（长方向从转轴指向画框上沿）。shape：换一套形状（床用） */
+  burst(t0: number, center: THREE.Vector3, axisW: THREE.Vector3, axisL: THREE.Vector3, shape?: BurstShape): void;
   setQuality(q: 'high' | 'low'): void;
   setReduced(on: boolean): void;
   dispose(): void;
@@ -115,7 +132,12 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   const uChipN = uniform(NC);
   /** prefers-reduced-motion 时 < 1：喷得慢一点、扰动小一点 */
   const calm = uniform(1);
-  const hw = PLASTER.slab.halfW, hl = (PLASTER.slab.z1 - PLASTER.slab.z0) / 2;
+  const hw0 = PLASTER.slab.halfW, hl0 = (PLASTER.slab.z1 - PLASTER.slab.z0) / 2;
+  /** 落点的半宽、半长；从四边喷出的比例；大小比例（每次 burst 写，默认就是肖像那一套） */
+  const uHw = uniform(hw0);
+  const uHl = uniform(hl0);
+  const uEdge = uniform(D.edgeShare);
+  const uSize = uniform(1);
 
   const r = (k: number) => rnd(k, uSeed);
   const lerp = (a: number, b: number, t: F) => float(a).add(t.mul(b - a));
@@ -131,10 +153,10 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   const u1 = r(1), u2 = r(2);
   const inFar = lt(u1, D.far), inR0 = lt(u1, D.far + D.sides), inL0 = lt(u1, D.far + D.sides * 2);
   const fFar = inFar, fR = inR0.sub(inFar), fL = inL0.sub(inR0), fNear = float(1).sub(inL0);
-  const along = mix(-hl, hl, sqrt(u2)); // 长边上偏向上沿（上沿最后着地，压出来的气最多）
-  const across = mix(-hw, hw, u2);
-  const ex = across.mul(fFar.add(fNear)).add(fR.sub(fL).mul(hw));
-  const ez = along.mul(fR.add(fL)).add(fFar.sub(fNear).mul(hl));
+  const along = mix(uHl.negate(), uHl, sqrt(u2)); // 长边上偏向上沿（上沿最后着地，压出来的气最多）
+  const across = mix(uHw.negate(), uHw, u2);
+  const ex = across.mul(fFar.add(fNear)).add(fR.sub(fL).mul(uHw));
+  const ez = along.mul(fR.add(fL)).add(fFar.sub(fNear).mul(uHl));
   const nx = fR.sub(fL), nz = fFar.sub(fNear);
   // 切向散开
   const sp = r(3).sub(0.5).mul(D.spread * 2);
@@ -143,14 +165,14 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   const dirX = dxRaw.div(dl), dirZ = dzRaw.div(dl);
 
   // —— 灰 ——
-  const fe = lt(r(4), D.edgeShare); // 1 = 从四边喷出，0 = 从画框背上震起
+  const fe = lt(r(4), uEdge); // 1 = 从四边喷出，0 = 从画框背上震起
   const delay = r(5).mul(D.stagger).mul(dust);
   const age = time.sub(uT0).sub(delay);
   const ageC = max(age, 0);
   const vScale = calm;
   const tau = rng(D.tau, 7);
   const h = mix(r(6).mul(0.05), rng(D.speed, 6).mul(vScale).mul(tau).mul(ease(ageC, tau)), fe);
-  const topX = mix(-hw, hw, r(8)), topZ = mix(-hl, hl, r(9));
+  const topX = mix(uHw.negate(), uHw, r(8)), topZ = mix(uHl.negate(), uHl, r(9));
   const lx0 = mix(topX, ex, fe), lz0 = mix(topZ, ez, fe);
   const y0 = mix(float(0.06), lerp(0.015, 0.05, r(10)), fe);
   const vy = mix(rng(D.topUp, 11), rng(D.up, 11), fe).mul(vScale);
@@ -176,7 +198,7 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   const hop1 = cvy.mul(ta).sub(ta.mul(ta).mul(g / 2)), hop2 = vy2.mul(tb).sub(tb.mul(tb).mul(g / 2));
   const chipY = max(hop1.mul(lt(ageC, t1)).add(hop2.mul(ge(ageC, t1))), 0);
   const chipSize = rng(C.size, 17);
-  const cEdgeZ = mix(along.mul(0.5).add(hl * 0.5), float(hl), fFar);
+  const cEdgeZ = mix(along.mul(0.5).add(uHl.mul(0.5)), uHl, fFar);
   const chipLocal = vec3(ex.add(dirX.mul(chipH)), chipY.add(chipSize.mul(0.5)), cEdgeZ.add(dirZ.mul(chipH)));
 
   // —— 画框局部 → 房屋坐标 ——
@@ -184,7 +206,7 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   const p: V3 = uCenter.add(uAxisW.mul(local.x)).add(vec3(0, local.y, 0)).add(uAxisL.mul(local.z)).add(turb.mul(dust));
 
   // —— 大小、不透明度、寿命 ——
-  const s0 = rng(D.size0, 18), s1 = rng(D.size1, 19);
+  const s0 = rng(D.size0, 18).mul(uSize), s1 = rng(D.size1, 19).mul(uSize);
   const dustSize = s0.add(s1.sub(s0).mul(ease(ageC, D.growTau)));
   const lifeD = rng(D.life, 20), lifeC = rng(C.life, 20);
   const life = mix(lifeD, lifeC, chip);
@@ -232,16 +254,24 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   let seed = 0;
   let quality: 'high' | 'low' = 'high';
   let reduced = false;
+  /** 这一次扬尘的形状（颗数、喷射快慢的比例；碎屑要不要），burst 时写 */
+  let burstShape: Required<Pick<BurstShape, 'count' | 'speed' | 'chips'>> = { count: 1, speed: 1, chips: true };
   const applyCounts = () => {
-    uDustN.value = D.count[quality];
-    uChipN.value = Math.max(1, Math.round(C.count[quality] * (reduced ? PLASTER.reducedMotion : 1)));
-    calm.value = reduced ? PLASTER.reducedMotion : 1;
+    uDustN.value = Math.max(1, Math.round(D.count[quality] * burstShape.count));
+    uChipN.value = burstShape.chips ? Math.max(1, Math.round(C.count[quality] * (reduced ? PLASTER.reducedMotion : 1))) : 0;
+    calm.value = (reduced ? PLASTER.reducedMotion : 1) * burstShape.speed;
   };
 
   return {
     object,
     maxLife,
-    burst(t0, center, axisW, axisL) {
+    burst(t0, center, axisW, axisL, opts = {}) {
+      uHw.value = opts.halfW ?? hw0;
+      uHl.value = opts.halfL ?? hl0;
+      uEdge.value = opts.edgeShare ?? D.edgeShare;
+      uSize.value = opts.size ?? 1;
+      burstShape = { count: opts.count ?? 1, speed: opts.speed ?? 1, chips: opts.chips ?? true };
+      applyCounts();
       uT0.value = t0;
       seed = (seed + 7919) % 1_000_000; // 每次换一套随机数：每次砸下去的样子都不一样
       uSeed.value = seed;
