@@ -21,11 +21,15 @@
 //   「实」的那份标了 deferCompile，开场按钮可用之后由 main.ts 预编译
 // ?noghostfx：不画鬼魂（量开销的对照，和 house.ts 一致）
 import * as THREE from 'three/webgpu';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   abs, clamp, cos, dot, exp, float, floor, instancedDynamicBufferAttribute, length, max, min, mix, modelViewMatrix,
   mx_noise_float, mx_noise_vec3, normalLocal, normalView, normalWorld, positionLocal, positionViewDirection, positionWorld,
   pow, sin, smoothstep, uniform, uv, varying, vec2, vec3, vec4,
 } from 'three/tsl';
+import { GHOST_MODEL } from '../config/ghost';
 import { CELL, Tile, buildTiles, cellOf, idx, inGrid } from '../config/house';
 import { MANIFEST } from '../config/visitors';
 import { ghostSees } from '../engine/ghostRig';
@@ -639,6 +643,90 @@ function createMist(time: THREE.UniformNode<'float', number>) {
   return { object, mat, emit, flush, alive: (t: number) => t < lastBirth + 3 };
 }
 
+// ───────────────────────── 换模型（config/ghost.ts 的 GHOST_MODEL） ─────────────────────────
+
+/**
+ * 加载好的鬼魂模型，交给 createGhostView（fx.model）换掉程序化的外形。坐标都已经是鬼魂的局部坐标
+ * （y 向上、正面 +z、米，头顶 GHOST_BODY.top、下摆 GHOST_BODY.bottom），所以材质、GhostLook 和程序化的那个一样
+ */
+export interface GhostModel {
+  /** 不动的网格合成的一个几何体（只留 position、normal）；没有就是 null */
+  geometry: THREE.BufferGeometry | null;
+  /** 带骨骼的（GHOST_MODEL.animated）：摆好的模型（骨骼在里面，挂到鬼魂身上跟着走）、要换材质的蒙皮网格、现身时播的片段 */
+  root: THREE.Object3D | null;
+  skinned: THREE.SkinnedMesh[];
+  clip: THREE.AnimationClip | null;
+  look: GhostLook;
+}
+
+/**
+ * 按 GHOST_MODEL 加载鬼魂模型；url 为 null 时直接返回 null（用程序化的）。main.ts 在 createGhostView 之前 await 它。
+ * 按包围盒缩放到 GHOST_BODY 的高度、x / z 居中（有片段时先摆成片段的第一帧再量：绑骨的 T 字姿势两臂会把包围盒撑宽）。
+ * 原来的网格藏起来，只留骨骼；不动的网格烘进鬼魂的局部坐标合成一个，蒙皮网格交给 createGhostView 重新绑在鬼魂身上
+ */
+export async function loadGhostModel(spec: typeof GHOST_MODEL = GHOST_MODEL): Promise<GhostModel | null> {
+  if (!spec.url) return null;
+  const loader = new GLTFLoader();
+  loader.setMeshoptDecoder(MeshoptDecoder);
+  const gltf = await loader.loadAsync(spec.url);
+  const scene = gltf.scene;
+  const clip = spec.animated && spec.clip ? THREE.AnimationClip.findByName(gltf.animations, spec.clip) : null;
+  if (spec.animated && spec.clip && !clip) {
+    console.warn(`[ghost] GHOST_MODEL.clip = '${spec.clip}'，GLB 里没有这个片段。现有：${gltf.animations.map((c) => c.name).join(', ') || '（无）'}`);
+  }
+  const poser = clip ? new THREE.AnimationMixer(scene) : null;
+  if (poser && clip) {
+    poser.clipAction(clip).play();
+    poser.update(0);
+  }
+  scene.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(scene, poser !== null);
+  poser?.stopAllAction();
+  if (poser) poser.uncacheRoot(scene);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const k = size.y > 1e-6 ? (GHOST_BODY.top - GHOST_BODY.bottom) / size.y : 1;
+  const root = new THREE.Group();
+  root.name = 'ghost-model';
+  root.add(scene);
+  root.scale.setScalar(k);
+  root.position.set(-center.x * k, GHOST_BODY.bottom - box.min.y * k, -center.z * k);
+  root.updateMatrixWorld(true);
+
+  const statics: THREE.Mesh[] = [];
+  const skinned: THREE.SkinnedMesh[] = [];
+  scene.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    if ((m as THREE.SkinnedMesh).isSkinnedMesh && spec.animated) skinned.push(m as THREE.SkinnedMesh);
+    else statics.push(m);
+    m.visible = false;
+    m.castShadow = false;
+  });
+  // 不动的网格：位置、法线烘进鬼魂的局部坐标（root 就是鬼魂的局部坐标系，挂在 figure 下面时 root 自己的变换已经算进来了）
+  let geometry: THREE.BufferGeometry | null = null;
+  if (statics.length) {
+    const parts = statics.map((m) => {
+      const src = m.geometry;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', src.getAttribute('position').clone());
+      if (src.getAttribute('normal')) g.setAttribute('normal', src.getAttribute('normal').clone());
+      g.setIndex(src.index ? src.index.clone() : Array.from({ length: src.getAttribute('position').count }, (_, i) => i));
+      g.applyMatrix4(m.matrixWorld);
+      if (!g.getAttribute('normal')) g.computeVertexNormals();
+      return g;
+    });
+    geometry = parts.length === 1 ? parts[0] : mergeGeometries(parts, false);
+    if (parts.length > 1) for (const g of parts) g.dispose();
+    geometry?.computeBoundingSphere();
+  }
+  console.log(`[ghost] ${spec.url}：缩放 ${k.toPrecision(3)}，不动的网格 ${statics.length} 个，蒙皮网格 ${skinned.length} 个${clip ? `，片段 ${clip.name}` : ''}`);
+  return {
+    geometry, root: skinned.length ? root : null, skinned, clip: skinned.length ? clip : null,
+    look: { bottom: GHOST_BODY.bottom, top: GHOST_BODY.top },
+  };
+}
+
 // ───────────────────────── 组装 ─────────────────────────
 
 const isWallish = (t: number) => t === Tile.Wall || t === Tile.Window;
@@ -659,6 +747,8 @@ const REVEAL_PROBES = [0.25, -0.15, -0.65];
 export interface GhostFx {
   lights?: LightFx | null;
   frost?: Frost | null;
+  /** 换掉程序化外形的模型（loadGhostModel 的结果；null = 用程序化的） */
+  model?: GhostModel | null;
 }
 
 export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {}): Module {
@@ -672,48 +762,83 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
   core.houseRoot.add(root);
 
   const u = makeGhostUniforms();
-  const look: GhostLook = { bottom: GHOST_BODY.bottom, top: GHOST_BODY.top };
-  const geometry = buildGhostGeometry();
+  // 外形：没换模型就是程序化的人形；换了模型（loadGhostModel）就是它合成的那个不动的几何体，加上每个蒙皮网格。
+  // 坐标都是鬼魂的局部坐标，GhostLook 一样，材质大家共用
+  const model = fx.model ?? null;
+  const look: GhostLook = model?.look ?? { bottom: GHOST_BODY.bottom, top: GHOST_BODY.top };
+  const ownGeometry = model ? null : buildGhostGeometry();
+  const parts: { geometry: THREE.BufferGeometry; skin: THREE.SkinnedMesh | null }[] = [
+    ...(ownGeometry ? [{ geometry: ownGeometry, skin: null }] : []),
+    ...(model?.geometry ? [{ geometry: model.geometry, skin: null }] : []),
+    ...(model?.skinned ?? []).map((s) => ({ geometry: s.geometry, skin: s })),
+  ];
   // 身体双面（背面叠在正面后面：中间厚、边上薄）；雾晕只画正面
-  const body = new THREE.Mesh(geometry, createGhostMaterial(u, look, GHOST.body, THREE.DoubleSide));
-  body.name = 'ghost-body';
-  const hazes = GHOST.haze.map((l, k) => {
-    const m = new THREE.Mesh(geometry, createGhostMaterial(u, look, l, THREE.FrontSide, 'haze'));
-    m.name = `ghost-haze-${k}`;
-    return m;
-  });
+  const bodyMat = createGhostMaterial(u, look, GHOST.body, THREE.DoubleSide);
+  const hazeMats = GHOST.haze.map((l) => createGhostMaterial(u, look, l, THREE.FrontSide, 'haze'));
+  const solidMat = createGhostSolidMaterial(u, look);
+  const shadowMat = createGhostShadowMaterial(u, look);
   const figure = new THREE.Group();
   figure.name = 'ghost-figure';
-  // 现身停留时换上的「实」的那份（G2）：同一个网格。平时藏着；不进开场那次阻塞的预编译，
-  // main.ts 在开场按钮可用之后再编（那几帧里 uSolid = 0，完全透明），第一次现身时不卡
-  const solidMesh = new THREE.Mesh(geometry, createGhostSolidMaterial(u, look));
-  solidMesh.name = 'ghost-solid';
-  solidMesh.visible = false;
-  solidMesh.userData.deferCompile = true;
-  for (const [k, m] of [body, ...hazes].entries()) {
+  // 带骨骼的模型：骨骼挂在鬼魂身上跟着走（原来的网格已经藏起来了）
+  if (model?.root) figure.add(model.root);
+  /**
+   * 一份网格。蒙皮网格重新绑在原来的骨骼上、直接挂在 figure 下面（attached 模式下位置只看骨骼）：
+   * 着色器里的局部坐标就是鬼魂的局部坐标，和程序化的一样
+   */
+  const make = (p: (typeof parts)[number], mat: THREE.Material, name: string) => {
+    let m: THREE.Mesh;
+    if (p.skin) {
+      const s = new THREE.SkinnedMesh(p.geometry, mat);
+      s.bind(p.skin.skeleton, p.skin.bindMatrix);
+      m = s;
+    } else m = new THREE.Mesh(p.geometry, mat);
+    m.name = name;
     m.castShadow = false;
     m.receiveShadow = false;
     // 顶点着色器会飘、会拖，包围球按静止的算不准；只有一个人影，不剔除也不费事
     m.frustumCulled = false;
-    m.renderOrder = GHOST.renderOrder + k * 0.01;
     figure.add(m);
-  }
-  solidMesh.castShadow = false;
-  solidMesh.receiveShadow = false;
-  solidMesh.frustumCulled = false;
-  // 普通混合：画在冷雾（renderOrder − 0.05）之前，往下淌的雾落在它前面时盖得住
-  solidMesh.renderOrder = GHOST.renderOrder - 0.1;
-  figure.add(solidMesh);
-  // 墙上的影子（L2）：只进手电的阴影图（GHOST_SHADOW_LAYER），没被照着时着色器里整个丢掉。一直可见、不剔除：
-  // 开场第一帧每支手电都画一次阴影图（flashlight.ts 的 needsUpdate），它的阴影管线在那时就编好，第一次被照到时不卡
-  const shadowMesh = new THREE.Mesh(geometry, createGhostShadowMaterial(u, look));
-  shadowMesh.name = 'ghost-shadow';
-  shadowMesh.layers.set(GHOST_SHADOW_LAYER);
-  shadowMesh.castShadow = true;
-  shadowMesh.receiveShadow = false;
-  shadowMesh.frustumCulled = false;
-  figure.add(shadowMesh);
+    return m;
+  };
+  const bodies: THREE.Mesh[] = [];
+  const hazes: THREE.Mesh[] = [];
+  const solids: THREE.Mesh[] = [];
+  const shadows: THREE.Mesh[] = [];
+  parts.forEach((p, i) => {
+    const sfx = parts.length > 1 ? `-${i}` : '';
+    const body = make(p, bodyMat, `ghost-body${sfx}`);
+    body.renderOrder = GHOST.renderOrder;
+    bodies.push(body);
+    hazeMats.forEach((mat, k) => {
+      const h = make(p, mat, `ghost-haze-${k}${sfx}`);
+      h.renderOrder = GHOST.renderOrder + (k + 1) * 0.01;
+      hazes.push(h);
+    });
+    // 现身停留时换上的「实」的那份（G2）：同一个网格。平时藏着；不进开场那次阻塞的预编译，
+    // main.ts 在开场按钮可用之后再编（那几帧里 uSolid = 0，完全透明），第一次现身时不卡。
+    // 普通混合：画在冷雾（renderOrder − 0.05）之前，往下淌的雾落在它前面时盖得住
+    const sm = make(p, solidMat, `ghost-solid${sfx}`);
+    sm.visible = false;
+    sm.userData.deferCompile = true;
+    sm.renderOrder = GHOST.renderOrder - 0.1;
+    solids.push(sm);
+    // 墙上的影子（L2）：只进手电的阴影图（GHOST_SHADOW_LAYER），没被照着时着色器里整个丢掉。一直可见、不剔除：
+    // 开场第一帧每支手电都画一次阴影图（flashlight.ts 的 needsUpdate），它的阴影管线在那时就编好，第一次被照到时不卡
+    const sh = make(p, shadowMat, `ghost-shadow${sfx}`);
+    sh.layers.set(GHOST_SHADOW_LAYER);
+    sh.castShadow = true;
+    shadows.push(sh);
+  });
   root.add(figure);
+  // 带动画的模型：现身停留时播 clip（时间按 1 / stepRate 秒取整），平时停在第一帧
+  const mixer = model?.root && model.clip ? new THREE.AnimationMixer(model.root) : null;
+  const action = mixer && model?.clip ? mixer.clipAction(model.clip) : null;
+  if (action) {
+    action.setLoop(THREE.LoopOnce, 1);
+    action.clampWhenFinished = true;
+    action.play();
+    mixer?.setTime(0);
+  }
 
   const mist = createMist(u.time);
   root.add(mist.object);
@@ -761,9 +886,9 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
     if (on) solidSince = t;
     u.solid.value = on ? 1 : 0;
     u.step.value = on ? 1 : 0;
-    body.visible = !on;
+    for (const m of bodies) m.visible = !on;
     for (const m of hazes) m.visible = !on;
-    solidMesh.visible = on;
+    for (const m of solids) m.visible = on;
     stepTick = -1;
   };
 
@@ -930,7 +1055,9 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       const held = holding && man ? man.t : t - solidSince;
       const heldQ = Math.floor(held * M.stepRate) / M.stepRate;
       const HP = GHOST.solid.headPitch;
-      u.head.value = solid ? lerp(HP[0], HP[1], smooth01(0, MANIFEST.hold, heldQ)) : 0;
+      // 带动画的模型：抬头交给它自己的片段（同样按取整后的时间播），着色器里不再转头
+      u.head.value = solid && !action ? lerp(HP[0], HP[1], smooth01(0, MANIFEST.hold, heldQ)) : 0;
+      if (mixer) mixer.setTime(solid ? heldQ : 0);
       if (dt > 0) {
         tmp.set(g.x - last.x, g.y - last.y, g.z - last.z).divideScalar(dt);
         if (tmp.lengthSq() > 64) tmp.set(0, 0, 0); // 瞬移（调试放置、换场）不算
@@ -987,8 +1114,9 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       revealNow = 0;
       holdRelease?.();
       core.houseRoot.remove(root);
-      geometry.dispose();
-      for (const m of [body, ...hazes, solidMesh, shadowMesh]) (m.material as THREE.Material).dispose();
+      for (const p of parts) p.geometry.dispose();
+      for (const m of [bodyMat, ...hazeMats, solidMat, shadowMat]) m.dispose();
+      mixer?.stopAllAction();
       mist.mat.dispose();
     },
   };
