@@ -11,7 +11,7 @@
 //                    ?noreveal 照样打光、但不让鬼魂知道自己被照着（登记表强度记 0），对比用
 //   ?manifest        每 4 秒自动现身一次：假的 WorldState.manifest（蓄力 → 停留 → 冷却）和 manifest 事件直接喂给各模块，
 //                    带灯闪（lightfx）和地上的霜（frost）。模拟那边还没做现身，正式游戏里由 main.ts 接线。
-//                    加 ?debug 后 __ghostView.uniforms.solidDark.value = 0.03 可以换一档「实」的那份的暗度（对比用）
+//                    &solid=0.1 换一档「实」的那份没被照着时的暗度（GHOST.solid.dark，默认 0.03；0.1 是简报原定的，对比用）
 //   ?model=url       换成这个 GLB 当鬼魂（不改 config/ghost.ts 试新模型）；&animated 有骨骼动画，&clip=名字 现身停留时播的片段
 //   ?fx              保留后处理里的 AO 和景深（它们按正交相机写的，透视下会出错，默认关）
 //   ?noghostfx / ?noceiling   和正式页面一样：关掉溶解 + 鬼魂 / 不要天花板（量开销的对照）
@@ -33,7 +33,7 @@ import type { FrameCtx, GhostRig, GhostState, Module, Quality } from '../src/eng
 import type { ManifestPhase, SimEvent, WorldState } from '../src/sim/types';
 import { createFlashlight } from '../src/view/flashlight';
 import { createFrost } from '../src/view/frost';
-import { createGhostView, ghostRevealAmount, loadGhostModel } from '../src/view/ghost';
+import { GHOST, createGhostView, ghostRevealAmount, loadGhostModel } from '../src/view/ghost';
 import { createLightFx } from '../src/view/lightfx';
 import { torches as torchRegistry } from '../src/view/torches';
 import { createHouseView } from '../src/view/house';
@@ -124,6 +124,8 @@ const lightfx = createLightFx(core);
 const frost = createFrost(core);
 // 鬼魂的模型：?model 优先，不然照 config/ghost.ts（url 为 null 时用程序化的）
 const model = await loadGhostModel(q.has('model') ? { url: q.get('model'), animated: q.has('animated'), clip: q.get('clip') } : undefined);
+// ?solid=0.1：「实」的那份没被照着时的暗度（建鬼魂之前改，它的 uniform 按这个值初始化）
+if (q.has('solid')) GHOST.solid.dark = num('solid', GHOST.solid.dark);
 modules.push(createGhostView(core, rig, { lights: lightfx, frost, model }), lightfx, frost);
 
 // 四支手电（模拟 4 个访客）：书房、走廊、门厅、厨房，和 dev/fog.ts 一样的姿势；?torch=x,z,dir 时只放那一支

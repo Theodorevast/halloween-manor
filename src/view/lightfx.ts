@@ -3,11 +3,12 @@
 // （WCAG 2.3.1，countDips 可以拿来查）。现身（ghost.ts）、机关、台灯共用。
 //
 // 不新建灯（灯的数量一变，所有材质都要重编）：
-// - 场景里 userData.lightfx = true 的灯（台灯 props/lamp.ts、门廊灯 house.ts），第一次 update 时遍历一次场景收集起来；
+// - 场景里标了 userData.lightfx 的灯（台灯 props/lamp.ts、门廊灯 house.ts），第一次 update 时遍历一次场景收集起来；
+//   标记可以带上跟着这盏灯一起暗的自发光（灯罩、灯泡、灯笼，见 LightFxTag）：灯暗了灯罩还亮着就不像坏灯泡（2026-10-29 评审 I3）；
 // - 访客的手电通过 torches.ts 的 torchDim（flashlight.ts 自己乘强度、自己偏色），位置从登记表读。
-// 灯的强度平时由各自的模块每帧写（台灯偶尔轻闪、门廊灯微微抖），这里在它们写完以后乘上压暗系数：记住自己上次写的值，
-// 发现被别人改过就把新值当作底数。主循环里各模块的先后不一定，所以渲染前（scene.onBeforeRender）再补一次。
-// 没有效果、亮度也回到 1 的灯不再碰（不和主人抢）
+// 灯的强度（和台灯灯罩的 glow）平时由各自的模块每帧写（台灯偶尔轻闪、门廊灯微微抖），这里在它们写完以后乘上压暗系数：
+// 记住自己上次写的值，发现被别人改过就把新值当作底数。主循环里各模块的先后不一定，所以渲染前（scene.onBeforeRender）再补一次。
+// 没有效果、亮度也回到 1 的灯不再碰（不和主人抢），强度、颜色、自发光都原样还回去
 import type * as THREE from 'three/webgpu';
 import type { FrameCtx, Module, RenderCore } from '../engine/types';
 import type { Vec2 } from '../sim/types';
@@ -97,7 +98,26 @@ interface Effect {
   stopped: boolean;
 }
 
-/** 管着的一盏灯：底数（主人写的强度、颜色）、自己上次写的值、热惯性后的亮度 */
+/**
+ * 灯上的 userData.lightfx：true，或者再带上跟着这盏灯一起暗的自发光（灯暗了灯罩还亮着，就不像坏灯泡）：
+ * - glow：一个数值 uniform（台灯：灯罩、灯泡的自发光都乘它，台灯每帧自己写）。灯罩的颜色是着色器里的常量，
+ *   换颜色要重编材质，所以只跟着暗、不偏色（台灯的光本身照样偏暖红）
+ * - emissive：用 material.color 画的自发光材质（门廊的灯笼）：颜色跟着暗，也和灯一样往暖红偏
+ */
+export type LightFxTag = true | { glow?: { value: number }; emissive?: { color: THREE.Color } };
+
+/**
+ * 越暗越偏红：base 的色调往 warm 偏 w（0..1），亮度（最大的那个分量）不变。base 的最大分量是 1 时就是 base.lerp(warm, w)；
+ * w = 0 时原样拷回（还原时逐位相等）
+ */
+function warmShift(out: THREE.Color, base: THREE.Color, warm: THREE.Color, w: number): THREE.Color {
+  if (w <= 0) return out.copy(base);
+  const s = Math.max(base.r, base.g, base.b);
+  if (s <= 0) return out.copy(base);
+  return out.copy(base).multiplyScalar(1 / s).lerp(warm, w).multiplyScalar(s);
+}
+
+/** 管着的一盏灯：底数（主人写的强度、颜色）、自己上次写的值、热惯性后的亮度；跟着它的自发光（见 LightFxTag）同样记底数 */
 interface Managed {
   light: THREE.Light;
   pos: Vec2;
@@ -105,6 +125,8 @@ interface Managed {
   written: number;
   baseColor: THREE.Color;
   writtenColor: THREE.Color;
+  glow: { ref: { value: number }; base: number; written: number } | null;
+  emissive: { mat: { color: THREE.Color }; base: THREE.Color; written: THREE.Color } | null;
   level: number;
   /** 没在压暗：不碰这盏灯 */
   idle: boolean;
@@ -142,9 +164,15 @@ export function createLightFx(core: RenderCore): LightFx {
       const p = l.getWorldPosition(l.position.clone());
       core.houseRoot.worldToLocal(p);
       warm ??= l.color.clone().setHex(LIGHTFX.warm);
+      const tag = o.userData.lightfx as LightFxTag;
+      const g = typeof tag === 'object' && typeof tag.glow?.value === 'number' ? tag.glow : null;
+      const e = typeof tag === 'object' && tag.emissive?.color?.isColor ? tag.emissive : null;
       out.push({
         light: l, pos: { x: p.x, z: p.z }, base: l.intensity, written: l.intensity,
-        baseColor: l.color.clone(), writtenColor: l.color.clone(), level: 1, idle: true,
+        baseColor: l.color.clone(), writtenColor: l.color.clone(),
+        glow: g ? { ref: g, base: g.value, written: g.value } : null,
+        emissive: e ? { mat: e, base: e.color.clone(), written: e.color.clone() } : null,
+        level: 1, idle: true,
       });
     });
     return out;
@@ -164,19 +192,48 @@ export function createLightFx(core: RenderCore): LightFx {
     return k === Infinity ? 1 : Math.min(LIGHTFX.ceil, Math.max(LIGHTFX.minLevel, k));
   };
 
-  /** 把压暗系数写到灯上：被主人改过的值当作新的底数（见文件头）。update 和渲染前各调一次，重复调结果一样 */
+  /**
+   * 把压暗系数写到灯上（和跟着它的自发光上）：被主人改过的值当作新的底数（见文件头）。update 和渲染前各调一次，重复调结果一样。
+   * 亮度回到 1 时写回的就是底数本身（偏色 w = 0 时原样拷回），之后不再碰
+   */
   const apply = () => {
     if (!lights || !warm) return;
     for (const m of lights) {
       if (m.idle) continue;
       const l = m.light;
+      const w = Math.max(0, 1 - m.level) * LIGHTFX.warmK;
       if (l.intensity !== m.written) m.base = l.intensity;
       if (!l.color.equals(m.writtenColor)) m.baseColor.copy(l.color);
       l.intensity = m.written = m.base * m.level;
-      l.color.copy(m.baseColor).lerp(warm, Math.max(0, 1 - m.level) * LIGHTFX.warmK);
+      warmShift(l.color, m.baseColor, warm, w);
       m.writtenColor.copy(l.color);
+      const g = m.glow;
+      if (g) {
+        if (g.ref.value !== g.written) g.base = g.ref.value;
+        g.ref.value = g.written = g.base * m.level;
+      }
+      const e = m.emissive;
+      if (e) {
+        if (!e.mat.color.equals(e.written)) e.base.copy(e.mat.color);
+        warmShift(e.mat.color, e.base, warm, w);
+        if (m.level !== 1) e.mat.color.multiplyScalar(m.level);
+        e.written.copy(e.mat.color);
+      }
       // 回到 1 了：上面已经写回原值，之后不再碰
       if (m.level === 1) m.idle = true;
+    }
+  };
+
+  /** 开始压暗一盏灯：此刻的强度、颜色、自发光就是主人写的底数 */
+  const wake = (m: Managed) => {
+    m.idle = false;
+    m.base = m.written = m.light.intensity;
+    m.baseColor.copy(m.light.color);
+    m.writtenColor.copy(m.light.color);
+    if (m.glow) m.glow.base = m.glow.written = m.glow.ref.value;
+    if (m.emissive) {
+      m.emissive.base.copy(m.emissive.mat.color);
+      m.emissive.written.copy(m.emissive.mat.color);
     }
   };
 
@@ -221,11 +278,7 @@ export function createLightFx(core: RenderCore): LightFx {
         const target = busy ? levelAt(m.pos, now) : 1;
         if (m.idle) {
           if (target === 1) continue;
-          // 开始压暗：此刻的强度、颜色就是主人写的底数
-          m.idle = false;
-          m.base = m.written = m.light.intensity;
-          m.baseColor.copy(m.light.color);
-          m.writtenColor.copy(m.light.color);
+          wake(m);
         }
         m.level = thermal(m.level, target, dt);
         if (target === 1 && Math.abs(m.level - 1) < LIGHTFX.settle) m.level = 1;
@@ -249,6 +302,8 @@ export function createLightFx(core: RenderCore): LightFx {
         if (m.idle) continue;
         m.light.intensity = m.base;
         m.light.color.copy(m.baseColor);
+        if (m.glow) m.glow.ref.value = m.glow.base;
+        if (m.emissive) m.emissive.mat.color.copy(m.emissive.base);
       }
       lights = null;
       for (let i = 0; i < TORCH_COUNT; i++) torchDim[i] = 1;
@@ -260,7 +315,10 @@ export function createLightFx(core: RenderCore): LightFx {
       self,
       stats: () => ({
         effects: effects.length,
-        lights: (lights ?? []).map((m) => ({ name: m.light.name, level: +m.level.toFixed(3), intensity: +m.light.intensity.toFixed(3), idle: m.idle })),
+        lights: (lights ?? []).map((m) => ({
+          name: m.light.name, level: +m.level.toFixed(3), intensity: +m.light.intensity.toFixed(3), idle: m.idle,
+          glow: m.glow ? +m.glow.ref.value.toFixed(3) : null, emissive: m.emissive ? m.emissive.mat.color.getHexString() : null,
+        })),
         torchDim: torchDim.map((v) => +v.toFixed(3)),
       }),
     };
