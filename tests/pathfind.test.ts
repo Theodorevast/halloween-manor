@@ -154,3 +154,26 @@ describe('findPath', () => {
     }
   });
 });
+
+describe('findPath：绕开现身的地方（avoid，圆里的格子代价 × AVOID_COST）', () => {
+  // 门厅：5 米 × 4 米，中间放一个半径 1 米的圈，圈上下各剩 1 米能走
+  const from = { x: 6, z: 9.5 }, to = { x: 10, z: 9.5 };
+  const zone = { pos: { x: 8, z: 9.5 }, r: 1, until: 10 };
+  const closest = (pts: Vec2[]) => Math.min(...pts.map((p) => Math.hypot(p.x - zone.pos.x, p.z - zone.pos.z)));
+
+  test('能绕就绕：没有圈时直线穿过圈心，有圈时一路都在圈外；过期的圈不算', () => {
+    expect(closest(samples(from, findPath(g, from, to)!))).toBeLessThan(0.1);
+    const around = findPath(g, from, to, [zone], 5)!;
+    for (const p of samples(from, around)) expect(g.walkableAt(p)).toBe(true);
+    expect(closest(samples(from, around))).toBeGreaterThanOrEqual(zone.r - 1e-6);
+    expect(findPath(g, from, to, [zone], 10)).toEqual(findPath(g, from, to)); // until <= now：过期
+  });
+
+  test('绕不开也走得通：起点在圈里，先往外走，不抄近路穿过圈心那边', () => {
+    const start = { x: 7.4, z: 9.5 }; // 圈里，离圈心 0.6 米
+    const path = findPath(g, start, to, [zone], 5)!;
+    expect(path).not.toBeNull();
+    expect(closest(samples(start, path))).toBeGreaterThanOrEqual(0.6 - 0.1);
+    expect(path[path.length - 1]).toEqual(to);
+  });
+});

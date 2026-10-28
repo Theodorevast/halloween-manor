@@ -1,8 +1,13 @@
 // 手电照出鬼魂（设计文档 3.1）：访客的手电照到鬼魂只显形、不吓人——发 reveal（on / off）、愣一下（察觉 kind ghost），恐惧值不涨。
+// 主动现身（设计文档 3.2，config/visitors.ts 的 MANIFEST）：蓄力 → 落下 → 停留 → 收回 → 冷却的时间轴；蓄力时附近的人察觉；
+// 落下只吓看得见的人、吓多少；被吓的人后退、之后一段时间绕开那里
 import { describe, expect, test } from 'vitest';
 import { createWorld } from '../src/sim/world';
 import { Grid } from '../src/sim/grid';
-import type { SimEvent, Vec2, World } from '../src/sim/types';
+import { MANIFEST, PERSONALITIES, VISION } from '../src/config/visitors';
+import { angleOf, wrapAngle } from '../src/lib/angle';
+import { GHOST_SOURCE } from '../src/sim/types';
+import type { NpcState, SimEvent, Vec2, World } from '../src/sim/types';
 
 const DT = 1 / 60;
 const ofType = <T extends SimEvent['type']>(ev: SimEvent[], type: T) =>
@@ -17,6 +22,8 @@ function drive(w: World, seconds: number, ghostAt: () => Vec2 | null, each?: () 
   }
   return ev;
 }
+const bearingTo = (from: Vec2, to: Vec2) => angleOf(to.x - from.x, to.z - from.z);
+const dist = (a: Vec2, b: Vec2) => Math.hypot(a.x - b.x, a.z - b.z);
 
 describe('手电照到鬼魂（只显形、不吓人）', () => {
   /** 门厅西边，朝东：正前方 3 米是门厅东边（中间没墙） */
@@ -76,5 +83,178 @@ describe('手电照到鬼魂（只显形、不吓人）', () => {
     expect(ofType(ev, 'reveal')).toEqual([{ type: 'reveal', npc: a.id, on: false }]);
     const gone = drive(w, 0.1, () => null);
     expect(ofType(gone, 'reveal')).toEqual([{ type: 'reveal', npc: b.id, on: false }]);
+  });
+});
+
+describe('主动现身（吓人、赶人）', () => {
+  /** 门厅正中：现身的地方 */
+  const G = { x: 8, z: 9.5 };
+  /** 推进到这一次现身的 phase 那一步（含）；返回期间的事件和那一步开始时的模拟时间。each：每步之前（比如按住某人的手电） */
+  function until(w: World, phase: 'windup' | 'drop' | 'end', each?: () => void) {
+    const ev: SimEvent[] = [];
+    for (let k = 0; k < 60 * 5; k++) {
+      each?.();
+      const t = w.state.time;
+      const e = w.step(DT);
+      ev.push(...e);
+      if (e.some((x) => x.type === 'manifest' && x.phase === phase)) return { ev, at: t };
+    }
+    throw new Error(`没等到 ${phase}`);
+  }
+
+  test('时间轴：没有鬼魂不能现身；蓄力 MANIFEST.windup 秒落下，再 MANIFEST.hold 秒收回、冷却 MANIFEST.cooldown 秒；正在现身、冷却中不能再现身', () => {
+    const w = createWorld({ seed: 100, autoSpawn: false });
+    expect(w.manifest()).toBe(false);
+    w.setGhost(G);
+    expect(w.manifest()).toBe(true);
+    expect(w.manifest()).toBe(false); // 正在现身
+    const first = w.step(DT);
+    expect(ofType(first, 'manifest')).toEqual([{ type: 'manifest', phase: 'windup', pos: G, scared: [] }]);
+    expect(w.state.manifest).toMatchObject({ phase: 'windup', pos: G });
+    const t0 = 0;
+    const drop = until(w, 'drop');
+    expect(drop.at - t0).toBeCloseTo(MANIFEST.windup, 6);
+    expect(w.state.manifest.phase).toBe('hold');
+    expect(w.manifest()).toBe(false);
+    const end = until(w, 'end');
+    expect(end.at - drop.at).toBeCloseTo(MANIFEST.hold, 6);
+    expect(ofType(end.ev, 'manifest').at(-1)).toEqual({ type: 'manifest', phase: 'end', pos: G, scared: [] });
+    expect(w.state.manifest.phase).toBe('cooldown');
+    expect(w.state.manifest.cooldown).toBeCloseTo(MANIFEST.cooldown, 6);
+    expect(w.manifest()).toBe(false); // 冷却中
+    for (let k = 0; k < Math.round((MANIFEST.cooldown - 0.1) / DT); k++) w.step(DT);
+    expect(w.manifest()).toBe(false);
+    for (let k = 0; k < Math.round(0.2 / DT); k++) w.step(DT);
+    expect(w.state.manifest).toEqual({ phase: 'idle', t: 0, cooldown: 0, pos: null });
+    expect(w.manifest()).toBe(true);
+  });
+
+  test('蓄力：MANIFEST.noticeRadius 米内的人察觉（kind manifest），手电很快对着那里，一直盯到落下；更远的不察觉', () => {
+    const w = createWorld({ seed: 101, autoSpawn: false });
+    const near = w.spawn({ pos: { x: G.x + 2, z: G.z }, personality: 'average', lookDir: 0 }); // 2 米，背对着
+    const far = w.spawn({ pos: { x: G.x, z: G.z - 6.5 }, personality: 'average', lookDir: -Math.PI / 2 }); // 客厅里，6.5 米
+    w.setGhost(G);
+    w.manifest();
+    const ev = w.step(DT);
+    expect(ofType(ev, 'notice')).toEqual([{ type: 'notice', npc: near.id, kind: 'manifest', src: G }]);
+    expect(far.notice ?? null).toBeNull();
+    for (let k = 0; k < Math.round(0.35 / DT); k++) w.step(DT);
+    expect(Math.abs(wrapAngle(near.lookDir - bearingTo(near.pos, G)))).toBeLessThan(0.1);
+    expect(near.speed).toBeLessThan(0.05);
+    // 落下前一步还在察觉
+    for (let k = 0; k < Math.round((MANIFEST.windup - 0.35) / DT) - 2; k++) w.step(DT);
+    expect(near.notice?.kind).toBe('manifest');
+  });
+
+  /** 把这些人的手电按住（每步之前）：dir 返回要照的方向 */
+  const hold = (pins: [NpcState, () => number][]) => () => {
+    for (const [n, dir] of pins) n.lookDir = dir();
+  };
+
+  test('落下：只吓看得见那里的人（光锥 + 视线 + MANIFEST.range）：scared 里有他、他有一个 object = GHOST_SOURCE 的 startle；背对着的、隔着墙的不算', () => {
+    const w = createWorld({ seed: 102, autoSpawn: false });
+    const a = w.spawn({ pos: { x: G.x - 2, z: G.z }, personality: 'average', lookDir: 0 }); // 2 米，看着那里
+    const b = w.spawn({ pos: { x: G.x, z: G.z - 5.5 }, personality: 'average', lookDir: -Math.PI / 2 }); // 5.5 米（察觉范围外），背对着
+    const c = w.spawn({ pos: { x: G.x - 3.5, z: G.z }, personality: 'average', lookDir: 0 }); // 卧室里，隔着门厅西墙
+    expect(new Grid().lineOfSight(b.pos, G)).toBe(true);
+    expect(new Grid().lineOfSight(c.pos, G)).toBe(false);
+    w.setGhost(G);
+    w.manifest();
+    const { ev } = until(w, 'drop', hold([[b, () => -Math.PI / 2]]));
+    const drop = ofType(ev, 'manifest').find((e) => e.phase === 'drop')!;
+    expect(drop.scared).toEqual([a.id]);
+    expect(ofType(ev, 'startle').filter((e) => e.object === GHOST_SOURCE).map((e) => e.npc)).toEqual([a.id]);
+    expect(a.mode).toBe('startled');
+    expect(b.mode).not.toBe('startled');
+    expect(c.mode).not.toBe('startled');
+
+    // 对照：同一个位置（5.5 米、察觉范围外）看着那里的人，落下时照样被吓到
+    const w2 = createWorld({ seed: 102, autoSpawn: false });
+    const d = w2.spawn({ pos: { x: G.x, z: G.z - 5.5 }, personality: 'average', lookDir: Math.PI / 2 });
+    w2.setGhost(G);
+    w2.manifest();
+    const r2 = until(w2, 'drop', hold([[d, () => bearingTo(d.pos, G)]]));
+    expect(ofType(r2.ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([d.id]);
+  });
+
+  test('吓多少：1 米、光锥正中、在他的手电光里的 average = fear × 1.3 × 1.2 × 1.25；6 米、光锥边上（只是隐约看见）= fear × 0.6 × 0.9', () => {
+    const amount = (pos: Vec2, dir: (n: NpcState) => number) => {
+      const w = createWorld({ seed: 103, autoSpawn: false });
+      const n = w.spawn({ pos, personality: 'average', lookDir: bearingTo(pos, G) });
+      w.setGhost(G);
+      w.manifest();
+      const { ev } = until(w, 'drop', hold([[n, () => dir(n)]]));
+      const st = ofType(ev, 'startle').filter((e) => e.npc === n.id && e.object === GHOST_SOURCE);
+      expect(st.length).toBe(1);
+      return st[0].amount;
+    };
+    expect(PERSONALITIES.average.fearMult).toBe(1);
+    const close = amount({ x: G.x - 1, z: G.z }, (n) => bearingTo(n.pos, G));
+    expect(Math.abs(close - MANIFEST.fear * 1.3 * 1.2 * 1.25)).toBeLessThanOrEqual(0.5);
+    const far = { x: G.x, z: G.z - 5.99 };
+    const edge = amount(far, (n) => bearingTo(n.pos, G) + VISION.halfAngle - 0.002);
+    expect(Math.abs(edge - MANIFEST.fear * 0.6 * 0.9)).toBeLessThanOrEqual(0.5);
+  });
+
+  test('被吓到的人僵住完转身后退：落下 2 秒后离那里至少 backOff 米、手电照着那边；加了一个绕开圈，到期去掉；之后闲逛不挑圈里的目标，路线不往圈里钻', () => {
+    const w = createWorld({ seed: 104, autoSpawn: false });
+    const a = w.spawn({ pos: { x: G.x - 1, z: G.z }, personality: 'average', lookDir: 0 });
+    w.setGhost(G);
+    w.manifest();
+    const drop = until(w, 'drop');
+    expect(ofType(drop.ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([a.id]);
+    expect(w.state.avoid).toEqual([{ pos: G, r: MANIFEST.avoidRadius, until: expect.closeTo(drop.at + MANIFEST.avoidTime, 6) }]);
+    let moved = false;
+    for (let k = 0; k < Math.round(2 / DT); k++) {
+      w.step(DT);
+      if (a.mode !== 'startled' && a.speed > 0.05) {
+        moved = true;
+        // 往远离那里的方向走（身体背对着它），手电照着身后的那里
+        expect(Math.abs(wrapAngle(a.heading - bearingTo(G, a.pos)))).toBeLessThan(Math.PI / 2);
+        expect(Math.abs(wrapAngle(a.lookDir - bearingTo(a.pos, G)))).toBeLessThan(0.6);
+      }
+    }
+    expect(moved).toBe(true);
+    expect(dist(a.pos, G)).toBeGreaterThanOrEqual(MANIFEST.backOff - 1e-6);
+    expect(Math.abs(wrapAngle(a.lookDir - bearingTo(a.pos, G)))).toBeLessThan(0.5);
+    // 之后照常闲逛：挑的目标不在圈里，路线不比出发的地方更靠近圈心
+    const start = dist(a.pos, G);
+    let checked = 0;
+    let last = '';
+    for (let k = 0; k < Math.round((MANIFEST.avoidTime - 4) / DT); k++) {
+      w.step(DT);
+      const key = JSON.stringify(a.path);
+      if (a.mode === 'wander' && a.path.length > 0 && key !== last && w.state.avoid.length > 0) {
+        const goal = a.path[a.path.length - 1];
+        expect(dist(goal, G)).toBeGreaterThanOrEqual(MANIFEST.avoidRadius);
+        let p = { ...a.pos };
+        for (const q of a.path) {
+          for (let t = 0; t <= 1; t += 0.05) expect(dist({ x: p.x + (q.x - p.x) * t, z: p.z + (q.z - p.z) * t }, G)).toBeGreaterThanOrEqual(Math.min(start, dist(a.pos, G)) - 0.3);
+          p = q;
+        }
+        checked++;
+      }
+      last = key;
+    }
+    expect(checked).toBeGreaterThan(0);
+    for (let k = 0; k < Math.round(4.5 / DT); k++) w.step(DT);
+    expect(w.state.avoid).toEqual([]);
+  });
+
+  test('没人看见就不加绕开圈；被吓的人逃跑了也不会再后退', () => {
+    const w = createWorld({ seed: 105, autoSpawn: false });
+    w.spawn({ pos: { x: G.x, z: G.z - 5.5 }, personality: 'average', lookDir: -Math.PI / 2 }); // 背对着、察觉范围外
+    w.setGhost(G);
+    w.manifest();
+    until(w, 'drop');
+    expect(w.state.avoid).toEqual([]);
+
+    const w2 = createWorld({ seed: 105, autoSpawn: false });
+    const t = w2.spawn({ pos: { x: G.x - 1, z: G.z }, personality: 'timid', lookDir: 0 });
+    t.fear = 80;
+    w2.setGhost(G);
+    w2.manifest();
+    until(w2, 'drop');
+    expect(t.mode).toBe('fleeing');
   });
 });

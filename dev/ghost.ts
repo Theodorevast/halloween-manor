@@ -20,6 +20,7 @@ import * as THREE from 'three/webgpu';
 import { CELL, HOUSE_D, HOUSE_W, Tile, buildTiles, cellOf, idx, inGrid } from '../src/config/house';
 import { createRenderCore } from '../src/engine/renderer';
 import type { FrameCtx, GhostRig, GhostState, Module, Quality } from '../src/engine/types';
+import { idleManifest } from '../src/sim/manifest';
 import type { WorldState } from '../src/sim/types';
 import { createFlashlight } from '../src/view/flashlight';
 import { createGhostView } from '../src/view/ghost';
@@ -117,7 +118,7 @@ const poses = q.has('notorch') ? [] : [
 ];
 const torches = poses.map(() => createFlashlight(core.houseRoot, core.quality));
 
-const state: WorldState = { time: 0, npcs: [], objects: [], scaredOff: 0, hitStop: 0, manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null }, avoid: [] };
+const state: WorldState = { time: 0, npcs: [], objects: [], scaredOff: 0, hitStop: 0, manifest: idleManifest(), avoid: [] };
 let quality: Quality = q.has('low') ? 'low' : 'high';
 const setQuality = (v: Quality) => {
   quality = v;

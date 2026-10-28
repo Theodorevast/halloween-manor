@@ -18,6 +18,7 @@ import { createCameraRig } from '../src/engine/camera';
 import { createRenderCore } from '../src/engine/renderer';
 import type { FrameCtx, Module, Quality } from '../src/engine/types';
 import { PROPS } from '../src/config/house';
+import { idleManifest } from '../src/sim/manifest';
 import type { SimEvent, WorldState } from '../src/sim/types';
 import { createFlashlight } from '../src/view/flashlight';
 import { FOG, createFogView } from '../src/view/fog';
@@ -60,7 +61,7 @@ const poses = [
 ];
 const torches = poses.map(() => createFlashlight(core.houseRoot, core.quality));
 
-const state: WorldState = { time: 0, npcs: [], objects: [], scaredOff: 0, hitStop: 0, manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null }, avoid: [] };
+const state: WorldState = { time: 0, npcs: [], objects: [], scaredOff: 0, hitStop: 0, manifest: idleManifest(), avoid: [] };
 let quality: Quality = q.has('low') ? 'low' : 'high';
 const setQuality = (v: Quality) => {
   quality = v;

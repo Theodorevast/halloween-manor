@@ -7,18 +7,20 @@
 // 2026-10-28 访客反馈（设计文档 2.1–2.3）：察觉那一拍（notice）。听到声音、开始发毛时先停下、手电先转向来源、身体跟上，
 // 盯 NOTICE.hold 秒再决定下一步（声音：走过去查看）；状态机在这期间暂停，路径留着（NOTICE、TRAITS）。
 // 发毛不再随机回头张望：进入范围 GHOST.onset 秒内一定察觉一次，贴着发毛到 GHOST.backAt 就后退（retreat）；
-// 鬼魂穿墙的声音也听得见（hearGhost）
+// 鬼魂穿墙的声音也听得见（hearGhost）。
+// 主动现身（设计文档 3.2，world.ts 结算）：蓄力时被定住盯着（transfixPos），被吓到的人僵住结束后后退（retreat），
+// 之后一段时间寻路绕开那里（NpcCtx.avoid，圆里的格子代价高），闲逛也不挑那里的目标
 import { CELL, cellCenter, cellOf, FRONT_DOOR, GRID_H, idx, inGrid, ROOMS, roomAt, Tile } from '../config/house';
 import type { RoomId } from '../config/house';
 import { BEHAVIOR, CROWD, FEAR, GHOST, MOTION, NOTICE, PERSONALITIES, SPEED, TRAITS } from '../config/visitors';
 import { angleOf, wrapAngle } from '../lib/angle';
 import { Grid } from './grid';
-import { findPath } from './pathfind';
+import { findPath, inZones } from './pathfind';
 import type { Rng } from './rng';
 import { windingUp } from './scares';
 import type { ScareObject } from './scares';
 import { GHOST_SOURCE } from './types';
-import type { NoticeKind, NpcState, Personality, ScareType, SimEvent, Vec2 } from './types';
+import type { AvoidZone, NoticeKind, NpcState, Personality, ScareType, SimEvent, Vec2 } from './types';
 
 // 以下几个手电摆动幅度是计划里给的定值（config 里没有），集中放在这里方便调
 /** 走路时手电在身体朝向两侧的小幅摆动（弧度），周期用 BEHAVIOR.sweepPeriod */
@@ -120,13 +122,25 @@ export interface NpcCtx {
   crowd: readonly Npc[];
   /** 鬼魂的位置（房屋米坐标）；null = 没有鬼魂 */
   ghost: Vec2 | null;
+  /**
+   * 看见现身以后暂时绕开的圆（WorldState.avoid，until 和 now 同一个钟）：寻路时圆里的格子代价高，闲逛不挑圆里的目标。
+   * 可选只是为了测试里手写的沙盒；不给就是没有
+   */
+  avoid?: readonly AvoidZone[];
 }
+
+/** 寻路要的那一点上下文：要绕开的圆和此刻的时间（都可以没有） */
+type PathCtx = Pick<NpcCtx, 'nav'> & Partial<Pick<NpcCtx, 'avoid' | 'now'>>;
+/** 按 ctx 里要绕开的圆寻路 */
+const pathFor = (ctx: PathCtx, from: Vec2, to: Vec2, grid: Grid = ctx.nav.grid) => findPath(grid, from, to, ctx.avoid ?? [], ctx.now ?? 0);
+/** 这一点在不在 ctx 里某个还没过期的圆里 */
+const avoided = (ctx: PathCtx, p: Vec2) => !!ctx.avoid && ctx.avoid.length > 0 && inZones(ctx.avoid.filter((z) => z.until > (ctx.now ?? 0)), p);
 
 /** walk = 沿 s.path 走；look = 原地停留（闲逛到达后左右照 / 警觉到达后查看） */
 type Act = 'walk' | 'look';
 
-/** 习惯化按「种类」记：六种物件，加上鬼魂的「后颈一凉」 */
-type HabitKey = ScareType | 'ghost';
+/** 习惯化按「种类」记：各种物件，加上鬼魂的「后颈一凉」和主动现身 */
+type HabitKey = ScareType | 'ghost' | 'manifest';
 
 /** 受惊结束后要恢复的状态 */
 interface Resume {
@@ -170,6 +184,10 @@ export interface Npc {
    * 惊吓落下后照常判定、照常恢复。不加恐惧值，NpcState 里只表现为 speed 0
    */
   transfixOn: ScareObject | null;
+  /** 被现身定住盯着的地方（world.ts 在现身停留期间写、收回时清）：和 transfixOn 一样停下、转向它，不加恐惧值 */
+  transfixPos: Vec2 | null;
+  /** 被现身吓到：僵住结束后不回原来的事，后退到离 from 至少 dist 米（retreat 在受惊中调时记在这里） */
+  pendingRetreat: { from: Vec2; dist: number } | null;
 
   // ——— 察觉那一拍（s.notice 是正在察觉的来源和计时） ———
   /**
@@ -274,6 +292,8 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     jitter: 0,
     jitterLeft: 0,
     transfixOn: null,
+    transfixPos: null,
+    pendingRetreat: null,
     noticeHome: null,
     afterNotice: null,
     v: 0,
@@ -313,9 +333,10 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
 
 export const canBeScared = (n: Npc) => n.s.mode !== 'fleeing' && n.s.mode !== 'gone';
 
-/** 吓呆了：受惊僵住，或者被蓄势的惊吓物件定住。这时不走、不被挤开 */
+/** 吓呆了：受惊僵住，或者被蓄势的惊吓物件、现身定住。这时不走、不被挤开 */
 const isFrozen = (n: Npc) =>
-  n.s.mode === 'startled' || (n.transfixOn !== null && (n.s.mode === 'entering' || n.s.mode === 'wander' || n.s.mode === 'alert'));
+  n.s.mode === 'startled' ||
+  ((n.transfixOn !== null || n.transfixPos !== null) && (n.s.mode === 'entering' || n.s.mode === 'wander' || n.s.mode === 'alert'));
 
 /**
  * 这个人这次被 type 吓到的量：base × 性格倍率 × habituation^n，n = 之前被这种物件吓过的有效次数。
@@ -351,7 +372,7 @@ export function startle(npc: Npc, ctx: NpcCtx, objectId: string, type: ScareType
  * startle 的后半段：已经算好这一下涨多少（后颈一凉先发 chill 再走这里）。
  * 尖叫只留给吓破胆的时候（设计文档 2.4）：一次涨了 FEAR.screamAt 以上，或者这一下涨完到了 FEAR.dread（screamDread）
  */
-function startleWith(npc: Npc, ctx: NpcCtx, objectId: string, amount: number, srcPos: Vec2): void {
+export function startleWith(npc: Npc, ctx: NpcCtx, objectId: string, amount: number, srcPos: Vec2): void {
   const s = npc.s;
   addFear(npc, amount, ctx.now);
   npc.lastScareSrc = null; // 物件的 startle 回头再记（见 startle）
@@ -581,7 +602,7 @@ export function feelGhost(npc: Npc, ctx: NpcCtx): void {
     notice(npc, ctx, 'chill', g);
   }
   // 察觉过了还贴着：后退半步。察觉那一拍还没完时先定好往哪退，盯完再走
-  const free = npc.transfixOn === null && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert');
+  const free = npc.transfixOn === null && npc.transfixPos === null && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert');
   if (free && npc.onsetAt === Infinity && !npc.backedOff && u >= GHOST.backAt) {
     npc.backedOff = true;
     retreat(npc, ctx, g, d + BACK_STEP);
@@ -608,10 +629,16 @@ const RETREAT_SAMPLE = 0.1;
 /**
  * 后退（发毛贴得太近、被现身吓到）：沿远离 from 的方向，找一个离 from 至少 dist 米、能走、离现在的位置最近的点
  * （正后方走不了就往两边偏，最多偏 90°），寻路走过去（转入闲逛）；走的时候手电一直照着 from，
- * 到了以后面朝 from 左右照一会儿，再照常闲逛。已经够远、或者附近没有能走的点，就原地转向 from 照一照
+ * 到了以后面朝 from 左右照一会儿，再照常闲逛。已经够远、或者附近没有能走的点，就原地转向 from 照一照。
+ * 受惊中调（被现身吓到）：先记下，僵住结束时再退；逃跑中、已离开的人不退
  */
 export function retreat(npc: Npc, ctx: NpcCtx, from: Vec2, dist: number): void {
   const s = npc.s;
+  if (!canBeScared(npc)) return;
+  if (s.mode === 'startled') {
+    npc.pendingRetreat = { from: { x: from.x, z: from.z }, dist };
+    return;
+  }
   const spot = retreatSpot(ctx.nav.grid, s.pos, from, dist, s.heading);
   if (spot && Math.hypot(spot.x - s.pos.x, spot.z - s.pos.z) > BEHAVIOR.arrive && walkTo(npc, ctx, spot)) {
     npc.retreatFrom = { x: from.x, z: from.z };
@@ -665,11 +692,12 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
   }
   s.nervous = s.fear >= FEAR.nervous;
 
-  // 被惊吓物件的蓄势定住：只转向它，别的都不动（受惊、逃跑照常走下面的分支）
+  // 被惊吓物件的蓄势、现身的停留定住：只转向它，别的都不动（受惊、逃跑照常走下面的分支）
   if (npc.transfixOn && !windingUp(npc.transfixOn)) npc.transfixOn = null;
-  if (npc.transfixOn && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert')) {
+  const fix = npc.transfixOn ? npc.transfixOn.state.pos : npc.transfixPos;
+  if (fix && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert')) {
     freeze(npc);
-    const b = bearing(s.pos, npc.transfixOn.state.pos);
+    const b = bearing(s.pos, fix);
     if (b !== null) {
       const max = BEHAVIOR.turnRate * BEHAVIOR.transfixTurn * dt;
       s.heading = turnToward(s.heading, b, max);
@@ -757,8 +785,11 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
 
 // ——— 状态切换 ———
 
-/** 闲逛：随机挑一个别的房间里的可走格（优先不贴墙的）寻路过去；寻路失败换目标，都失败就原地再照一会儿 */
-export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'>): void {
+/**
+ * 闲逛：随机挑一个别的房间里的可走格（优先不贴墙的）寻路过去；寻路失败换目标，都失败就原地再照一会儿。
+ * 要绕开的圆里的格子不挑（算一次没挑中）
+ */
+export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'> & Partial<Pick<NpcCtx, 'avoid' | 'now'>>): void {
   const s = npc.s;
   s.mode = 'wander';
   s.modeTime = 0;
@@ -772,7 +803,9 @@ export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'>): void {
     const pool = cells.open.length > 0 ? cells.open : cells.all;
     if (pool.length === 0) continue;
     const [i, j] = ctx.rng.pick(pool);
-    const path = findPath(ctx.nav.grid, s.pos, cellCenter(i, j));
+    const goal = cellCenter(i, j);
+    if (avoided(ctx, goal)) continue;
+    const path = pathFor(ctx, s.pos, goal);
     if (path && path.length > 0) {
       setPath(npc, path);
       npc.act = 'walk';
@@ -783,8 +816,8 @@ export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'>): void {
 }
 
 /** 测试和调试用（world.spawn 的 goal）：转入闲逛，寻路走到 goal，到了再左右照。到不了返回 false（原状态不变） */
-export function walkTo(npc: Npc, ctx: Pick<NpcCtx, 'nav'>, goal: Vec2): boolean {
-  const path = findPath(ctx.nav.grid, npc.s.pos, goal);
+export function walkTo(npc: Npc, ctx: PathCtx, goal: Vec2): boolean {
+  const path = pathFor(ctx, npc.s.pos, goal);
   if (!path || path.length === 0) return false;
   npc.s.mode = 'wander';
   npc.s.modeTime = 0;
@@ -830,7 +863,7 @@ function beginAlert(npc: Npc, ctx: NpcCtx, source: Vec2) {
   s.modeTime = 0;
   npc.source = { x: source.x, z: source.z };
   npc.retreatFrom = null;
-  const path = alertPath(ctx.nav.grid, s.pos, source, TRAITS[s.personality].investigateDist);
+  const path = alertPath(ctx.nav.grid, s.pos, source, TRAITS[s.personality].investigateDist, ctx.avoid ?? [], ctx.now);
   if (path && path.length > 0) {
     setPath(npc, path);
     npc.act = 'walk';
@@ -843,15 +876,16 @@ const ALERT_SAMPLE = 0.1;
 /**
  * 警觉的路线（不含起点）：朝声源旁最近的可走格（一样近时挑自己这一侧的）走，
  * 走到离声源 dist 米以内（按性格：TRAITS.investigateDist）、站在可走格上、看得见声源的第一个点就停。
- * 已经在这样的位置返回空数组；到不了返回 null。机器人测试也用它预测访客会走到哪里
+ * 已经在这样的位置返回空数组；到不了返回 null。机器人测试也用它预测访客会走到哪里。
+ * avoid / now：要绕开的圆（见 findPath）
  */
-export function alertPath(grid: Grid, from: Vec2, source: Vec2, dist: number): Vec2[] | null {
+export function alertPath(grid: Grid, from: Vec2, source: Vec2, dist: number, avoid: readonly AvoidZone[] = [], now = 0): Vec2[] | null {
   const R2 = dist ** 2;
   const viewSpot = (p: Vec2) =>
     (p.x - source.x) ** 2 + (p.z - source.z) ** 2 <= R2 && grid.walkableAt(p) && grid.lineOfSight(p, source);
   if (viewSpot(from)) return [];
   const [i, j] = grid.nearestWalkable(source, from);
-  const path = findPath(grid, from, cellCenter(i, j));
+  const path = findPath(grid, from, cellCenter(i, j), avoid, now);
   if (!path) return null;
   let a = from;
   for (let k = 0; k < path.length; k++) {
@@ -889,10 +923,12 @@ function beginFlee(npc: Npc, ctx: NpcCtx) {
   npc.jitter = 0;
   npc.jitterLeft = 0;
   npc.transfixOn = null;
+  npc.transfixPos = null;
+  npc.pendingRetreat = null;
   npc.retreatFrom = null;
   clearNotice(npc);
   const [i, j] = cellOf(s.pos.x, s.pos.z);
-  const path = inGrid(i, j) ? findPath(ctx.nav.grid, s.pos, DOOR_POINT) ?? [{ ...DOOR_POINT }] : [];
+  const path = inGrid(i, j) ? pathFor(ctx, s.pos, DOOR_POINT) ?? [{ ...DOOR_POINT }] : [];
   path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
   setPath(npc, path);
   ctx.events.push({ type: 'flee', npc: s.id });
@@ -915,9 +951,21 @@ function snapshot(npc: Npc): Resume {
 
 /**
  * 受惊结束：恢复之前的状态（路径还在 s.path 里），手电按限速转回去；僵住期间听到了声音就去查看。
+ * 被现身吓到的（pendingRetreat）不回原来的事，转身后退。
  * 胆大的被惊吓物件吓完，有 TRAITS.recheck 的几率先再照一眼那个物件（察觉那一拍，盯 RECHECK_HOLD 秒）才走
  */
 function restore(npc: Npc, ctx: NpcCtx) {
+  const back = npc.pendingRetreat;
+  if (back) {
+    npc.pendingRetreat = null;
+    npc.resume = null;
+    npc.startleLeft = 0;
+    npc.lastScareSrc = null;
+    npc.s.mode = 'wander'; // 先离开受惊（retreat 在受惊中只会记下、不会走）
+    npc.s.modeTime = 0;
+    retreat(npc, ctx, back.from, back.dist);
+    return;
+  }
   resumeAfterStartle(npc, ctx);
   const src = npc.lastScareSrc, p = TRAITS[npc.s.personality].recheck;
   npc.lastScareSrc = null;
@@ -1035,7 +1083,7 @@ function walk(npc: Npc, ctx: NpcCtx, vmax: number, stopAtEnd: boolean, hold = fa
 
   // —— 沿路径走 ——
   let st = stepAlong(path, ox, oz, v * dt);
-  if (!freeAt(grid, st.x, st.z) && reroute(npc, grid)) {
+  if (!freeAt(grid, st.x, st.z) && reroute(npc, ctx)) {
     path = s.path;
     st = stepAlong(path, ox, oz, v * dt);
   }
@@ -1175,12 +1223,12 @@ function freeze(npc: Npc) {
  * 被挤偏以后，直线去下一个路点会碰到墙角（门框边上最常见）：从这里重新寻路到原来的终点（不管别人），
  * 新路先回到格子中心再走。逃跑的人先到前门两格中间。在门外那一段或者寻路失败返回 false
  */
-function reroute(npc: Npc, grid: Grid): boolean {
+function reroute(npc: Npc, ctx: NpcCtx): boolean {
   const s = npc.s;
   const [ci, cj] = cellOf(s.pos.x, s.pos.z);
   if (!inGrid(ci, cj) || s.path.length === 0) return false;
   const fleeing = s.mode === 'fleeing';
-  const path = findPath(grid, s.pos, fleeing ? DOOR_POINT : s.path[s.path.length - 1]);
+  const path = pathFor(ctx, s.pos, fleeing ? DOOR_POINT : s.path[s.path.length - 1]);
   if (!path || path.length === 0) return false;
   if (fleeing) path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
   s.path = path;
@@ -1490,7 +1538,7 @@ function replan(npc: Npc, ctx: NpcCtx): boolean {
       }
     }
   }
-  const path = findPath(new Grid(tiles), s.pos, goal);
+  const path = pathFor(ctx, s.pos, goal, new Grid(tiles));
   if (!path || path.length === 0) return false;
   if (fleeing) path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
   setPath(npc, path);

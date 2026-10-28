@@ -9,6 +9,8 @@
 // - idle：不附身（只用来看鬼魂单独有多大用）
 // 鬼魂（第三人称改版，opts.ghost = 'hover'）：和上面任何一种叠加。每步把鬼魂飘向最近的访客、贴在他身后 GHOST_BOT.behind 米
 // （跟定一个人，直到他逃跑或离开），比真人跟得紧：是鬼魂效果的上限。opts.reach 限制只附身离鬼魂多近的物件（第三人称的准星）
+// 现身（2026-10-28，opts.ghost = 'manifest'）：鬼魂飘到跟定的人面前（他手电照的方向上）MANIFEST_BOT.front 米处，
+// 一冷却好就现身（现身期间不动）；也可以和 skilled 叠加（附身 + 现身）
 import { createWorld } from '../src/sim/world';
 import { createRng } from '../src/sim/rng';
 import type { Rng } from '../src/sim/rng';
@@ -21,17 +23,22 @@ import { SCARES } from '../src/config/scares';
 import { BEHAVIOR, TRAITS, VISION } from '../src/config/visitors';
 import { angleOf } from '../src/lib/angle';
 import { GHOST_SOURCE } from '../src/sim/types';
-import type { Personality, ScareObjectState, Vec2, World } from '../src/sim/types';
+import type { NpcState, Personality, ScareObjectState, Vec2, World } from '../src/sim/types';
 
 export type BotKind = 'skilled' | 'random' | 'idle';
-/** 鬼魂：none = 没有鬼魂（触屏的俯视模式），hover = 鬼魂机器人贴着最近的访客 */
-export type GhostPolicy = 'none' | 'hover';
+/** 鬼魂：none = 没有鬼魂（触屏的俯视模式），hover = 鬼魂机器人贴着最近的访客，manifest = 到他面前现身 */
+export type GhostPolicy = 'none' | 'hover' | 'manifest';
 
 /**
  * 鬼魂机器人：飘的速度（米/秒，大概是轻轻按着 WASD）、贴在身后多远（米，在后颈一凉的距离以内）、开局在哪
  * （和 engine/ghostRig.ts 的占位一样在门厅）
  */
 export const GHOST_BOT = { speed: 2, behind: 0.5, start: { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z } };
+/**
+ * 现身机器人：在跟定的人面前多远处现身（米，按他手电照的方向；先试第一个，中间隔着墙就近一点再试），
+ * 飘到离那一点多近就现身（米）。现身的冷却（MANIFEST.cooldown）一好就现身：大约每 20 秒一次
+ */
+export const MANIFEST_BOT = { front: [2, 1.5, 1], ready: 0.2 };
 /** skilled 用引诱的方式（只用于对比分析；正式测试用默认的 'both'） */
 export type LurePolicy = 'both' | 'predict' | 'topup' | 'none';
 
@@ -64,6 +71,9 @@ export interface BotRun {
   necks: number;
   ghostFear: number;
   maxNeck: number;
+  /** 现身：落下了几次、一共吓到几人次 */
+  manifests: number;
+  manifestScares: number;
 }
 
 export interface RunOptions {
@@ -118,13 +128,14 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
     return ok;
   };
   const lastHeard = new Map<number, number>();
-  const ghost: GhostBot | null = opts.ghost === 'hover' ? { pos: { ...GHOST_BOT.start }, target: null } : null;
+  const ghost: GhostBot | null = opts.ghost === 'hover' || opts.ghost === 'manifest' ? { pos: { ...GHOST_BOT.start }, target: null } : null;
+  const steer = opts.ghost === 'manifest' ? manifestGhost : moveGhost;
   const reach = opts.reach ?? Infinity;
   const inReach = (o: ScareObjectState) => !ghost || Math.hypot(o.pos.x - ghost.pos.x, o.pos.z - ghost.pos.z) <= reach;
-  let chills = 0, necks = 0, ghostFear = 0, maxNeck = 0;
+  let chills = 0, necks = 0, ghostFear = 0, maxNeck = 0, manifests = 0, manifestScares = 0;
   const steps = Math.round(seconds / DT);
   for (let k = 0; k < steps; k++) {
-    if (ghost) moveGhost(w, ghost);
+    if (ghost) steer(w, ghost);
     if (kind === 'skilled') {
       if (k % SIGHT_EVERY === 0) fireLitEyes(w, fire, inReach);
       if (k % LURE_EVERY === 0 && lures !== 'none') fireLures(w, lures, fire, inReach);
@@ -137,6 +148,9 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
         visitors.get(e.npc)!.exitedAt = w.state.time;
       } else if (e.type === 'heard') {
         lastHeard.set(e.npc, w.state.time);
+      } else if (e.type === 'manifest' && e.phase === 'drop') {
+        manifests++;
+        manifestScares += e.scared.length;
       } else if (e.type === 'chill') {
         ghostFear += e.amount;
         if (e.neck) {
@@ -157,7 +171,10 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
   }
   const list = [...visitors.values()];
   const lifetimes = list.filter((v) => v.exitedAt !== null).map((v) => v.exitedAt! - v.spawnedAt);
-  return { seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares, landing, chills, necks, ghostFear, maxNeck };
+  return {
+    seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares, landing,
+    chills, necks, ghostFear, maxNeck, manifests, manifestScares,
+  };
 }
 
 interface GhostBot {
@@ -166,11 +183,8 @@ interface GhostBot {
   target: number | null;
 }
 
-/**
- * 鬼魂机器人走一步：跟定的人逃跑 / 离开了就换离鬼魂最近的（不算逃跑中的），飘向他身后 GHOST_BOT.behind 米处
- * （按他身体朝向的反方向；鬼魂能穿墙，直线飘），然后交给模拟
- */
-function moveGhost(w: World, g: GhostBot) {
+/** 跟定的人：还在屋里（没逃跑、没离开）就接着跟，否则换离鬼魂最近的 */
+function targetOf(w: World, g: GhostBot): NpcState | undefined {
   const alive = (id: number | null) => w.state.npcs.find((n) => n.id === id && n.mode !== 'fleeing' && n.mode !== 'gone');
   let t = alive(g.target);
   if (!t) {
@@ -185,21 +199,65 @@ function moveGhost(w: World, g: GhostBot) {
     }
     g.target = t ? t.id : null;
   }
-  if (t) {
-    const hx = t.pos.x - Math.cos(t.heading) * GHOST_BOT.behind, hz = t.pos.z - Math.sin(t.heading) * GHOST_BOT.behind;
-    const dx = hx - g.pos.x, dz = hz - g.pos.z, d = Math.hypot(dx, dz), step = GHOST_BOT.speed * DT;
-    if (d <= step) {
-      g.pos.x = hx;
-      g.pos.z = hz;
-    } else {
-      g.pos.x += (dx / d) * step;
-      g.pos.z += (dz / d) * step;
-    }
+  return t;
+}
+
+/** 鬼魂直线飘向 (hx, hz)（能穿墙），这一步最多 GHOST_BOT.speed × DT；返回飘完离那一点多远 */
+function driftTo(g: GhostBot, hx: number, hz: number): number {
+  const dx = hx - g.pos.x, dz = hz - g.pos.z, d = Math.hypot(dx, dz), step = GHOST_BOT.speed * DT;
+  if (d <= step) {
+    g.pos.x = hx;
+    g.pos.z = hz;
+    return 0;
   }
-  // 穿墙时访客听得见（GHOST.hearWall）：和真的鬼魂一样告诉模拟此刻在不在墙里。
-  // 按格子近似（中心在墙格、窗格里）：真的鬼魂按身体（半径 0.16 米）碰没碰到 0.2 米厚的墙体算，差不了几厘米
+  g.pos.x += (dx / d) * step;
+  g.pos.z += (dz / d) * step;
+  return d - step;
+}
+
+/**
+ * 把鬼魂的位置交给模拟。穿墙时访客听得见（GHOST.hearWall）：和真的鬼魂一样告诉模拟此刻在不在墙里。
+ * 按格子近似（中心在墙格、窗格里）：真的鬼魂按身体（半径 0.16 米）碰没碰到 0.2 米厚的墙体算，差不了几厘米
+ */
+function placeGhost(w: World, g: GhostBot) {
   const [i, j] = cellOf(g.pos.x, g.pos.z);
   w.setGhost({ x: g.pos.x, z: g.pos.z, inWall: grid.isOpaque(i, j) });
+}
+
+/**
+ * 鬼魂机器人走一步：跟定的人逃跑 / 离开了就换离鬼魂最近的（不算逃跑中的），飘向他身后 GHOST_BOT.behind 米处
+ * （按他身体朝向的反方向；鬼魂能穿墙，直线飘），然后交给模拟
+ */
+function moveGhost(w: World, g: GhostBot) {
+  const t = targetOf(w, g);
+  if (t) driftTo(g, t.pos.x - Math.cos(t.heading) * GHOST_BOT.behind, t.pos.z - Math.sin(t.heading) * GHOST_BOT.behind);
+  placeGhost(w, g);
+}
+
+/**
+ * 现身机器人走一步：现身期间（蓄力、停留）不动；否则飘向跟定的人面前 MANIFEST_BOT.front 米处
+ * （他手电照的方向上、和他之间没有墙），到了而且冷却好了就现身
+ */
+function manifestGhost(w: World, g: GhostBot) {
+  const phase = w.state.manifest.phase;
+  const t = phase === 'windup' || phase === 'hold' ? undefined : targetOf(w, g);
+  if (t) {
+    let spot: Vec2 | null = null;
+    for (const f of MANIFEST_BOT.front) {
+      const p = { x: t.pos.x + Math.cos(t.lookDir) * f, z: t.pos.z + Math.sin(t.lookDir) * f };
+      const [i, j] = cellOf(p.x, p.z);
+      if (!grid.isOpaque(i, j) && grid.lineOfSight(t.pos, p)) {
+        spot = p;
+        break;
+      }
+    }
+    if (spot && driftTo(g, spot.x, spot.z) <= MANIFEST_BOT.ready && phase === 'idle') {
+      placeGhost(w, g);
+      w.manifest();
+      return;
+    }
+  }
+  placeGhost(w, g);
 }
 
 const ready = (o: ScareObjectState) => o.cooldown === 0;

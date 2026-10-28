@@ -1,5 +1,6 @@
 // 数值平衡的回归测试：机器人（见 tests/bots.ts）在固定种子下玩，断言体验目标。
 // 第三人称改版加了鬼魂机器人（一直贴在最近的访客身后）：「鬼魂 1–3」锁定鬼魂贴近有帮助、但不能一边倒。
+// 2026-10-28 加了会现身的机器人（到人面前现身，冷却好了就来）：「现身」一条锁定只靠现身也能吓跑 brave，但比附身加现身慢。
 // 改 config 里的恐惧值、回落、习惯化、性格倍率之后跑这个文件；想看每局的明细：BALANCE_REPORT=1 ./node_modules/.bin/vitest run tests/balance.test.ts
 import { beforeAll, describe, expect, test } from 'vitest';
 import { lureCoverage, median, runBot } from './bots';
@@ -26,6 +27,8 @@ const REACH = 4;
 const GHOST_ONLY_MIN = 60;
 /** 鬼魂贴身 + 随便附身（上限）时，被吓跑的人中位存活时间不低于这个（秒）：目标 1 下限的三分之二 */
 const GHOST_LIFE_FLOOR = (LIFE.min * 2) / 3;
+/** 现身：单独一个 brave，5 分钟内要吓跑（设计文档 3.2「用得好也能把胆大的吓跑」） */
+const MANIFEST_SECONDS = 300;
 
 let skilled: BotRun[], random: BotRun[], lone: BotRun[];
 /** 同一个 skilled 机器人，只换引诱的用法：只按预测「引过去会看见惊吓」才拉（predict）/ 完全不用引诱（none） */
@@ -35,6 +38,8 @@ let planned: BotRun[], noLures: BotRun[], lonePlanned: BotRun[], loneNoLures: Bo
  * 第三人称的 skilled（鬼魂贴身，但只能附身 REACH 米内的物件）
  */
 let ghostLone: BotRun[], ghostOnly: BotRun[], loneGhost: BotRun[], skilledGhost: BotRun[], skilledReach: BotRun[];
+/** 现身：单独一个 brave，只靠现身（不附身）/ 附身加现身 */
+let manifestLone: BotRun[], skilledManifestLone: BotRun[];
 const avgExits = (runs: BotRun[]) => runs.reduce((a, r) => a + r.exits, 0) / runs.length;
 const totalExits = (runs: BotRun[]) => runs.reduce((a, r) => a + r.exits, 0);
 const exitedWithin = (v: VisitorLog, s: number) => v.exitedAt !== null && v.exitedAt - v.spawnedAt <= s;
@@ -74,6 +79,8 @@ beforeAll(() => {
   ghostOnly = SEEDS.map((s) => runBot(s, 'idle', { ghost: 'hover', seconds: GAME_SECONDS }));
   skilledGhost = SEEDS.map((s) => runBot(s, 'skilled', { ghost: 'hover', seconds: GAME_SECONDS }));
   skilledReach = SEEDS.map((s) => runBot(s, 'skilled', { ghost: 'hover', reach: REACH, seconds: GAME_SECONDS }));
+  manifestLone = LONE_SEEDS.map((s) => runBot(s, 'idle', { ghost: 'manifest', seconds: MANIFEST_SECONDS, autoSpawn: false, setup: brave }));
+  skilledManifestLone = LONE_SEEDS.map((s) => runBot(s, 'skilled', { ghost: 'manifest', seconds: MANIFEST_SECONDS, autoSpawn: false, setup: brave }));
   // tsconfig 里没有 node 的类型，经 globalThis 取环境变量
   const env = (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env;
   if (env?.BALANCE_REPORT) console.log(report());
@@ -103,9 +110,14 @@ function report(): string {
       `${ghostLone[0].necks} necks / ${LONE_SECONDS} s); games ${games(ghostOnly)}`,
     `lone brave skilled + ghost: ${times(loneGhost)}`,
     `games: skilled ${games(skilled)}; skilled + ghost ${games(skilledGhost)}; third person (ghost, reach ${REACH} m) ${games(skilledReach)}`,
+    `manifest only, lone brave (s to exit, ${MANIFEST_SECONDS} s cap): ${times(manifestLone)} (drops that scared ${manifestLone.map((r) => `${r.manifestScares}/${r.manifests}`).join(' ')})`,
+    `skilled + manifest, lone brave: ${times(skilledManifestLone)}`,
     ...margins(),
   ].join('\n');
 }
+
+/** 单独一个 brave 被吓跑用了多久（秒；5 分钟没跑按 5 分钟算）的中位数 */
+const manifestLife = (runs: BotRun[]) => median(runs.map((r) => r.lifetimes[0] ?? MANIFEST_SECONDS));
 
 /** 几条容易贴着界限的不变量：现在的值、界限、余量（正数 = 还有余量）。改参数时一眼看出哪条最紧 */
 function margins(): string[] {
@@ -122,6 +134,8 @@ function margins(): string[] {
     ['鬼魂 3 加鬼魂中位存活 ≥ 30 s', life(skilledGhost), '≥', GHOST_LIFE_FLOOR],
     ['鬼魂 3 加鬼魂吓跑 < 2 × skilled', avgExits(skilledGhost), '<', 2 * avgExits(skilled)],
     ['鬼魂 3 第三人称中位存活 ≥ 45 s', life(skilledReach), '≥', LIFE.min],
+    ['现身 只靠现身单个 brave 5 分钟内吓跑（局）', manifestLone.filter((r) => r.exits === 1).length, '≥', LONE_SEEDS.length],
+    ['现身 只靠现身中位 > 附身加现身中位（s）', manifestLife(manifestLone), '>', manifestLife(skilledManifestLone)],
   ];
   return [
     'margins:',
@@ -191,7 +205,7 @@ describe('数值平衡（固定种子，无界面）', () => {
     for (const r of [...ghostLone, ...ghostOnly, ...skilledGhost]) expect(r.maxNeck).toBeLessThan(FEAR.max);
   });
 
-  test('鬼魂 1：只靠鬼魂吓不跑 brave——一直贴在身后、不附身，单独一个 brave 一分钟内绝不会跑，整局也不跑；正常对局里不比乱点强', () => {
+  test('鬼魂 1：只靠贴身吓不跑 brave——一直贴在身后、不附身也不现身，单独一个 brave 一分钟内绝不会跑，整局也不跑；正常对局里不比乱点强', () => {
     for (const r of ghostLone) {
       expect(r.necks).toBeGreaterThan(0); // 鬼魂确实贴上去了，后颈一凉了好几次
       expect(r.lifetimes.every((t) => t > GHOST_ONLY_MIN)).toBe(true);
@@ -205,6 +219,14 @@ describe('数值平衡（固定种子，无界面）', () => {
     const loneLife = (runs: BotRun[]) => median(runs.map((r) => r.lifetimes[0] ?? LONE_SECONDS));
     expect(loneLife(loneGhost)).toBeLessThanOrEqual(0.8 * loneLife(lone));
     expect(avgExits(skilledGhost)).toBeGreaterThanOrEqual(1.2 * avgExits(skilled));
+  });
+
+  test('现身：只靠现身也能吓跑 brave（机器人到他面前 2 米现身，冷却好了就来，5 分钟内），但比附身加现身慢', () => {
+    for (const r of manifestLone) {
+      expect(r.manifestScares).toBeGreaterThan(0); // 现身确实吓到了他
+      expect(r.exits).toBe(1);
+    }
+    expect(manifestLife(manifestLone)).toBeGreaterThan(manifestLife(skilledManifestLone));
   });
 
   test('鬼魂 3：但不能一边倒——鬼魂贴身 + 随便附身（上限）：中位存活不低于目标 1 下限的 2/3、吓跑的人不到 skilled 的 2 倍；第三人称（只能附身 4 米内）仍在目标 1 的范围', () => {
