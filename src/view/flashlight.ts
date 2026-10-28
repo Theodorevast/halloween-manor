@@ -5,6 +5,10 @@
 //
 // 灯由 characters.ts 在模块创建时一次建好（对象池），之后只改参数、不增删：
 // three.js 的灯数量或 castShadow 一变，场景里每个材质都要重新编译，访客进出门时会卡一下。
+//
+// 手电登记表（2026-10-28 手电照出鬼魂，见 torches.ts）：每支手电建的时候按模块级计数分一个槽，
+// 每帧把位置、光轴、光锥、强度写进 torches[槽]（鬼魂的着色器按它算谁照着自己）；强度再乘 torchDim[槽]
+// （lightfx.ts 写：现身时附近的手电跟着暗），暗下去时颜色往暖红偏（钨丝灯越暗越红）
 import * as THREE from 'three/webgpu';
 import {
   abs, color, dot, mix, mx_noise_float, normalView, normalize, positionView, positionWorld, pow, smoothstep, time, uniform, uv, vec3,
@@ -13,6 +17,7 @@ import { CELL, GRID_H, GRID_W, blocksSight, buildTiles, type Tile } from '../con
 import { VISION } from '../config/visitors';
 import type { Quality } from '../engine/types';
 import { PALETTE } from './palette';
+import { GHOST_SHADOW_LAYER, TORCH_COUNT, torchDim, torches } from './torches';
 
 /** 手电的全部手感参数（导出给 dev/characters.ts 调参用；正式代码不要在运行时改它） */
 export const TORCH = {
@@ -40,6 +45,9 @@ export const TORCH = {
   nervous: { flicker: 0.22, jitter: 0.035 },
   /** 假体积光：最长多少米、最亮时的不透明度 */
   beam: { length: 3.4, opacity: 0.085, radius: Math.tan(VISION.halfAngle * 0.8) },
+  /** 被 torchDim 压暗时颜色往这个暖红偏：偏多少 = (1 − 压暗系数) × dimWarmK（和 lightfx.ts 的 LIGHTFX 一样） */
+  dimWarm: 0xff6a3a,
+  dimWarmK: 0.5,
 };
 
 /** 每帧传给手电的位姿（房屋坐标） */
@@ -65,6 +73,9 @@ export interface Flashlight {
   readonly hand: THREE.Object3D;
   dispose(): void;
 }
+
+/** 下一支手电分到登记表的哪个槽（characters.ts 一次建 TORCH_COUNT 支，调用处不用改；开发页多建的按余数轮回） */
+let nextSlot = 0;
 
 /**
  * 这一次画光锥的相机：1 = 透视（第三人称），0 = 正交（娃娃屋）。所有手电共用，光锥画之前按相机设。
@@ -107,6 +118,8 @@ function sharedParts() {
 
 export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flashlight {
   const parts = sharedParts();
+  const slot = nextSlot++ % TORCH_COUNT;
+  const reg = torches[slot];
   const halo = new THREE.SpotLight(PALETTE.torchHalo, 0, TORCH.distance, TORCH.halo.angle, TORCH.halo.penumbra, TORCH.decay);
   const core = new THREE.SpotLight(PALETTE.torchCore, 0, TORCH.distance, TORCH.core.angle, TORCH.core.penumbra, TORCH.decay);
   halo.castShadow = true;
@@ -114,6 +127,8 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
   halo.shadow.bias = TORCH.shadow.bias;
   // 房子任务把「只投影的全高墙」放在 layer 1：让外圈的阴影相机也看见它们，光就不会从降低的墙上方漏到隔壁
   halo.shadow.camera.layers.enable(1);
+  // 鬼魂只进手电阴影图的那份影子（ghost.ts，被照出、现身时才不丢）
+  halo.shadow.camera.layers.enable(GHOST_SHADOW_LAYER);
   const target = new THREE.Object3D();
   halo.target = target;
   core.target = target;
@@ -150,6 +165,10 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
   const seed = Math.random() * 100;
   const dirV = new THREE.Vector3();
   const fwd = new THREE.Vector3(0, 0, 1);
+  // 压暗时的偏色：两盏灯原来的颜色、往哪个颜色偏；压暗系数没变就不重算颜色
+  const haloColor = halo.color.clone(), coreColor = core.color.clone();
+  const warm = halo.color.clone().setHex(TORCH.dimWarm);
+  let lastDim = 1;
 
   const applyQuality = () => {
     const s = TORCH.shadow.size[q];
@@ -166,6 +185,7 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
     halo.shadow.autoUpdate = false; // 不再每帧画这盏灯的阴影图
     hand.visible = false;
     strength.value = 0;
+    reg.power = 0;
   };
   park();
   // 闲置的手电也要先画一次阴影图：否则材质绑定时 three 会把还没渲染过的深度贴图当普通贴图建出来，
@@ -189,8 +209,16 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
       const flick = 1 - nerv * TORCH.nervous.flicker * Math.min(1, n + dip);
       const dir = p.dir + nerv * TORCH.nervous.jitter * Math.sin(time * 21 + seed * 3);
 
-      halo.intensity = TORCH.halo.intensity * p.power * flick;
-      core.intensity = TORCH.core.intensity * p.power * flick;
+      // 灯闪（lightfx.ts 写的压暗系数）：强度直接乘；颜色往暖红偏，越暗越红
+      const dim = torchDim[slot];
+      if (dim !== lastDim) {
+        lastDim = dim;
+        const w = Math.max(0, 1 - dim) * TORCH.dimWarmK;
+        halo.color.copy(haloColor).lerp(warm, w);
+        core.color.copy(coreColor).lerp(warm, w);
+      }
+      halo.intensity = TORCH.halo.intensity * p.power * flick * dim;
+      core.intensity = TORCH.core.intensity * p.power * flick * dim;
       // 亮芯在最近的墙后面截断（光轴和亮芯两侧边缘各量一次，取最近的）
       const a = TORCH.core.angle, far = TORCH.distance;
       const wall = Math.min(wallDistance(p.x, p.z, dir, far), wallDistance(p.x, p.z, dir - a, far), wallDistance(p.x, p.z, dir + a, far));
@@ -208,7 +236,14 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
       const horiz = Math.hypot(dirV.x, dirV.z) || 1;
       const len = Math.min(TORCH.beam.length, wallDistance(p.x, p.z, dir, TORCH.beam.length) / horiz);
       beam.scale.setScalar(Math.max(0.05, len));
-      strength.value = TORCH.beam.opacity * p.power * flick;
+      strength.value = TORCH.beam.opacity * p.power * flick * dim;
+
+      // 登记表：鬼魂的着色器按它判断自己在不在这支手电的光锥里（房屋坐标；光轴就是上面指向照射点的 dirV）
+      reg.x = p.x; reg.y = p.y; reg.z = p.z;
+      reg.dx = dirV.x; reg.dy = dirV.y; reg.dz = dirV.z;
+      reg.angle = TORCH.halo.angle;
+      reg.range = TORCH.distance;
+      reg.power = p.power * flick * dim;
     },
     park,
     setQuality(nq) {
@@ -216,6 +251,7 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
       applyQuality();
     },
     dispose() {
+      reg.power = 0;
       parent.remove(halo, core, target, hand);
       halo.dispose();
       core.dispose();

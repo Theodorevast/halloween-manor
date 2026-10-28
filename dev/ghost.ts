@@ -7,6 +7,12 @@
 //   ?cam=x,y,z       镜头放在这里（看向鬼魂），覆盖 dist / up；?look=x,y,z 看向这一点而不是鬼魂
 //   ?low             画质 low；?webgl 强制 WebGL2；?gputime 量 GPU 时间
 //   ?notorch         不放手电；?fog 加地面薄雾（雾按正交相机算深度，透视下不准，只看个大概）
+//   ?torch=x,z,dir   只放这一支假手电（离地 0.8 米，dir 为照向的方向角），看手电照出鬼魂（G1）；
+//                    ?noreveal 照样打光、但不让鬼魂知道自己被照着（登记表强度记 0），对比用
+//   ?manifest        每 4 秒自动现身一次：假的 WorldState.manifest（蓄力 → 停留 → 冷却）和 manifest 事件直接喂给各模块，
+//                    带灯闪（lightfx）和地上的霜（frost）。模拟那边还没做现身，正式游戏里由 main.ts 接线。
+//                    &solid=0.1 换一档「实」的那份没被照着时的暗度（GHOST.solid.dark，默认 0.03；0.1 是简报原定的，对比用）
+//   ?model=url       换成这个 GLB 当鬼魂（不改 config/ghost.ts 试新模型）；&animated 有骨骼动画，&clip=名字 现身停留时播的片段
 //   ?fx              保留后处理里的 AO 和景深（它们按正交相机写的，透视下会出错，默认关）
 //   ?noghostfx / ?noceiling   和正式页面一样：关掉溶解 + 鬼魂 / 不要天花板（量开销的对照）
 // Playwright：window.__ghostdev
@@ -15,14 +21,21 @@
 //   .walk(x0, z0, x1, z1, seconds)  沿直线匀速飘过去（尾迹、穿墙那一团雾都按正常节奏出）
 //   .gpu(reset)                     上次 reset 以来平均每帧 GPU 毫秒（要 ?gputime）
 //   .holeCheck(n, seed, shoulder)   抽 n 个随机姿势检查「不挖洞的那份」会不会漏掉洞或霜（见函数说明）
+//   .manifest(auto?)                现在就现身一次（auto = true 时之后每 4 秒一次）
+//   .pauseAt(phase, t)              等到现身走到 phase（'windup' / 'hold' / 'cooldown'）的第 t 秒，把整页的钟停住（截图用），
+//                                   返回那一刻的 stats；.resume() 接着走
 //   .setQuality('low') / .stats()
 import * as THREE from 'three/webgpu';
 import { CELL, HOUSE_D, HOUSE_W, Tile, buildTiles, cellOf, idx, inGrid } from '../src/config/house';
 import { createRenderCore } from '../src/engine/renderer';
+import { MANIFEST } from '../src/config/visitors';
 import type { FrameCtx, GhostRig, GhostState, Module, Quality } from '../src/engine/types';
-import type { WorldState } from '../src/sim/types';
+import type { ManifestPhase, SimEvent, WorldState } from '../src/sim/types';
 import { createFlashlight } from '../src/view/flashlight';
-import { createGhostView } from '../src/view/ghost';
+import { createFrost } from '../src/view/frost';
+import { GHOST, createGhostView, ghostRevealAmount, loadGhostModel } from '../src/view/ghost';
+import { createLightFx } from '../src/view/lightfx';
+import { torches as torchRegistry } from '../src/view/torches';
 import { createHouseView } from '../src/view/house';
 import { ghostDissolve } from '../src/view/walls';
 import { createPropsView } from '../src/view/props';
@@ -108,10 +121,18 @@ fit();
 const modules: Module[] = [createHouseView(core, rig)];
 if (q.has('fog')) modules.push((await import('../src/view/fog')).createFogView(core, rig));
 modules.push(createPropsView(core));
-modules.push(createGhostView(core, rig));
+// 灯闪、地上的霜：现身时鬼魂的画面调它们（正式游戏里 main.ts 建好、放进 modules、传给 createGhostView）
+const lightfx = createLightFx(core);
+const frost = createFrost(core);
+// 鬼魂的模型：?model 优先，不然照 config/ghost.ts（url 为 null 时用程序化的）
+const model = await loadGhostModel(q.has('model') ? { url: q.get('model'), animated: q.has('animated'), clip: q.get('clip') } : undefined);
+// ?solid=0.1：「实」的那份没被照着时的暗度（建鬼魂之前改，它的 uniform 按这个值初始化）
+if (q.has('solid')) GHOST.solid.dark = num('solid', GHOST.solid.dark);
+modules.push(createGhostView(core, rig, { lights: lightfx, frost, model }), lightfx, frost);
 
-// 四支手电（模拟 4 个访客）：书房、走廊、门厅、厨房，和 dev/fog.ts 一样的姿势
-const poses = q.has('notorch') ? [] : [
+// 四支手电（模拟 4 个访客）：书房、走廊、门厅、厨房，和 dev/fog.ts 一样的姿势；?torch=x,z,dir 时只放那一支
+const oneTorch = q.get('torch')?.split(',').map(Number);
+const poses = q.has('notorch') ? [] : oneTorch ? [{ x: oneTorch[0], z: oneTorch[1], dir: oneTorch[2] ?? 0 }] : [
   { x: 1.6, z: 2.6, dir: 0.15 },
   { x: 2.2, z: 6.0, dir: 0.05 },
   { x: 8.0, z: 10.4, dir: -Math.PI / 2 },
@@ -136,13 +157,56 @@ const setGhost = (x: number, z: number, heading = g.heading, y = g.y) => {
   g.inWall = wallish(x, z);
 };
 
+// —— 假的现身（?manifest、.manifest()）：蓄力 MANIFEST.windup 秒 → 停留 MANIFEST.hold 秒 → 冷却，到 cycle 秒再来 ——
+// 和模拟层一样：阶段一变就发一个 manifest 事件（windup / drop / end），state.manifest 写这一段过了多久
+const MAN_CYCLE = 4;
+let manT0 = q.has('manifest') ? 1 : -1;
+let manAuto = q.has('manifest');
+let manPhase: ManifestPhase = 'idle';
+let manPos = { x: 0, z: 0 };
+const manifestStep = (): SimEvent[] => {
+  if (manT0 < 0) return [];
+  if (manAuto && manPhase === 'cooldown' && time - manT0 >= MAN_CYCLE) manT0 = time;
+  const tau = time - manT0;
+  const W = MANIFEST.windup, H = MANIFEST.hold;
+  const want: ManifestPhase = tau < 0 ? 'idle' : tau < W ? 'windup' : tau < W + H ? 'hold' : 'cooldown';
+  const evs: SimEvent[] = [];
+  // 一帧跨过好几段（dt 大）也按顺序把事件都发出来
+  const order: ManifestPhase[] = ['idle', 'windup', 'hold', 'cooldown'];
+  if (want === 'windup' && manPhase === 'cooldown') manPhase = 'idle';
+  while (manPhase !== want && order.indexOf(want) > order.indexOf(manPhase)) {
+    manPhase = order[order.indexOf(manPhase) + 1];
+    if (manPhase === 'windup') manPos = { x: g.x, z: g.z };
+    const phase = manPhase === 'windup' ? 'windup' : manPhase === 'hold' ? 'drop' : 'end';
+    evs.push({ type: 'manifest', phase, pos: { ...manPos }, scared: [] });
+  }
+  const start = manPhase === 'windup' ? 0 : manPhase === 'hold' ? W : W + H;
+  state.manifest = {
+    phase: manPhase, t: Math.max(0, tau - start),
+    cooldown: manPhase === 'cooldown' ? Math.max(0, MAN_CYCLE - tau) : 0, pos: manPhase === 'idle' ? null : { ...manPos },
+  };
+  return evs;
+};
+
+// —— 截图用：等到现身的某一刻把钟停住 ——
+let frozen = false;
+let pauseReq: { phase: ManifestPhase; t: number; done: (v: unknown) => void } | null = null;
+
 let time = 0;
 let last = performance.now();
 const loop = () => {
   const now = performance.now();
-  const dt = Math.min(0.1, (now - last) / 1000);
+  const dt = frozen ? 0 : Math.min(0.1, (now - last) / 1000);
   last = now;
   time += dt;
+  for (const e of manifestStep()) for (const m of modules) m.onEvent?.(e, state);
+  if (pauseReq && state.manifest.phase === pauseReq.phase && state.manifest.t >= pauseReq.t) {
+    frozen = true;
+    const done = pauseReq.done;
+    pauseReq = null;
+    // 这一帧画完再交回去（截图拍的是停住的这一帧）
+    requestAnimationFrame(() => done({ ...state.manifest, time: +time.toFixed(3) }));
+  }
   if (walk) {
     walk.t += dt;
     const u = Math.min(1, walk.t / walk.dur);
@@ -153,6 +217,8 @@ const loop = () => {
   }
   rig.update(dt);
   poses.forEach((p, k) => torches[k].update({ x: p.x, y: 0.8, z: p.z, dir: p.dir, power: 1, nervous: false }, dt, time));
+  // ?noreveal：灯照样亮，鬼魂的着色器当作没被照着（A/B 对比）
+  if (q.has('noreveal')) for (const t of torchRegistry) t.power = 0;
   const ctx: FrameCtx = { dt, time, state };
   for (const m of modules) m.update?.(ctx);
   core.render(rig.camera);
@@ -240,10 +306,23 @@ setGhost(g.x, g.z);
   },
   gpu: (reset = false) => core.gpuTime(reset),
   holeCheck,
+  manifest: (auto = false) => {
+    manAuto = auto;
+    manPhase = 'idle';
+    manT0 = time;
+  },
+  pauseAt: (phase: ManifestPhase, t: number) => new Promise((done) => {
+    frozen = false;
+    pauseReq = { phase, t, done };
+  }),
+  resume: () => { frozen = false; pauseReq = null; },
+  lightfx,
+  frost,
   setQuality,
   stats: () => ({
     backend: core.backend, quality, ghost: { ...g }, cell: cellOf(g.x, g.z), cellSize: CELL,
     drawCalls: core.renderer.info.render.drawCalls, post: Boolean(core.post),
+    reveal: +ghostRevealAmount().toFixed(3),
   }),
   core,
   THREE,

@@ -248,6 +248,7 @@ function buildOutdoors() {
   const porch = new THREE.PointLight(PALETTE.lamp, PORCH.intensity, PORCH.distance, 2);
   porch.position.set(P.x, P.y, P.z);
   porch.castShadow = false;
+  porch.userData.lightfx = { emissive: glowMat }; // 现身时跟着附近的灯一起暗，灯笼（glowMat）也一起（lightfx.ts 收集）
   porch.name = 'porch-light';
   out.push(porch);
 
