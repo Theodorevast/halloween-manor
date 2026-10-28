@@ -12,3 +12,5 @@ shots/
 .env.*
 # Tripo 生成过程的原始下载和参考图
 assets-src/
+# 素材中台（vmc）下载的原图母版，不进仓库
+assets/generated/
