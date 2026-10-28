@@ -7,6 +7,8 @@
 //   ?cam=x,y,z       镜头放在这里（看向鬼魂），覆盖 dist / up；?look=x,y,z 看向这一点而不是鬼魂
 //   ?low             画质 low；?webgl 强制 WebGL2；?gputime 量 GPU 时间
 //   ?notorch         不放手电；?fog 加地面薄雾（雾按正交相机算深度，透视下不准，只看个大概）
+//   ?torch=x,z,dir   只放这一支假手电（离地 0.8 米，dir 为照向的方向角），看手电照出鬼魂（G1）；
+//                    ?noreveal 照样打光、但不让鬼魂知道自己被照着（登记表强度记 0），对比用
 //   ?fx              保留后处理里的 AO 和景深（它们按正交相机写的，透视下会出错，默认关）
 //   ?noghostfx / ?noceiling   和正式页面一样：关掉溶解 + 鬼魂 / 不要天花板（量开销的对照）
 // Playwright：window.__ghostdev
@@ -22,7 +24,8 @@ import { createRenderCore } from '../src/engine/renderer';
 import type { FrameCtx, GhostRig, GhostState, Module, Quality } from '../src/engine/types';
 import type { WorldState } from '../src/sim/types';
 import { createFlashlight } from '../src/view/flashlight';
-import { createGhostView } from '../src/view/ghost';
+import { createGhostView, ghostRevealAmount } from '../src/view/ghost';
+import { torches as torchRegistry } from '../src/view/torches';
 import { createHouseView } from '../src/view/house';
 import { ghostDissolve } from '../src/view/walls';
 import { createPropsView } from '../src/view/props';
@@ -108,8 +111,9 @@ if (q.has('fog')) modules.push((await import('../src/view/fog')).createFogView(c
 modules.push(createPropsView(core));
 modules.push(createGhostView(core, rig));
 
-// 四支手电（模拟 4 个访客）：书房、走廊、门厅、厨房，和 dev/fog.ts 一样的姿势
-const poses = q.has('notorch') ? [] : [
+// 四支手电（模拟 4 个访客）：书房、走廊、门厅、厨房，和 dev/fog.ts 一样的姿势；?torch=x,z,dir 时只放那一支
+const oneTorch = q.get('torch')?.split(',').map(Number);
+const poses = q.has('notorch') ? [] : oneTorch ? [{ x: oneTorch[0], z: oneTorch[1], dir: oneTorch[2] ?? 0 }] : [
   { x: 1.6, z: 2.6, dir: 0.15 },
   { x: 2.2, z: 6.0, dir: 0.05 },
   { x: 8.0, z: 10.4, dir: -Math.PI / 2 },
@@ -151,6 +155,8 @@ const loop = () => {
   }
   rig.update(dt);
   poses.forEach((p, k) => torches[k].update({ x: p.x, y: 0.8, z: p.z, dir: p.dir, power: 1, nervous: false }, dt, time));
+  // ?noreveal：灯照样亮，鬼魂的着色器当作没被照着（A/B 对比）
+  if (q.has('noreveal')) for (const t of torchRegistry) t.power = 0;
   const ctx: FrameCtx = { dt, time, state };
   for (const m of modules) m.update?.(ctx);
   core.render(rig.camera);
@@ -242,6 +248,7 @@ setGhost(g.x, g.z);
   stats: () => ({
     backend: core.backend, quality, ghost: { ...g }, cell: cellOf(g.x, g.z), cellSize: CELL,
     drawCalls: core.renderer.info.render.drawCalls, post: Boolean(core.post),
+    reveal: +ghostRevealAmount().toFixed(3),
   }),
   core,
   THREE,
