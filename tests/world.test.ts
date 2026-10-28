@@ -7,7 +7,7 @@ import { createNpc, exposure } from '../src/sim/npc';
 import { facesToward } from '../src/sim/scares';
 import { cellCenter, cellOf, FRONT_DOOR, inGrid, PROPS, propCenter } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
-import { BEHAVIOR, FEAR, HIT_STOP, NAMES, PERSONALITIES, SPAWN, SPEED } from '../src/config/visitors';
+import { BEHAVIOR, FEAR, HIT_STOP, NAMES, NOTICE, PERSONALITIES, SPAWN, SPEED, TRAITS } from '../src/config/visitors';
 import { angleOf, wrapAngle } from '../src/lib/angle';
 import type { NpcState, SimEvent, Vec2, World } from '../src/sim/types';
 
@@ -285,7 +285,8 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
           // 受惊结束后回到原来的状态，接着走原来的路。
           // 僵住期间听见别人的尖叫（同一面镜子也吓到了旁边的人）或引诱声的，按设计恢复成警觉（见「受惊中听到声音」）
           const after = [...hit, ...run(w, FEAR.startleTime + 0.05, DT)];
-          const heard = after.some((e) => (e.type === 'heard' || (e.type === 'startle' && e.object === null)) && e.npc === walker.id);
+          // 蓄势期间听到的也算：那时正被定住，声音只是记下（察觉那一拍等定住完），被吓完照样去查看
+          const heard = [...wind, ...after].some((e) => (e.type === 'heard' || (e.type === 'startle' && e.object === null)) && e.npc === walker.id);
           if (walker.mode !== 'fleeing') expect(walker.mode).toBe(heard ? 'alert' : mode0);
           cases++;
         }
@@ -456,7 +457,8 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     const a = w.spawn({ pos: A_POS, personality: 'average' });
     const b = w.spawn({ pos: B_POS, personality: 'average' });
     expect(w.trigger('music-box')).toBe(true);
-    const ev = w.step(0.1);
+    // 先察觉那一拍（停下盯着声源），盯完才转入警觉：等待时间加上最长的那一拍
+    const ev = w.step(0.1 + NOTICE.hold[1] * 1.5);
     expect(ofType(ev, 'heard')).toEqual([{ type: 'heard', npc: a.id, object: 'music-box' }]);
     expect(a.mode).toBe('alert');
     expect(a.fear).toBe(4);
@@ -467,12 +469,12 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     expect(a.screaming).toBe(0);
   });
 
-  test('警觉：走到离八音盒 investigateDist 以内、看得见它的地方停下，手电一直指着它；查看后回到闲逛', () => {
+  test('警觉：走到离八音盒 investigateDist（average）以内、看得见它的地方停下，手电一直指着它；查看后回到闲逛', () => {
     const w = createWorld({ seed: 8, autoSpawn: false });
     const a = w.spawn({ pos: A_POS, personality: 'average' });
     const mb = prop('music-box');
     w.trigger('music-box');
-    w.step(DT);
+    w.step(DT + NOTICE.hold[1] * 1.5); // 先察觉那一拍，盯完才转入警觉
     expect(a.mode).toBe('alert');
     const grid = new Grid();
     let arrivedAt = -1;
@@ -486,9 +488,9 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
       } else if (arrivedAt < 0 && a.path.length === 0) {
         arrivedAt = w.state.time;
         const d = Math.hypot(a.pos.x - mb.x, a.pos.z - mb.z);
-        // 走到查看点（离声源 investigateDist 以内）的 arrive 范围里就算到了
-        expect(d).toBeLessThanOrEqual(BEHAVIOR.investigateDist + BEHAVIOR.arrive + 1e-6);
-        expect(d).toBeGreaterThan(BEHAVIOR.investigateDist - 0.5); // 不贴到声源跟前
+        // 走到查看点（离声源 investigateDist 以内，按性格）的 arrive 范围里就算到了
+        expect(d).toBeLessThanOrEqual(TRAITS.average.investigateDist + BEHAVIOR.arrive + 1e-6);
+        expect(d).toBeGreaterThan(TRAITS.average.investigateDist - 0.5); // 不贴到声源跟前
         expect(grid.walkableAt(a.pos)).toBe(true);
         expect(grid.lineOfSight(a.pos, mb)).toBe(true);
       }
@@ -545,6 +547,7 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     expect(st).toContainEqual({ type: 'startle', npc: a.id, object: 'portrait', amount: 32, scream: true });
     expect(st).toContainEqual({ type: 'startle', npc: b.id, object: null, amount: 5, scream: false });
     expect(st.some((e) => e.npc === c.id)).toBe(false);
+    run(w, NOTICE.hold[1] * 1.5); // 先察觉那一拍，盯完才转入警觉
     expect(b.mode).toBe('alert');
     expect(b.fear).toBe(5);
     expect(b.screaming).toBe(0);
@@ -795,15 +798,16 @@ describe('World：闲逛、转向、不穿墙', () => {
     expect(rooms.size).toBeGreaterThan(3);
   });
 
-  test('转向限速：身体和手电每步最多转 turnRate × dt（受惊时除外；被惊吓蓄势定住时最多 transfixTurn 倍）', () => {
+  test('转向限速：身体和手电每步最多转 turnRate × dt（受惊时除外；被惊吓蓄势定住时最多 transfixTurn 倍；察觉那一拍时手电最多 torchTurn 倍）', () => {
     const ids = PROPS.map((p) => p.id);
     const normal = BEHAVIOR.turnRate * DT + 1e-9;
     const transfixed = BEHAVIOR.turnRate * BEHAVIOR.transfixTurn * DT + 1e-9;
+    const torchNotice = BEHAVIOR.turnRate * NOTICE.torchTurn * DT + 1e-9;
     let sawFast = false;
     // 每局都检查限速；「确实有人被定住、转得比平时快」要看运气（谁正好在蓄势时看见、要转多少），换几个种子直到出现
     for (let seed = 48; seed < 60 && !sawFast; seed++) {
       const w = createWorld({ seed });
-      const prev = new Map<number, { h: number; l: number; m: string }>();
+      const prev = new Map<number, { h: number; l: number; m: string; noticing: boolean }>();
       // 这一步开始前有没有惊吓物件在蓄势（只有这时才可能有人被定住、转得更快）
       const anyWindingUp = () =>
         w.state.objects.some((o) => {
@@ -818,11 +822,13 @@ describe('World：闲逛、转向、不穿墙', () => {
           const p = prev.get(n.id);
           if (p && p.m !== 'startled' && n.mode !== 'startled') {
             const dh = Math.abs(wrapAngle(n.heading - p.h)), dl = Math.abs(wrapAngle(n.lookDir - p.l));
+            // 这一步开始或结束时在察觉那一拍：手电可以转得快一些（身体照旧）
+            const noticing = p.noticing || !!n.notice;
             expect(dh).toBeLessThanOrEqual(limit);
-            expect(dl).toBeLessThanOrEqual(limit);
-            if (Math.max(dh, dl) > normal) sawFast = true;
+            expect(dl).toBeLessThanOrEqual(noticing ? Math.max(limit, torchNotice) : limit);
+            if (Math.max(dh, dl) > (noticing ? torchNotice : normal)) sawFast = true;
           }
-          prev.set(n.id, { h: n.heading, l: n.lookDir, m: n.mode });
+          prev.set(n.id, { h: n.heading, l: n.lookDir, m: n.mode, noticing: !!n.notice });
         }
       }
     }

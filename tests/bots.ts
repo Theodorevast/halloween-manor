@@ -18,7 +18,7 @@ import { canHear, canSee } from '../src/sim/perception';
 import { facesToward } from '../src/sim/scares';
 import { cellCenter, FRONT_DOOR, GRID_H, GRID_W } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
-import { BEHAVIOR, VISION } from '../src/config/visitors';
+import { BEHAVIOR, TRAITS, VISION } from '../src/config/visitors';
 import { angleOf } from '../src/lib/angle';
 import { GHOST_SOURCE } from '../src/sim/types';
 import type { Personality, ScareObjectState, Vec2, World } from '../src/sim/types';
@@ -217,23 +217,30 @@ function fireLures(w: World, policy: LurePolicy, fire: Fire, reach: Reach) {
   for (const lure of w.state.objects) {
     if (isSight(lure) || !ready(lure) || !reach(lure)) continue;
     const range = SCARES[lure.type].range;
-    // 只考虑会被这一声拉走的人：听得见、没在逃跑 / 警觉 / 受惊
+    // 只考虑会被这一声拉走的人：听得见、没在逃跑 / 警觉 / 受惊，也没在察觉一个声音（那一拍完了就转入警觉）
     const hearers = w.state.npcs.filter(
-      (n) => n.mode !== 'fleeing' && n.mode !== 'alert' && n.mode !== 'startled' && canHear(grid, n.pos, lure.pos, range),
+      (n) =>
+        n.mode !== 'fleeing' && n.mode !== 'alert' && n.mode !== 'startled' && n.notice?.kind !== 'sound' && canHear(grid, n.pos, lure.pos, range),
     );
-    const predicted = policy !== 'topup' && hearers.some((n) => lureLeadsToScare(n.pos, lure.pos, sights));
+    const predicted = policy !== 'topup' && hearers.some((n) => lureLeadsToScare(n.pos, lure.pos, sights, grid, TRAITS[n.personality].investigateDist));
     const topUp = policy !== 'predict' && hearers.some((n) => n.fear > 0);
     if (predicted || topUp) fire(lure.id);
   }
 }
 
 /**
- * 预测：站在 from 的人听见 source 后会怎么走（和模拟用同一个 alertPath），走的时候手电指着声源，
- * 到了查看位置再左右扫（BEHAVIOR.investigateSweep）。途中或查看时能看见 sights 里的某一个（含正面朝向）就返回 true
+ * 预测：站在 from 的人听见 source 后会怎么走（和模拟用同一个 alertPath；dist 是他走到离声源多近，按性格），
+ * 走的时候手电指着声源，到了查看位置再左右扫（BEHAVIOR.investigateSweep）。途中或查看时能看见 sights 里的某一个（含正面朝向）就返回 true
  */
-export function lureLeadsToScare(from: Vec2, source: Vec2, sights: readonly ScareObjectState[], g: Grid = grid): boolean {
+export function lureLeadsToScare(
+  from: Vec2,
+  source: Vec2,
+  sights: readonly ScareObjectState[],
+  g: Grid = grid,
+  dist: number = TRAITS.average.investigateDist,
+): boolean {
   if (sights.length === 0) return false;
-  const path = alertPath(g, from, source);
+  const path = alertPath(g, from, source, dist);
   if (!path) return false;
   const sees = (p: Vec2, lookDir: number) =>
     sights.some((o) => facesToward(o, p) && canSee(g, { pos: p, lookDir }, o.pos, Math.min(SCARES[o.type].range, VISION.range)));
@@ -254,7 +261,7 @@ export function lureLeadsToScare(from: Vec2, source: Vec2, sights: readonly Scar
   return false;
 }
 
-/** 每个引诱物件：能听见它的可走格有多少，其中多少格的人被它引过去时会看见一个惊吓物件 */
+/** 每个引诱物件：能听见它的可走格有多少，其中多少格的人被它引过去时会看见一个惊吓物件（按最常见的 average 走到多近算） */
 export function lureCoverage(objects: readonly ScareObjectState[], g: Grid = grid): { id: string; hearing: number; leads: number }[] {
   const sights = objects.filter(isSight);
   return objects.filter((o) => !isSight(o)).map((lure) => {

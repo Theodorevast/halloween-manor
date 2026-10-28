@@ -4,9 +4,11 @@
 // - 鬼魂贴近时发毛（feelGhost，每步在状态机之前）：恐惧值慢慢上涨、走慢、偶尔回头张望，贴得够久是「后颈一凉」（GHOST）
 // - 走路的加减速（walk / stand）：沿路径的速度平滑变化，拐弯前提前转身、降速，快到终点时刹住（MOTION）
 // - 访客之间互相避让（senseCrowd / separate）：侧身让路、跟着走、被挤开，挡住太久就绕开重新寻路（CROWD）
+// 2026-10-28 访客反馈（设计文档 2.1）：察觉那一拍（notice）。听到声音时先停下、手电先转向来源、身体跟上，
+// 盯 NOTICE.hold 秒再决定下一步（声音：走过去查看）；状态机在这期间暂停，路径留着（NOTICE、TRAITS）
 import { CELL, cellCenter, cellOf, FRONT_DOOR, GRID_H, idx, inGrid, ROOMS, roomAt, Tile } from '../config/house';
 import type { RoomId } from '../config/house';
-import { BEHAVIOR, CROWD, FEAR, GHOST, MOTION, PERSONALITIES, SPEED } from '../config/visitors';
+import { BEHAVIOR, CROWD, FEAR, GHOST, MOTION, NOTICE, PERSONALITIES, SPEED, TRAITS } from '../config/visitors';
 import { angleOf, wrapAngle } from '../lib/angle';
 import { Grid } from './grid';
 import { findPath } from './pathfind';
@@ -14,7 +16,7 @@ import type { Rng } from './rng';
 import { windingUp } from './scares';
 import type { ScareObject } from './scares';
 import { GHOST_SOURCE } from './types';
-import type { NpcState, Personality, ScareType, SimEvent, Vec2 } from './types';
+import type { NoticeKind, NpcState, Personality, ScareType, SimEvent, Vec2 } from './types';
 
 // 以下几个手电摆动幅度是计划里给的定值（config 里没有），集中放在这里方便调
 /** 走路时手电在身体朝向两侧的小幅摆动（弧度），周期用 BEHAVIOR.sweepPeriod */
@@ -121,6 +123,8 @@ interface Resume {
   lookT: number;
   lookBase: number;
   source: Vec2 | null;
+  /** 被吓到时正在察觉一个声音（还没走过去）：恢复后不回原来的事，去查看它。原来的路径在僵住期间原样留着 */
+  alertAt: Vec2 | null;
 }
 
 export interface Npc {
@@ -151,6 +155,12 @@ export interface Npc {
    * 惊吓落下后照常判定、照常恢复。不加恐惧值，NpcState 里只表现为 speed 0
    */
   transfixOn: ScareObject | null;
+
+  // ——— 察觉那一拍（s.notice 是正在察觉的来源和计时） ———
+  /** 察觉开始时身体的朝向：站着的人察觉完（照到鬼魂、发毛）要转回去；走着的人由走路接管，清成 null */
+  noticeHome: { heading: number } | null;
+  /** 察觉完要去查看的声源（听到声音时记下）；null = 察觉完回到原来的事 */
+  afterNotice: Vec2 | null;
 
   // ——— 走路与避让 ———
   /** 沿路径走的速度（米/秒），按 MOTION 平滑加减速。NpcState.speed 是这一步实际挪动的距离 / dt */
@@ -240,6 +250,8 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     jitter: 0,
     jitterLeft: 0,
     transfixOn: null,
+    noticeHome: null,
+    afterNotice: null,
     v: 0,
     mx: Math.cos(o.lookDir),
     mz: Math.sin(o.lookDir),
@@ -322,7 +334,13 @@ function startleWith(npc: Npc, ctx: NpcCtx, objectId: string, amount: number, sr
     beginFlee(npc, ctx);
     return;
   }
-  if (s.mode !== 'startled') npc.resume = snapshot(npc);
+  // 察觉到一半被吓到：那一拍作废。听到的声音照样算数（和「受惊中听到」一样），恢复后去查看
+  const go = npc.afterNotice;
+  clearNotice(npc);
+  if (s.mode !== 'startled') {
+    npc.resume = snapshot(npc);
+    npc.resume.alertAt = go;
+  }
   s.mode = 'startled';
   s.modeTime = 0;
   freeze(npc);
@@ -333,8 +351,9 @@ function startleWith(npc: Npc, ctx: NpcCtx, objectId: string, amount: number, sr
 }
 
 /**
- * 听到声音（引诱声或别人的尖叫）：恐惧值增加，转入警觉走向声源，不僵住。
- * 受惊中听到：不打断僵住，只把「恢复后做什么」改成去查看这个声源。
+ * 听到声音（引诱声或别人的尖叫）：恐惧值增加；先察觉那一拍（停下、手电转向声源、盯一会儿），
+ * 盯完再转入警觉走向声源，不僵住。
+ * 受惊中听到：不打断僵住，只把「恢复后做什么」改成去查看这个声源（原来的路径在僵住期间原样留着）。
  */
 export function hear(npc: Npc, ctx: NpcCtx, amount: number, source: Vec2, event: SimEvent): void {
   const s = npc.s;
@@ -345,17 +364,85 @@ export function hear(npc: Npc, ctx: NpcCtx, amount: number, source: Vec2, event:
     return;
   }
   if (s.mode !== 'startled') {
-    beginAlert(npc, ctx, source);
+    // 正在察觉更要紧的（现身蓄力）时不转过来，但声音记下了：那一拍完了照样去查看
+    notice(npc, ctx, 'sound', source);
+    npc.afterNotice = { x: source.x, z: source.z };
     return;
   }
-  const keep = { modeTime: s.modeTime, startleLeft: npc.startleLeft, lookDir: s.lookDir };
-  beginAlert(npc, ctx, source);
-  npc.resume = snapshot(npc);
-  s.mode = 'startled';
-  s.modeTime = keep.modeTime;
-  freeze(npc);
-  s.lookDir = keep.lookDir;
-  npc.startleLeft = keep.startleLeft;
+  npc.resume ??= snapshot(npc);
+  npc.resume.alertAt = { x: source.x, z: source.z };
+}
+
+// ——— 察觉那一拍 ———
+
+/**
+ * 察觉到一个来源（设计文档 2.1）：停下、手电先转向 src、身体跟上，盯 NOTICE.hold（× 性格的 noticeHold）秒，
+ * 再按来源决定下一步（见 endNotice）。受惊、逃跑、已离开的人不察觉；正在察觉的来源优先级更高时不接管
+ * （NOTICE.priority，一样高或更高就接管：转向新来源、重新计时）。接管成功发 notice 事件、返回 true
+ */
+export function notice(npc: Npc, ctx: NpcCtx, kind: NoticeKind, src: Vec2): boolean {
+  const s = npc.s;
+  if (!canBeScared(npc) || s.mode === 'startled') return false;
+  const cur = s.notice;
+  if (cur && NOTICE.priority[kind] < NOTICE.priority[cur.kind]) return false;
+  // 接着上一次察觉（或者还没转回去）时，记的仍是最早的朝向
+  if (!cur && !npc.noticeHome) npc.noticeHome = { heading: s.heading };
+  s.notice = {
+    kind,
+    src: { x: src.x, z: src.z },
+    t: 0,
+    hold: ctx.rng.range(NOTICE.hold[0], NOTICE.hold[1]) * TRAITS[s.personality].noticeHold,
+  };
+  ctx.events.push({ type: 'notice', npc: s.id, kind, src: { x: src.x, z: src.z } });
+  return true;
+}
+
+/** 察觉作废（受惊、逃跑）：连同「察觉完去查看」一起清掉 */
+function clearNotice(npc: Npc) {
+  npc.s.notice = null;
+  npc.afterNotice = null;
+  npc.noticeHome = null;
+}
+
+/**
+ * 察觉中（updateNpc 在状态机之前调）：沿路按 MOTION.decel 刹住（不急刹，可以被挤开），
+ * 手电按 NOTICE.torchTurn 倍的速度转向来源，身体按平常的速度跟上；盯够了交给 endNotice
+ */
+function attend(npc: Npc, ctx: NpcCtx) {
+  const s = npc.s, nt = s.notice!, dt = ctx.dt;
+  brake(npc, ctx);
+  const b = bearing(s.pos, nt.src);
+  if (b !== null) {
+    s.lookDir = turnToward(s.lookDir, b, BEHAVIOR.turnRate * NOTICE.torchTurn * dt);
+    s.heading = turnToward(s.heading, b, BEHAVIOR.turnRate * dt);
+  }
+  nt.t += dt;
+  if (nt.t >= nt.hold - 1e-9) endNotice(npc, ctx);
+}
+
+/**
+ * 那一拍完了：听到了声音就走过去查看（警觉）；照到鬼魂、发毛就回到原来的事（站着的人身体转回察觉前的朝向，
+ * 走着的人接着走原来的路）；现身蓄力什么都不做，等落下（现身的「定住」接管）
+ */
+function endNotice(npc: Npc, ctx: NpcCtx) {
+  npc.s.notice = null;
+  const go = npc.afterNotice;
+  npc.afterNotice = null;
+  if (go) {
+    npc.noticeHome = null;
+    beginAlert(npc, ctx, go);
+  }
+}
+
+/** 察觉时停下：走着的人沿原来的路按 MOTION.decel 减速到 0（路径留着）；站着的人和平常站着一样（会被挤开） */
+function brake(npc: Npc, ctx: NpcCtx) {
+  const s = npc.s;
+  if (npc.act !== 'walk' || s.path.length === 0) {
+    stand(npc, ctx);
+    return;
+  }
+  const vmax = s.mode === 'entering' ? SPEED.enter : s.mode === 'alert' ? SPEED.alert : s.nervous ? SPEED.nervous : SPEED.wander;
+  walk(npc, ctx, vmax, s.mode !== 'entering', true);
 }
 
 // ——— 鬼魂贴近 ———
@@ -439,7 +526,7 @@ export function feelGhost(npc: Npc, ctx: NpcCtx): void {
   } else npc.neckDwell = Math.max(0, npc.neckDwell - GHOST.neckDecay * dt);
 
   // 回头张望：发毛到一定程度，隔一阵随机回头看一眼（看见的只有黑暗）
-  const free = npc.transfixOn === null && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert');
+  const free = npc.transfixOn === null && !s.notice && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert');
   if (npc.glanceLeft > 0) npc.glanceLeft = free ? Math.max(0, npc.glanceLeft - dt) : 0;
   else if (free && u > 0 && npc.uneasy >= GHOST.glanceMin && ctx.now >= npc.glanceNextAt - 1e-9) {
     if (ctx.rng.next() < (dt * npc.uneasy) / GHOST.glanceEvery) {
@@ -472,6 +559,12 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
       s.heading = turnToward(s.heading, b, max);
       s.lookDir = turnToward(s.lookDir, b, max);
     }
+    return;
+  }
+
+  // 察觉那一拍：停下盯着来源，状态机（路径、各种计时）暂停；受惊、逃跑照常走下面的分支
+  if (s.notice && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert')) {
+    attend(npc, ctx);
     return;
   }
 
@@ -520,6 +613,7 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
         npc.lookLeft -= dt;
         if (!glance(npc, dt)) {
           npc.glanceHome = null;
+          npc.noticeHome = null;
           s.heading = turnToward(s.heading, toSrc, BEHAVIOR.turnRate * dt);
           lookToward(npc, dt, toSrc + BEHAVIOR.investigateSweep * Math.sin((TAU * npc.lookT) / BEHAVIOR.sweepPeriod));
         }
@@ -596,13 +690,13 @@ function startLook(npc: Npc, ctx: Pick<NpcCtx, 'rng'>, base: number) {
   npc.lookBase = base;
 }
 
-/** 警觉：按 alertPath 走过去；已经在查看位置或寻路失败就原地查看 */
+/** 警觉：按 alertPath 走过去（走到多近看性格：TRAITS.investigateDist）；已经在查看位置或寻路失败就原地查看 */
 function beginAlert(npc: Npc, ctx: NpcCtx, source: Vec2) {
   const s = npc.s;
   s.mode = 'alert';
   s.modeTime = 0;
   npc.source = { x: source.x, z: source.z };
-  const path = alertPath(ctx.nav.grid, s.pos, source);
+  const path = alertPath(ctx.nav.grid, s.pos, source, TRAITS[s.personality].investigateDist);
   if (path && path.length > 0) {
     setPath(npc, path);
     npc.act = 'walk';
@@ -614,11 +708,11 @@ const ALERT_SAMPLE = 0.1;
 
 /**
  * 警觉的路线（不含起点）：朝声源旁最近的可走格（一样近时挑自己这一侧的）走，
- * 走到离声源 BEHAVIOR.investigateDist 以内、站在可走格上、看得见声源的第一个点就停。
+ * 走到离声源 dist 米以内（按性格：TRAITS.investigateDist）、站在可走格上、看得见声源的第一个点就停。
  * 已经在这样的位置返回空数组；到不了返回 null。机器人测试也用它预测访客会走到哪里
  */
-export function alertPath(grid: Grid, from: Vec2, source: Vec2): Vec2[] | null {
-  const R2 = BEHAVIOR.investigateDist ** 2;
+export function alertPath(grid: Grid, from: Vec2, source: Vec2, dist: number): Vec2[] | null {
+  const R2 = dist ** 2;
   const viewSpot = (p: Vec2) =>
     (p.x - source.x) ** 2 + (p.z - source.z) ** 2 <= R2 && grid.walkableAt(p) && grid.lineOfSight(p, source);
   if (viewSpot(from)) return [];
@@ -663,6 +757,7 @@ function beginFlee(npc: Npc, ctx: NpcCtx) {
   npc.transfixOn = null;
   npc.glanceLeft = 0;
   npc.glanceHome = null;
+  clearNotice(npc);
   const [i, j] = cellOf(s.pos.x, s.pos.z);
   const path = inGrid(i, j) ? findPath(ctx.nav.grid, s.pos, DOOR_POINT) ?? [{ ...DOOR_POINT }] : [];
   path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
@@ -681,6 +776,7 @@ function snapshot(npc: Npc): Resume {
     lookT: npc.lookT,
     lookBase: npc.lookBase,
     source: npc.source,
+    alertAt: null,
   };
 }
 
@@ -691,6 +787,10 @@ function restore(npc: Npc, ctx: NpcCtx) {
   npc.startleLeft = 0;
   if (!r) {
     beginWander(npc, ctx);
+    return;
+  }
+  if (r.alertAt) {
+    beginAlert(npc, ctx, r.alertAt);
     return;
   }
   const s = npc.s;
@@ -735,17 +835,22 @@ type Step = 'walking' | 'arrived' | 'stuck';
  *   不停的终点（进门、逃出门）也是到了 arrive 范围就算到
  * - 身体朝向按限速转向路的方向，快到拐角时提前转，到拐角时正好转一半
  * - 别人：前面通道里有人就跟着 / 停下（逃跑的人不让），迎面 / 交叉时侧身，离得太近被挤开（见 senseCrowd）
+ * hold：察觉那一拍（见 brake）——和回头张望一样目标速度为 0、身体朝向不管，路径留着
  * 返回：还在走 / 走完了 / 被挡住太久（交给 unstick）
  */
-function walk(npc: Npc, ctx: NpcCtx, vmax: number, stopAtEnd: boolean): Step {
+function walk(npc: Npc, ctx: NpcCtx, vmax: number, stopAtEnd: boolean, hold = false): Step {
   const s = npc.s, dt = ctx.dt, grid = ctx.nav.grid;
   let path = s.path;
   if (path.length === 0) {
     stand(npc, ctx);
     return 'arrived';
   }
-  const glancing = npc.glanceLeft > 0;
-  if (!glancing) npc.glanceHome = null;
+  /** 停下但不离开这条路：回头张望、察觉那一拍。这时身体朝向由它们管 */
+  const glancing = hold || npc.glanceLeft > 0;
+  if (!glancing) {
+    npc.glanceHome = null;
+    npc.noticeHome = null;
+  }
   const ox = s.pos.x, oz = s.pos.z;
   // 中间路点已经在 arrive 范围里（比如被挤到这里）：换下一个
   while (path.length > 1 && Math.hypot(path[0].x - ox, path[0].z - oz) <= BEHAVIOR.arrive) path.shift();
@@ -956,12 +1061,17 @@ function glance(npc: Npc, dt: number): boolean {
   return true;
 }
 
-/** 站着回头看完：身体按限速转回原来的朝向 */
+/** 站着回头看完、察觉完（照到鬼魂、发毛）：身体按限速转回原来的朝向 */
 function turnBack(npc: Npc, dt: number) {
-  if (npc.glanceHome === null) return;
   const s = npc.s;
-  s.heading = turnToward(s.heading, npc.glanceHome, BEHAVIOR.turnRate * dt);
-  if (Math.abs(wrapAngle(s.heading - npc.glanceHome)) < 1e-9) npc.glanceHome = null;
+  if (npc.glanceHome !== null) {
+    s.heading = turnToward(s.heading, npc.glanceHome, BEHAVIOR.turnRate * dt);
+    if (Math.abs(wrapAngle(s.heading - npc.glanceHome)) < 1e-9) npc.glanceHome = null;
+    return;
+  }
+  if (npc.noticeHome === null) return;
+  s.heading = turnToward(s.heading, npc.noticeHome.heading, BEHAVIOR.turnRate * dt);
+  if (Math.abs(wrapAngle(s.heading - npc.noticeHome.heading)) < 1e-9) npc.noticeHome = null;
 }
 
 /** 走路时手电 = 身体朝向 + 小幅摆动 */

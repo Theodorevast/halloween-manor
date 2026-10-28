@@ -55,8 +55,7 @@ export const BEHAVIOR = {
   lookAround: [2, 4] as [number, number],
   /** 警觉时到达声源后查看多久（秒） */
   investigate: 3,
-  /** 警觉：走到离声源这么近、并且看得见声源的地方就停下查看（米），不贴到声源跟前——站远一点才看得见周围 */
-  investigateDist: 1.5,
+  // 警觉时走到离声源多近停下查看：按性格，见 TRAITS.investigateDist（原来这里全员共用一个 1.5，2026-10-28 并过去了，只留一份）
   /** 警觉查看时，手电以声源方向为中心左右扫的幅度（弧度）：扫一扫声源周围 */
   investigateSweep: 0.8,
   /** 闲逛时手电左右扫的幅度（弧度）和周期（秒） */
@@ -87,7 +86,8 @@ export const NOTICE = {
 };
 
 /**
- * 性格差异（设计文档 2.5）。investigateDist：查看声源时走到离声源多近（米；原来全员共用的 BEHAVIOR.investigateDist 就是 1.5）；
+ * 性格差异（设计文档 2.5）。investigateDist：警觉时走到离声源这么近、并且看得见声源的地方就停下查看（米），
+ * 不贴到声源跟前——站远一点才看得见周围；胆大的走得更近（原来全员共用 BEHAVIOR.investigateDist = 1.5，已并到这里）；
  * noticeHold：察觉盯着看的时长系数；chillRange：发毛范围（GHOST.radius 一类的距离）的系数；
  * recheck：被惊吓类物件吓过以后，再回头照一眼那个物件的几率（胆大的才有）
  */

@@ -103,7 +103,30 @@ function report(): string {
       `${ghostLone[0].necks} necks / ${LONE_SECONDS} s); games ${games(ghostOnly)}`,
     `lone brave skilled + ghost: ${times(loneGhost)}`,
     `games: skilled ${games(skilled)}; skilled + ghost ${games(skilledGhost)}; third person (ghost, reach ${REACH} m) ${games(skilledReach)}`,
+    ...margins(),
   ].join('\n');
+}
+
+/** 几条容易贴着界限的不变量：现在的值、界限、余量（正数 = 还有余量）。改参数时一眼看出哪条最紧 */
+function margins(): string[] {
+  const loneLife = (runs: BotRun[]) => median(runs.map((r) => r.lifetimes[0] ?? LONE_SECONDS));
+  const life = (runs: BotRun[]) => median(runs.flatMap((r) => r.lifetimes));
+  const rows: [string, number, string, number][] = [
+    ['目标 1 skilled 中位存活 ≥ 45 s', life(skilled), '≥', LIFE.min],
+    ['目标 2 单个 brave 3 分钟内吓跑（局）', fastLone(lone), '>', LONE_SEEDS.length / 2],
+    ['目标 3 random ≤ skilled / 2', avgExits(random), '≤', avgExits(skilled) / 2],
+    ['目标 5 只按预测拉 ≥ 1.25 × 不用引诱', avgExits(planned), '≥', 1.25 * avgExits(noLures)],
+    ['目标 5 单个 brave：会用引诱 ≥ 不用 + 4（局）', fastLone(lonePlanned), '≥', fastLone(loneNoLures) + 4],
+    ['鬼魂 2 单个 brave 加鬼魂中位 ≤ 0.8 × 不加（s）', loneLife(loneGhost), '≤', 0.8 * loneLife(lone)],
+    ['鬼魂 2 加鬼魂吓跑 ≥ 1.2 × skilled', avgExits(skilledGhost), '≥', 1.2 * avgExits(skilled)],
+    ['鬼魂 3 加鬼魂中位存活 ≥ 30 s', life(skilledGhost), '≥', GHOST_LIFE_FLOOR],
+    ['鬼魂 3 加鬼魂吓跑 < 2 × skilled', avgExits(skilledGhost), '<', 2 * avgExits(skilled)],
+    ['鬼魂 3 第三人称中位存活 ≥ 45 s', life(skilledReach), '≥', LIFE.min],
+  ];
+  return [
+    'margins:',
+    ...rows.map(([name, v, op, bound]) => `  ${name}: ${v.toFixed(1)} ${op} ${bound.toFixed(1)}（余量 ${(op === '≤' || op === '<' ? bound - v : v - bound).toFixed(1)}）`),
+  ];
 }
 
 describe('数值平衡（固定种子，无界面）', () => {
