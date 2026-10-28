@@ -1,8 +1,9 @@
 // 访客 GLB 精修：用本机 Blender 无头跑 refine_visitor.py（重分权重让球身不变形、清碎片、限面数和贴图、原地动画），
 // 可选出预览图并拼成一张对比表。Tripo 流水线的 export 步骤也调用这里（visitors.json 的 refine）。
 //
-//   node scripts/blender/refine.mjs <输入.glb> <输出.glb> [--preview] [--report <r.json>] [refine_visitor.py 的其他参数…]
+//   node scripts/blender/refine.mjs <输入.glb> <输出.glb> [--preview] [--report <r.json>] [--merge <第二批.glb>]… [refine_visitor.py 的其他参数…]
 //   例：node scripts/blender/refine.mjs assets-src/visitors/vampire/animate.glb .logs/vampire.glb --preview --limb-scale 1.5
+//   --merge：动作分了批（retarget 一次最多 5 个）时，把后面几批 GLB 里的动作并进输入的骨架（可重复）
 //
 // Blender 路径：环境变量 BLENDER_PATH，没有就在 C:/Program Files/Blender Foundation/ 下找版本最新的。
 // Blender 是 GPL 软件，这里只把它当离线工具跑，产物（GLB）不受影响；游戏里不打包任何 Blender 的代码。
@@ -25,16 +26,17 @@ export function findBlender() {
 
 /**
  * 跑一次精修。路径都要绝对路径（Blender 的工作目录不一定是项目根，相对路径会写到别处去）。
+ * merge：后面几批 retarget 的 GLB（绝对路径）。同一个绑骨结果、只有动作不同，精修时把它们的动作并进 src 的骨架
  * 返回 { ok, report, sheet, lines, error }；不抛错
  */
-export async function refineGlb({ src, out, report, preview = null, args = [], log = () => {} }) {
+export async function refineGlb({ src, out, report, preview = null, merge = [], args = [], log = () => {} }) {
   const blender = findBlender();
   if (!blender) return { ok: false, error: '找不到 Blender：装好之后设环境变量 BLENDER_PATH 指向 blender.exe', lines: [] };
   mkdirSync(dirname(out), { recursive: true });
   mkdirSync(dirname(report), { recursive: true });
   if (preview) mkdirSync(dirname(preview), { recursive: true });
   // --python-exit-code：脚本抛错时 Blender 默认照样退出码 0
-  const argv = ['-b', '--factory-startup', '--python-exit-code', '1', '-P', join(HERE, 'refine_visitor.py'), '--', '--in', src, '--out', out, '--report', report, ...(preview ? ['--preview', preview] : []), ...args.map(String)];
+  const argv = ['-b', '--factory-startup', '--python-exit-code', '1', '-P', join(HERE, 'refine_visitor.py'), '--', '--in', src, '--out', out, '--report', report, ...(preview ? ['--preview', preview] : []), ...merge.flatMap((m) => ['--merge', m]), ...args.map(String)];
   const r = spawnSync(blender, argv, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const lines = `${r.stdout ?? ''}\n${r.stderr ?? ''}`.split(/\r?\n/).filter((l) => /^\[refine\]|Error|Traceback|^\s+File "|Exception/.test(l));
   for (const l of lines) log(l);
@@ -101,7 +103,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const argv = process.argv.slice(2);
   const [src, out] = argv;
   if (!src || !out || src.startsWith('--') || out.startsWith('--')) {
-    console.error('用法：node scripts/blender/refine.mjs <输入.glb> <输出.glb> [--preview] [--report <r.json>] [其他参数]');
+    console.error('用法：node scripts/blender/refine.mjs <输入.glb> <输出.glb> [--preview] [--report <r.json>] [--merge <第二批.glb>]… [其他参数]');
     process.exit(2);
   }
   const rest = argv.slice(2);
@@ -117,8 +119,19 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const ri = pass.indexOf('--report');
   const reportAbs = ri >= 0 ? abs(pass[ri + 1]) : join(dirname(inAbs), `${basename(outAbs, '.glb')}-refine.json`);
   if (ri >= 0) pass.splice(ri, 2);
+  // --merge <第二批.glb>（可重复）：Blender 的工作目录不一定是项目根，换成绝对路径
+  const merge = [];
+  for (let mi = pass.indexOf('--merge'); mi >= 0; mi = pass.indexOf('--merge')) {
+    const m = pass[mi + 1] ? abs(pass[mi + 1]) : null;
+    if (!m || !existsSync(m)) {
+      console.error(`--merge 后面要写一个存在的 GLB：${pass[mi + 1] ?? '（没写）'}`);
+      process.exit(2);
+    }
+    merge.push(m);
+    pass.splice(mi, 2);
+  }
   const preview = wantPreview ? join(dirname(inAbs), 'refine-preview', basename(outAbs, '.glb')) : null;
-  const res = await refineGlb({ src: inAbs, out: outAbs, report: reportAbs, preview, args: pass, log: (s) => console.log(s) });
+  const res = await refineGlb({ src: inAbs, out: outAbs, report: reportAbs, preview, merge, args: pass, log: (s) => console.log(s) });
   if (!res.ok) {
     console.error(`\n${res.error}`);
     process.exit(1);

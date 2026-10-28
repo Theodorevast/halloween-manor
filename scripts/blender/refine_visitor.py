@@ -7,7 +7,10 @@
 # 另外：删掉零碎的小面片、超出预算时减面、贴图限到 2048、去掉动作里的水平位移（原地动画），
 # 导出 GLB；可选出预览图（各动作若干帧 × 正面 / 侧面 / 背面，和一张按分类上色的权重图）。
 #
-#   blender -b --factory-startup -P refine_visitor.py -- --in in.glb --out out.glb [--report r.json] [--preview 前缀]
+# 动作分了批（Tripo 的 retarget 一次最多 5 个，访客要 8 个）：--merge 第二批.glb（可重复）把后面几批的动作并进来，
+# 导出的 GLB 里是全部动作，骨架、网格只用 --in 的那一份。
+#
+#   blender -b --factory-startup -P refine_visitor.py -- --in in.glb --out out.glb [--report r.json] [--preview 前缀] [--merge 第二批.glb]
 #
 # 只用 Blender 自带的 bpy / bmesh / mathutils，不依赖第三方包。
 import argparse
@@ -29,6 +32,7 @@ def parse_args():
     p.add_argument('--out', required=True)
     p.add_argument('--report')
     p.add_argument('--preview', help='预览图路径前缀（绝对路径），不给就不渲染')
+    p.add_argument('--merge', action='append', default=[], help='后面几批 retarget 的 GLB（绝对路径，可重复）：同一个绑骨结果、骨骼名相同，只取它的动作，挂到 --in 的骨架上')
     p.add_argument('--max-tris', type=int, default=15000)
     p.add_argument('--max-texture', type=int, default=2048, help='底色贴图的最大边长')
     p.add_argument('--max-texture-aux', type=int, default=1024, help='其余贴图（法线、粗糙度金属度）的最大边长')
@@ -65,14 +69,120 @@ bpy.context.scene.render.fps = 30
 # merge_vertices：glTF 在贴图接缝处把顶点拆开了，不合回来的话每块 UV 岛都是一块「孤立碎片」，下面清理碎片时会被误删。
 # disable_bone_shape：导入器默认给骨头建一个显示用的球（也是网格物体），会被当成模型的一部分算面数、拟合球身
 imp = bpy.ops.import_scene.gltf.get_rna_type().properties.keys()
-bpy.ops.import_scene.gltf(filepath=A.src, merge_vertices=True, **({'disable_bone_shape': True} if 'disable_bone_shape' in imp else {}))
+
+
+def import_glb(path):
+    bpy.ops.import_scene.gltf(filepath=path, merge_vertices=True, **({'disable_bone_shape': True} if 'disable_bone_shape' in imp else {}))
+
+
+import_glb(A.src)
+arm = next((o for o in bpy.context.scene.objects if o.type == 'ARMATURE'), None)
+
+
+def fcurves_of(action):
+    # Blender 4.4 起动作分「层 / 条 / 通道包」；老接口 action.fcurves 在 5.x 已经没了
+    try:
+        return list(action.fcurves)
+    except AttributeError:
+        out = []
+        for layer in action.layers:
+            for strip in layer.strips:
+                for bag in strip.channelbags:
+                    out.extend(bag.fcurves)
+        return out
+
+
+# ---------------------------------------------------------------- 并入后面几批 retarget 的动作
+
+DATA_KINDS = ('objects', 'meshes', 'armatures', 'materials', 'node_groups', 'images', 'actions')
+
+
+def merge_animations(base, paths):
+    """每个 GLB 是同一个绑骨结果的另一批 retarget：骨骼名、静止姿势都一样，只有动作不同（带着一份网格、骨架、贴图）。
+    导入 → 把它带来的动作挂到 base 骨架的 NLA 上（和导入器放动作的方式一样：一个动作一条轨道、静音，导出按 ACTIONS 模式
+    把轨道上的动作各导成一段）→ 删掉它带来的网格、骨架、材质、贴图，只留下动作。
+    骨骼名对不上的通道不会生效：按名字核对一遍，对不上的报警告（全对不上就是接错了模型，直接停下）"""
+    if not base:
+        raise SystemExit('[refine] --merge 要有骨架：--in 的 GLB 里没有骨架')
+    ad = base.animation_data or base.animation_data_create()
+
+    def rest(arm_obj):
+        # 世界坐标里每根骨头头部、尾部的静止位置（拷贝成普通数据：后面再导入东西，骨头的引用会失效）
+        bpy.context.view_layer.update()  # 无头模式下导入完的物件 matrix_world 不会自己更新，算位置前先刷新
+        mw = arm_obj.matrix_world
+        return {b.name: (mw @ b.head_local, mw @ b.tail_local) for b in arm_obj.data.bones}
+
+    mine = rest(base)
+    pts = [v for ends in mine.values() for v in ends]
+    size = max((max(p[i] for p in pts) - min(p[i] for p in pts)) for i in range(3)) or 1.0
+    merged = []
+    for path in paths:
+        before = {k: {i.name for i in getattr(bpy.data, k)} for k in DATA_KINDS}
+        import_glb(path)
+        new = {k: [i.name for i in getattr(bpy.data, k) if i.name not in before[k]] for k in DATA_KINDS}
+        other = next((bpy.data.objects[n] for n in new['objects'] if bpy.data.objects[n].type == 'ARMATURE'), None)
+        acts = sorted((bpy.data.actions[n] for n in new['actions']), key=lambda a: a.name)
+        if not other:
+            raise SystemExit(f'[refine] --merge {path}：GLB 里没有骨架')
+        if not acts:
+            warn(f'--merge {path}：GLB 里没有动作，没有可并入的')
+        # 骨架核对：骨骼名一样、静止姿势一样（世界坐标里骨头头部的位置差，除以骨架大小）
+        theirs = rest(other)
+        if set(mine) != set(theirs):
+            warn(f'--merge {path}：骨骼名和 --in 的不一样（只有这边：{sorted(set(mine) - set(theirs))[:4]}，只有那边：{sorted(set(theirs) - set(mine))[:4]}）')
+        common = sorted(set(mine) & set(theirs))
+        dev = max(((mine[n][0] - theirs[n][0]).length for n in common), default=0.0) / size
+        if dev > 0.02:
+            warn(f'--merge {path}：静止姿势和 --in 的差了骨架大小的 {dev * 100:.1f}%（最大处），动作套上去可能变形')
+        # 每个动作的通道要能找到骨头
+        for act in acts:
+            hit = miss = 0
+            lost = set()
+            for fc in fcurves_of(act):
+                m = re.match(r'pose\.bones\["([^"]+)"\]', fc.data_path)
+                if not m:
+                    continue
+                if m.group(1) in mine:
+                    hit += 1
+                else:
+                    miss += 1
+                    lost.add(m.group(1))
+            if miss and not hit:
+                raise SystemExit(f'[refine] --merge {path}：动作 {act.name} 的通道一个都对不上 --in 的骨骼（{sorted(lost)[:3]}…），不是同一个绑骨结果')
+            if miss:
+                warn(f'--merge {path}：动作 {act.name} 有 {miss} 条通道的骨头在 --in 里找不到（{sorted(lost)[:3]}），这些通道不生效')
+        # 和已有的动作重名时 Blender 会给新的加 .001 后缀：游戏按片段名找，重名就找不对了
+        dup = [a.name for a in acts if re.sub(r'\.\d{3}$', '', a.name) in before['actions']]
+        if dup:
+            warn(f'--merge {path}：动作 {dup} 和已有的重名（Blender 加了 .001 后缀），游戏里按片段名找不到，换一个预设或改清单')
+        for act in acts:
+            track = ad.nla_tracks.new()
+            track.name = act.name
+            strip = track.strips.new(act.name, int(round(act.frame_range[0])), act)
+            # 动作的槽位是按它原来那个骨架（Armature.001）起的名字；NLA 条要指到一个槽位上
+            if getattr(act, 'slots', None) and getattr(strip, 'action_slot', None) is None:
+                strip.action_slot = act.slots[0]
+            track.mute = True
+        # 删掉这个 GLB 带来的网格、骨架、材质、贴图（先物件，再它们的数据；动作留着）
+        for n in new['objects']:
+            bpy.data.objects.remove(bpy.data.objects[n], do_unlink=True)
+        for kind in ('meshes', 'armatures', 'materials', 'node_groups', 'images'):
+            coll = getattr(bpy.data, kind)
+            for n in new[kind]:
+                if n in coll:
+                    coll.remove(coll[n])
+        merged.append({'file': path, 'actions': [a.name for a in acts], 'rest_deviation': round(dev, 5)})
+        log(f'并入 {path}：动作 {[a.name for a in acts]}，静止姿势差 {dev * 100:.2f}%')
+    return merged
+
+
+merged_in = merge_animations(arm, A.merge) if A.merge else []
 # 片段长度不是整帧时，导出按整帧采样会把最后不到一帧截掉，循环接缝处跳一下：把动作的帧范围向外取整
 for act in bpy.data.actions:
     f0, f1 = act.frame_range
     if f0 != math.floor(f0) or f1 != math.ceil(f1):
         act.use_frame_range = True
         act.frame_start, act.frame_end = math.floor(f0), math.ceil(f1)
-arm = next((o for o in bpy.context.scene.objects if o.type == 'ARMATURE'), None)
 # 骨头的显示形状（老版本导入器没有 disable_bone_shape 时）不算模型
 shapes = {pb.custom_shape for pb in arm.pose.bones if pb.custom_shape} if arm else set()
 meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH' and o not in shapes]
@@ -80,6 +190,8 @@ if not meshes:
     raise SystemExit('[refine] GLB 里没有网格')
 report['meshes'] = [o.name for o in meshes]
 report['actions'] = {a.name: [round(a.frame_range[0]), round(a.frame_range[1])] for a in bpy.data.actions}
+if merged_in:
+    report['merged'] = merged_in
 
 
 def tri_count():
@@ -530,19 +642,6 @@ if skel:
             reweighted[o.name] = reweight(o)
 
 # ---------------------------------------------------------------- 动作：原地 + 脊柱减幅
-
-
-def fcurves_of(action):
-    # Blender 4.4 起动作分「层 / 条 / 通道包」；老接口 action.fcurves 在 5.x 已经没了
-    try:
-        return list(action.fcurves)
-    except AttributeError:
-        out = []
-        for layer in action.layers:
-            for strip in layer.strips:
-                for bag in strip.channelbags:
-                    out.extend(bag.fcurves)
-        return out
 
 
 def model_height():

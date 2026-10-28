@@ -3,6 +3,8 @@
 // 没有走路片段时用挤压回弹代替），手里拿着手电。
 // 2026-10-28 第二次试玩（「动作太夸张、生硬、穿模」）之后收敛：跳得低、不在空中扭身、不再不停回头张望，
 // 转身和起步停步都平滑（朝向用临界阻尼弹簧，动画按平滑后的速度混合）。
+// 2026-10-28 访客反馈：再加 4 个动作，都是在原来的片段上「代替」，淡入淡出不硬切——察觉（NpcState.notice）且停着时 look 代替 idle，
+// 紧张（nervous）且停着时 afraid 代替 idle，逃跑（mode === 'fleeing'）时 flee 代替 run，受惊在 scared / scared2 之间轮流。
 //
 // 换模型只改 config/character.ts（VISITOR_SPECS 有几套就轮流分给进门的人；一套都加载不到时用 CHARACTER）。
 // 这里负责把任何来路的模型「摆正」：
@@ -38,6 +40,14 @@ const SMOOTH = { heading: 0.14, look: 0.07 };
  * 受惊片段（有的话）按 scaredRate（1/秒）淡入淡出
  */
 const GAIT = { speed: 0.12, walk: [0.05, 0.55] as const, run: [2.0, 2.8] as const, scaredRate: 10 };
+/**
+ * 新动作的「代替」（淡入淡出的速率，1/秒；片段缺了就不代替，见 CharacterClips）：
+ *   look    察觉（NpcState.notice 不为空）且停着时代替 idle。察觉一开始从头播，头第 1 秒就开始转
+ *   afraid  紧张（nervous）且停着时代替 idle。察觉和紧张同时，先看（look 优先）
+ *   flee    逃跑（mode === 'fleeing'）时代替 run；走 → 跑的过渡还是按速度，只是跑的那一档换成 flee
+ * 受惊的 scared / scared2 按 GAIT.scaredRate 淡入淡出，每个访客自己轮流，相邻进门的两个人先用的不是同一个
+ */
+const MIX = { look: 8, afraid: 4, flee: 6 };
 /**
  * 受惊强度：startle 事件的 amount（这一下涨了多少恐惧，约 5–72）→ 0..1。
  * 先线性映射 min..max，再开 curve 次方（< 1：中等的惊吓也看得出，最大的那几下才顶到头）。
@@ -183,8 +193,11 @@ export async function loadCharacterAsset(spec: CharacterSpec = CHARACTER): Promi
   return { template: n.template, clips, front: n.front, halfWidth: n.halfWidth, height: n.height, rawSize: n.rawSize, scale: n.scale, triangles };
 }
 
-type Pose = 'idle' | 'walk' | 'run' | 'scared';
-const POSES: Pose[] = ['idle', 'walk', 'run', 'scared'];
+type Pose = 'idle' | 'walk' | 'run' | 'scared' | 'look' | 'afraid' | 'flee' | 'scared2';
+const POSES: Pose[] = ['idle', 'walk', 'run', 'scared', 'look', 'afraid', 'flee', 'scared2'];
+/** 只播一次的受惊片段，每次受惊轮流用其中一个 */
+const SCARED = ['scared', 'scared2'] as const;
+type Scared = (typeof SCARED)[number];
 
 /** 一次跳起的形状（按受惊强度从 JUMP 插值出来，跳起时算一次） */
 interface JumpShape {
@@ -222,8 +235,17 @@ interface Visual {
   parts: { mesh: THREE.Mesh; opaque: THREE.Material | THREE.Material[]; fade: THREE.Material | THREE.Material[]; sources: THREE.Material[] }[];
   mixer: THREE.AnimationMixer | null;
   actions: Partial<Record<Pose, THREE.AnimationAction>>;
-  /** 各片段此刻的权重（受惊片段单独平滑，其余按平滑速度算） */
+  /** 各片段此刻的权重（受惊片段单独平滑，其余按平滑速度算，look / afraid / flee 的「代替」按 mix 分） */
   weights: Record<Pose, number>;
+  /** look / afraid / flee 代替 idle / idle / run 的程度 0..1（平滑后） */
+  mix: { look: number; afraid: number; flee: number };
+  /** 正在察觉（NpcState.notice 不为空）；从无到有的那一刻 look 从头播 */
+  noticing: boolean;
+  /** 受惊轮流用 scared / scared2：已经轮到第几次（从 id 起，相邻访客错开），和这次用的那个 */
+  scaredCount: number;
+  scaredPick: Scared | null;
+  /** 有循环区间的片段（spec.loops）自己走的时间：在区间里的位置（秒） */
+  loopT: number;
   front: number;
   halfWidth: number;
   /** 模型身高（米），程序化弹跳按它的比例 */
@@ -267,6 +289,8 @@ export interface CharacterDebug {
   id: number;
   /** 权重最大的动画片段 */
   pose: string | null;
+  /** 各动画片段此刻的权重（角色有的片段才列；键是 CharacterClips 的角色名） */
+  weights: Record<string, number>;
   procedural: boolean;
   jumpY: number;
   /** 这次（或上一次）跳起的最高点（米） */
@@ -490,13 +514,19 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
         const clip = name ? THREE.AnimationClip.findByName(asset.clips, name) : null;
         if (!clip) continue;
         const a = mixer.clipAction(clip);
-        if (pose === 'scared') {
+        if (pose === 'scared' || pose === 'scared2') {
           a.setLoop(THREE.LoopOnce, 1);
           a.clampWhenFinished = true;
         }
         // 片段一直在播，只改权重（权重为 0 的片段 three 不做插值）
         a.setEffectiveWeight(pose === 'idle' ? 1 : 0);
         a.play();
+        // 有循环区间的片段：时间由 blendClips 按区间自己推进，mixer 不动它（timeScale 一直是 0）
+        const win = spec.loops?.[pose];
+        if (win) {
+          a.timeScale = 0;
+          a.time = win[0];
+        }
         actions[pose] = a;
       }
     }
@@ -516,7 +546,9 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     const torch = torches.find((t) => !owner.has(t)) ?? null;
     if (torch) owner.set(torch, npc.id);
     const v: Visual = {
-      id: npc.id, outfit, root, body, pose, parts, mixer, actions, weights: { idle: 1, walk: 0, run: 0, scared: 0 },
+      id: npc.id, outfit, root, body, pose, parts, mixer, actions,
+      weights: { idle: 1, walk: 0, run: 0, scared: 0, look: 0, afraid: 0, flee: 0, scared2: 0 },
+      mix: { look: 0, afraid: 0, flee: 0 }, noticing: !!npc.notice, scaredCount: npc.id, scaredPick: null, loopT: 0,
       front, halfWidth, height, torch,
       x: npc.pos.x, z: npc.pos.z, heading: npc.heading, look: npc.lookDir, speed: npc.speed, mode: npc.mode, nervous: npc.nervous, fear: npc.fear, uneasy: npc.uneasy ?? 0,
       alpha: 0, leaving: false, jumpT: -1, lastJump: -10, jump: jumpShape(0), turnSrc: null, turn: { x: 0, v: 0 },
@@ -573,32 +605,60 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     v.lastJump = time;
     v.jumpT = 0;
     v.jump = jumpShape(startleStrength(amount));
-    // 只播一次的受惊片段：从头重播
-    v.actions.scared?.reset().play();
+    // 只播一次的受惊片段：scared / scared2 轮流（只有一个就用那个），从头重播
+    const have = SCARED.filter((p) => v.actions[p]);
+    v.scaredPick = have.length ? have[((v.scaredCount++ % have.length) + have.length) % have.length] : null;
+    if (v.scaredPick) v.actions[v.scaredPick]!.reset().play();
   };
 
   /**
    * 动画片段的权重和播放速率。受惊片段（有的话）在僵住期间淡入；其余按平滑速度在待机 / 走 / 跑之间连续过渡，播放速率跟模拟速度。
+   * 待机那一档按 look（察觉）> afraid（紧张）> idle 分，跑的那一档逃跑时用 flee、平时用 run（缺的片段不代替），
+   * 「代替」的程度各自平滑（mix），不会因为状态一下子翻转就硬切。
    * 返回此刻「在走」的程度（0..1）：没有走路片段时用它驱动程序化弹跳
    */
   const blendClips = (v: Visual, dt: number, cw: number): number => {
     const A = v.actions;
     const s = Math.max(0, v.speedS.x);
     const moving = smoothstep(GAIT.walk[0], GAIT.walk[1], s);
-    const running = A.run ? smoothstep(GAIT.run[0], GAIT.run[1], s) : 0;
-    const scaredWant = A.scared && v.mode === 'startled' ? 1 : 0;
-    v.weights.scared += (scaredWant - v.weights.scared) * approach(GAIT.scaredRate, dt);
-    const rest = 1 - v.weights.scared;
-    v.weights.idle = (1 - moving) * rest;
-    v.weights.walk = moving * (1 - running) * rest;
-    v.weights.run = moving * running * rest;
-    // 片段缺了的那一份并到能代替它的片段上：没有跑就走得快一点，没有待机就停在绑定姿势上（呼吸由程序化层补）
-    if (!A.run) v.weights.walk += v.weights.run;
+    const fast = A.run || A.flee ? smoothstep(GAIT.run[0], GAIT.run[1], s) : 0;
+    const fleeing = v.mode === 'fleeing';
+    // 受惊：这一次轮到的那个片段在僵住期间淡入，另一个淡出（两次受惊挨得近时交叉淡化，合起来不超过 1）
+    for (const p of SCARED) {
+      const want = A[p] && v.mode === 'startled' && v.scaredPick === p ? 1 : 0;
+      v.weights[p] += (want - v.weights[p]) * approach(GAIT.scaredRate, dt);
+    }
+    const scared = v.weights.scared + v.weights.scared2;
+    if (scared > 1) for (const p of SCARED) v.weights[p] /= scared;
+    const rest = 1 - Math.min(1, scared);
+    // 代替：目标 0 / 1，按各自的速率平滑（片段缺了目标就是 0）
+    v.mix.look += ((A.look && v.noticing ? 1 : 0) - v.mix.look) * approach(MIX.look, dt);
+    v.mix.afraid += ((A.afraid && v.nervous && !fleeing ? 1 : 0) - v.mix.afraid) * approach(MIX.afraid, dt);
+    v.mix.flee += ((A.flee && fleeing ? 1 : 0) - v.mix.flee) * approach(MIX.flee, dt);
+    // 停着的那一档：look 先占，剩下的 afraid 占，再剩下的才是 idle
+    const still = (1 - moving) * rest;
+    v.weights.look = still * v.mix.look;
+    v.weights.afraid = still * (1 - v.mix.look) * v.mix.afraid;
+    v.weights.idle = still - v.weights.look - v.weights.afraid;
+    // 跑的那一档：flee 占 mix.flee，剩下的是 run；两个都没有的份额并到走路片段上（没有跑就走得快一点，没有待机就停在绑定姿势上，呼吸由程序化层补）
+    const quick = moving * fast * rest;
+    v.weights.flee = A.flee ? quick * v.mix.flee : 0;
+    v.weights.run = A.run ? quick * (A.flee ? 1 - v.mix.flee : 1) : 0;
+    v.weights.walk = moving * (1 - fast) * rest + (quick - v.weights.flee - v.weights.run);
     for (const p of POSES) A[p]?.setEffectiveWeight(v.weights[p]);
     const sim = Math.max(0, v.speed);
     const { spec } = v.outfit;
     if (A.walk) A.walk.timeScale = sim * spec.walkRateAt1ms * (1 + COWER.cadence * cw);
     if (A.run) A.run.timeScale = sim * spec.runRateAt1ms;
+    if (A.flee) {
+      const rate = sim * (spec.fleeRateAt1ms ?? spec.runRateAt1ms);
+      const win = spec.loops?.flee;
+      if (win) {
+        // flee 只循环区间里的那一段（开头结尾是站着，见 CharacterSpec.loops）：时间自己推进、绕回区间起点，timeScale 保持 0
+        v.loopT = (v.loopT + dt * rate) % (win[1] - win[0]);
+        A.flee.time = win[0] + v.loopT;
+      } else A.flee.timeScale = rate;
+    }
     return A.walk ? 0 : moving;
   };
 
@@ -843,6 +903,10 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
         v.nervous = npc.nervous;
         v.uneasy = npc.uneasy ?? 0;
         v.fear = npc.fear;
+        // 察觉那一拍开始：look 从头播（察觉中换了新的来源不重播）
+        const noticing = !!npc.notice;
+        if (noticing && !v.noticing) v.actions.look?.reset().play();
+        v.noticing = noticing;
       }
       for (const v of [...visuals.values()]) {
         const pj = pendingJump.get(v.id);
@@ -872,6 +936,7 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
         return {
           id: v.id,
           pose: top ? v.actions[top]!.getClip().name : null,
+          weights: Object.fromEntries(POSES.filter((p) => v.actions[p]).map((p) => [p, +v.weights[p].toFixed(2)])),
           procedural: v.bounce > 0.5,
           jumpY: +v.body.position.y.toFixed(3),
           jumpPeak: +v.jump.height.toFixed(3),

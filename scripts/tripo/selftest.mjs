@@ -2,6 +2,7 @@
 //   - 重跑不会重复建任务；配置改了、建任务时断线、任务失败都会停下来等人处理；--adopt / --reroll 能接上
 //   - key 不出现在任何输出、状态文件、manifest 里；下载结果文件时不带 key；发给 API 的请求都带对了 key
 //   - 草稿只做到换装图；--until 生效；导出的 GLB、manifest.json、片段名对得上；结果文件丢了会重新查任务再下
+//   - 动作超过 5 个自动分批 retarget（8 个 = 4 + 4），已经做完的第一批不重做，第二批交给 Blender 精修并进来（精修用假的顶替）
 //   node scripts/tripo/selftest.mjs        （VERBOSE=1 打印流水线的全部输出；失败时临时目录留着方便看）
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -10,7 +11,7 @@ import http from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkForGame, inspectGlb } from './glb.mjs';
-import { DEFAULT_PATHS, main } from './pipeline.mjs';
+import { DEFAULT_PATHS, batchClips, main } from './pipeline.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BOX = join(HERE, '.selftest');
@@ -122,8 +123,11 @@ function startMock() {
     if (type === 'image_to_image') output = { generated_image_url: dl(`${id}.png`, fakePng(2048, 2048)) };
     else if (type === 'generate_multiview_image') output = { generate_multiview_image: Object.fromEntries(['front', 'left', 'back', 'right'].map((v) => [`${v}_view_url`, dl(`${id}-${v}.png`, fakePng(1024, 1024))])) }; // 和真服务一样套一层（2026-10-28 实测）
     else if (type === 'animate_prerigcheck') output = { riggable: true, rig_type: 'biped' };
-    else if (type === 'animate_retarget') output = { model_url: dl(`${id}.glb`, makeGlb({ anims: m.animNames, tris: 4000 })) };
-    else output = { model_url: dl(`${id}.glb`, makeGlb({ tris: 4000 })), rendered_image_url: dl(`${id}-preview.webp`, fakePng(512, 512)) };
+    else if (type === 'animate_retarget') {
+      // animNames = null：片段名按请求里的预设来（preset:biped:look_around → look_around），和真服务一样
+      const asked = (body.animations ?? [body.animation]).map((p) => String(p).split(':').pop());
+      output = { model_url: dl(`${id}.glb`, makeGlb({ anims: m.animNames ?? asked, tris: 4000 })) };
+    } else output = { model_url: dl(`${id}.glb`, makeGlb({ tris: 4000 })), rendered_image_url: dl(`${id}-preview.webp`, fakePng(512, 512)) };
     const t = { id, type, body, polls: 0, output, credits: CREDITS[type], forceStatus: m.nextStatus };
     m.nextStatus = null;
     m.tasks.set(id, t);
@@ -211,6 +215,19 @@ const P = {
 };
 const everything = [];
 let mock;
+/**
+ * 假的 Blender 精修（假 GLB 进不了 Blender，真的合并在 scripts/blender/refine.mjs 里用真模型测）：
+ * 把 src 和 merge 里各 GLB 的动画片段名凑到一起，写一个带全部片段的假 GLB，记下被调用时传的参数
+ */
+const refineCalls = [];
+const fakeRefine = async ({ src, out, report, merge = [], args = [] }) => {
+  refineCalls.push({ src, out, merge, args });
+  const names = [src, ...merge].flatMap((f) => inspectGlb(readFileSync(f)).animations.map((a) => a.name));
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, makeGlb({ anims: names, tris: 4000 }));
+  writeFileSync(report, JSON.stringify({ warnings: [] }));
+  return { ok: true, report: { warnings: [] }, sheet: null, lines: [] };
+};
 const run = async (...argv) => {
   const lines = [];
   const log = (s) => {
@@ -218,7 +235,7 @@ const run = async (...argv) => {
     everything.push(s);
     if (process.env.VERBOSE) console.log(s);
   };
-  const code = await main(argv, { paths: P, baseUrl: `${mock.base}/v3`, log, poll: { firstMs: 2, factor: 1, maxMs: 2, timeoutMs: 10_000 } });
+  const code = await main(argv, { paths: P, baseUrl: `${mock.base}/v3`, log, poll: { firstMs: 2, factor: 1, maxMs: 2, timeoutMs: 10_000 }, refine: fakeRefine });
   return { code, text: lines.join('\n') };
 };
 const creates = (from) => mock.creates.slice(from);
@@ -256,6 +273,9 @@ try {
   real.defaults.route = 'single'; // 下面的任务数按「默认单图、beta 走四视图」写的；真清单的默认路线不影响这里要测的逻辑
   // 建模参数也固定成测试写好时的那组（H3.1、12000 面、标准纹理 30 积分）：这里测的是流水线，不是选哪个模型
   real.defaults.model.request = { model: 'v3.1-20260211', face_limit: 12000, texture: true, pbr: true, texture_quality: 'standard' };
+  // 动作也固定成测试写好时的 4 个（一批）：真清单现在有 8 个（两批），分批的逻辑在最后几项单独测，这里的任务数不受它影响
+  const realClips = { ...real.defaults.animate.clips };
+  real.defaults.animate.clips = { idle: 'preset:biped:idle', walk: 'preset:biped:walk', run: 'preset:biped:run', scared: 'preset:biped:scared_01' };
   real.variants = [
     { id: 'alpha', status: 'draft', label: 'Alpha', costume: 'a plain grey wool coat' },
     { id: 'beta', status: 'draft', label: 'Beta', costume: 'a short black cape', route: 'multiview' },
@@ -523,6 +543,102 @@ try {
     const bad = checkForGame(inspectGlb(makeGlb({ anims: ['Walk'], texture: 4096, tris: 20000, moving: true })));
     assert.equal(bad.ok, false);
     assert.equal(bad.problems.length, 3, bad.problems.join('\n'));
+  });
+
+  // ---- 动作分批：一次 retarget 最多 5 个，8 个动作 = 4 + 4
+  const eightPresets = ['idle', 'walk', 'run', 'scared_01', 'look_around', 'afraid', 'flee_01', 'scared_02'].map((s) => `preset:biped:${s}`);
+  const sizes = (n) => batchClips(Array.from({ length: n }, (_, i) => [`c${i}`, `preset:biped:p${i}`])).map((b) => b.length);
+
+  await test('动作分批：每批最多 5 个、尽量平分（8 个 = 4 + 4，原来的 4 个仍是第一批）；真清单是 8 个', async () => {
+    assert.deepEqual([0, 1, 4, 5, 6, 8, 9, 10, 11].map(sizes), [[], [1], [4], [5], [3, 3], [4, 4], [5, 4], [5, 5], [4, 4, 3]]);
+    assert.deepEqual(Object.values(realClips), eightPresets);
+    assert.deepEqual(Object.keys(realClips), ['idle', 'walk', 'run', 'scared', 'look', 'afraid', 'flee', 'scared2']);
+    const [first, second] = batchClips(Object.entries(realClips));
+    assert.deepEqual(first.map(([, p]) => p), eightPresets.slice(0, 4));
+    assert.deepEqual(second.map(([role, p]) => `${role}=${p}`), ['look=preset:biped:look_around', 'afraid=preset:biped:afraid', 'flee=preset:biped:flee_01', 'scared2=preset:biped:scared_02']);
+  });
+
+  await test('已经做完 4 个动作的访客，清单改成 8 个：只补建第二批（40 积分），第一批不动，导出并进 8 段', async () => {
+    mock.animNames = null; // 从这里起片段名按请求里的预设来
+    setManifest((m) => (m.variants.find((v) => v.id === 'beta').overrides = { refine: { enabled: true }, animate: { clips: realClips } }));
+    const dry = await run('--dry-run', 'beta');
+    assert.equal(dry.code, 0, dry.text);
+    assert.match(dry.text, /animate2 · 预设动作 4 个（retarget，第 2\/2 批：look、afraid、flee、scared2） — 待做 · 约 40 积分/);
+    assert.match(dry.text, /animate · 预设动作 4 个（retarget，第 1\/2 批：idle、walk、run、scared） — ✓ 已完成/); // 第一批的指纹没变
+    n0 = mock.creates.length;
+    const calls = refineCalls.length;
+    const r = await run('--run', 'beta', '--yes');
+    assert.equal(r.code, 0, r.text);
+    const c = creates(n0);
+    assert.deepEqual(c.map((x) => x.path), ['/v3/animations/retarget']);
+    assert.deepEqual(c[0].body.animations, eightPresets.slice(4));
+    assert.equal(c[0].body.animate_in_place, true);
+    const st = readJson(P.state);
+    assert.equal(c[0].body.input, st.nodes['beta:rig'].task_id); // 两批都从同一个绑骨结果出发
+    assert.equal(st.nodes['beta:animate2'].credits, 40);
+    // 导出：第二批的文件交给精修并进第一批
+    assert.equal(refineCalls.length, calls + 1);
+    const call = refineCalls.at(-1);
+    assert.match(call.src, /animated\.glb$/);
+    assert.equal(call.merge.length, 1);
+    assert.match(call.merge[0], /animated2\.glb$/);
+    const v = readJson(join(P.out, 'manifest.json')).visitors.find((x) => x.id === 'beta');
+    assert.deepEqual(v.clips, { idle: 'Idle', walk: 'Walk', run: 'Run', scared: 'Scared_01', look: 'look_around', afraid: 'afraid', flee: 'flee_01', scared2: 'scared_02' });
+    assert.equal(v.clipMatch, 'name');
+    assert.equal(v.game.ok, true, v.game.problems.join('；'));
+    assert.equal(Object.keys(v.stats.durations).length, 8);
+    assert.deepEqual(v.refine.merged, [st.nodes['beta:animate2'].files.model]);
+    assert.equal(v.source.tasks.animate2, st.nodes['beta:animate2'].task_id);
+    assert.equal(v.source.credits, 10 + 10 + 30 + 0 + 25 + 40 + 40); // 换装 + 四视图 + 建模 + 绑骨检查 + 绑骨 + 两批动作
+    // 再跑一遍：零新建
+    n0 = mock.creates.length;
+    assert.equal((await run('--run', 'beta', '--yes')).code, 0);
+    assert.equal(mock.creates.length, n0);
+  });
+
+  await test('动作要分批但没开精修：校验拦下，一个任务都不建；打开后从头建出两个 retarget（4 + 4）', async () => {
+    setManifest((m) => m.variants.push({ id: 'zeta', status: 'approved', label: 'Zeta', costume: 'a green scarf', overrides: { animate: { clips: realClips } } }));
+    n0 = mock.creates.length;
+    let r = await run('--run', 'zeta', '--yes');
+    assert.equal(r.code, 1, r.text);
+    assert.match(r.text, /要分 2 批 retarget/);
+    assert.equal(mock.creates.length, n0);
+    assert.equal((await run('--dry-run', 'zeta')).code, 1);
+
+    setManifest((m) => (m.variants.find((v) => v.id === 'zeta').overrides.refine = { enabled: true }));
+    r = await run('--run', 'zeta', '--yes');
+    assert.equal(r.code, 0, r.text);
+    const c = creates(n0);
+    assert.deepEqual(c.map((x) => x.path.split('/').pop()), ['image-to-image', 'image-to-model', 'rig-check', 'rig', 'retarget', 'retarget']);
+    const [one, two] = c.filter((x) => x.path.endsWith('/retarget'));
+    assert.deepEqual(one.body.animations, eightPresets.slice(0, 4));
+    assert.deepEqual(two.body.animations, eightPresets.slice(4));
+    assert.equal(one.body.input, two.body.input);
+    const v = readJson(join(P.out, 'manifest.json')).visitors.find((x) => x.id === 'zeta');
+    assert.equal(v.clipMatch, 'name');
+    assert.deepEqual(Object.values(v.clips), ['idle', 'walk', 'run', 'scared_01', 'look_around', 'afraid', 'flee_01', 'scared_02']);
+    assert.equal(v.source.credits, 10 + 30 + 0 + 25 + 40 + 40);
+    assert.match(r.text, /并入第 2 批动作/);
+
+    // 只作废第二批：第一批和下游的模型都不动，补建出来的还是那 4 个动作
+    assert.equal((await run('--reroll', 'zeta', 'animate2')).code, 0);
+    let st = readJson(P.state);
+    assert.ok(st.nodes['zeta:animate'] && !st.nodes['zeta:animate2'] && st.nodes['zeta:rig']);
+    n0 = mock.creates.length;
+    r = await run('--run', 'zeta', '--yes');
+    assert.equal(r.code, 0, r.text);
+    assert.deepEqual(creates(n0).map((x) => x.body.animations), [eightPresets.slice(4)]);
+    // 作废第一批：第二批跟着作废（第二批在它后面）
+    assert.equal((await run('--reroll', 'zeta', 'animate')).code, 0);
+    st = readJson(P.state);
+    assert.ok(!st.nodes['zeta:animate'] && !st.nodes['zeta:animate2'] && st.nodes['zeta:rig']);
+  });
+
+  await test('清单里动作写重复了：校验拦下', async () => {
+    setManifest((m) => (m.variants.find((v) => v.id === 'zeta').overrides.animate.clips = { ...realClips, scared2: 'preset:biped:scared_01' }));
+    const r = await run('--dry-run', 'zeta');
+    assert.equal(r.code, 1, r.text);
+    assert.match(r.text, /重复的预设 preset:biped:scared_01/);
   });
 
   await test('key 没有泄露；下载不带 key；API 请求都带对了 key；状态里不存签名链接', async () => {
