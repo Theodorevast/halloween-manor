@@ -2,7 +2,8 @@
 //
 //   吉祥物参考图 →（可选）image-to-image 模板摆成 T 姿势 → image-to-image 换装（参考图 + 服装提示词）
 //   → image-to-model（input 直接填换装图的 task_id）→ rig-check（免费）→ rig（v1.0 人形，spec=mixamo）
-//   → retarget 预设动作（原地，一次最多 5 个）→ 下载到 public/assets/visitors/<id>.glb，写 manifest.json（含动画片段名）
+//   → retarget 预设动作（原地，一次最多 5 个，动作多了分批：animate、animate2…）
+//   → 下载到 public/assets/visitors/<id>.glb（后面几批的动作由 Blender 精修并进第一批的骨架），写 manifest.json（含动画片段名）
 //
 // 为什么先换装成图片再建模：image-to-model 只有 input（图片）没有 prompt；但它的 input 可以填 text_to_image /
 // image_to_image 任务的 task_id，而 image-to-image 收「参考图 + 编辑提示词」（generation-image-to-model/standard.md、
@@ -35,7 +36,13 @@ export const DEFAULT_PATHS = {
   out: join(ROOT, 'public', 'assets', 'visitors'),
 };
 
-export const STEPS = ['upload', 'prep', 'costume', 'touchup', 'costume-upload', 'views', 'model', 'rigcheck', 'rig', 'animate', 'convert', 'export'];
+/** 一次 retarget 最多 5 个动作，动作多了分批建任务：animate、animate2…（最多这么多批） */
+const MAX_BATCHES = 4;
+/** 第 i 批（从 0 起）动作任务的步骤名：animate、animate2、animate3… */
+const animStep = (i) => (i === 0 ? 'animate' : `animate${i + 1}`);
+const ANIMATE_STEPS = Array.from({ length: MAX_BATCHES }, (_, i) => animStep(i));
+
+export const STEPS = ['upload', 'prep', 'costume', 'touchup', 'costume-upload', 'views', 'model', 'rigcheck', 'rig', ...ANIMATE_STEPS, 'convert', 'export'];
 /** 草稿也能跑的步骤（便宜的 2D 预览）；从 model 起要 status: approved */
 const PREVIEW = new Set(['upload', 'prep', 'costume', 'touchup', 'costume-upload', 'views']);
 /** file_token 的有效期文档没写；上传免费，超过 30 分钟就重新传（presign 链接也是 30 分钟） */
@@ -54,7 +61,7 @@ const HELP = `Tripo 访客流水线：吉祥物换装 → 3D 模型 → 绑骨 �
   node scripts/tripo/visitors.mjs --adopt <id> <步骤> <task_id>  把已经建好的任务记进状态（建任务时断线后对账用）
   node scripts/tripo/visitors.mjs --inspect <文件.glb>         检查 GLB 符不符合游戏要求
 
-步骤：upload → prep → costume → [touchup] → [costume-upload → views] → model → rigcheck → rig → animate → [convert] → export
+步骤：upload → prep → costume → [touchup] → [costume-upload → views] → model → rigcheck → rig → animate → [animate2…] → [convert] → export
 清单 scripts/tripo/visitors.json · 状态 assets-src/tripo-state.json · key 读 .env.local 的 TRIPO_API_KEY`;
 
 // ---------------------------------------------------------------- 小工具
@@ -94,6 +101,22 @@ function merge(a, b) {
 /** 请求体：去掉注释键和空值 */
 const requestOf = (o) => Object.fromEntries(Object.entries(o ?? {}).filter(([k, v]) => !k.startsWith('$') && v != null));
 const clipsOf = (cfg) => Object.entries(cfg.animate?.clips ?? {}).filter(([k, v]) => !k.startsWith('$') && v);
+
+/**
+ * 动作分批：一次 retarget 最多 C.MAX_CLIPS_PER_RETARGET（5）个，批数取最少的，再把动作平均分到各批（前面的批不比后面的少）。
+ * 8 个 = 4 + 4，不是 5 + 3：原来的 4 个动作仍然是第一批，已经建过的 animate 任务指纹不变，不会被判成「配置改过」，第二批只补新的 4 个
+ */
+export function batchClips(clips) {
+  const n = Math.ceil(clips.length / C.MAX_CLIPS_PER_RETARGET);
+  const out = [];
+  let at = 0;
+  for (let i = 0; i < n; i++) {
+    const size = Math.floor(clips.length / n) + (i < clips.length % n ? 1 : 0);
+    out.push(clips.slice(at, at + size));
+    at += size;
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------- 清单、参考图、状态
 
@@ -400,19 +423,26 @@ function planVariant(ctx, vc, ref) {
     out: { kind: 'model', dest: join(dir, 'rigged') },
   });
 
-  const presets = clipsOf(c).map(([, p]) => p);
+  // 动作：一批最多 5 个（animate），多了分到 animate2…（都从同一个绑骨结果出发，互不依赖）。
+  // 只有一批时和以前一模一样（key、请求、指纹都不变）；后面几批的结果由 Blender 精修并进第一批的骨架（export 步骤）
   const animReq = requestOf(c.animate?.request);
-  const animate = add({
-    key: `${vc.id}:animate`,
-    step: 'animate',
-    kind: 'task',
-    label: `预设动作 ${presets.length} 个（retarget）`,
-    endpoint: '/animations/retarget',
-    deps: [rig],
-    body: (r) => ({ input: r(rig), ...(presets.length === 1 ? { animation: presets[0] } : { animations: presets }), ...animReq }),
-    estimate: () => ({ credits: C.RETARGET_CREDITS_PER_CLIP * presets.length, note: `${presets.length} 个动作 × ${C.RETARGET_CREDITS_PER_CLIP}` }),
-    out: { kind: 'model', dest: join(dir, 'animated') },
+  const batches = batchClips(clipsOf(c));
+  if (!batches.length) batches.push([]); // 清单里没写动作：校验会报错，但步骤图里还是要有 animate
+  const animates = batches.slice(0, MAX_BATCHES).map((batch, i) => {
+    const presets = batch.map(([, p]) => p);
+    return add({
+      key: `${vc.id}:${animStep(i)}`,
+      step: animStep(i),
+      kind: 'task',
+      label: `预设动作 ${presets.length} 个（retarget${batches.length > 1 ? `，第 ${i + 1}/${batches.length} 批：${batch.map(([role]) => role).join('、')}` : ''}）`,
+      endpoint: '/animations/retarget',
+      deps: [rig],
+      body: (r) => ({ input: r(rig), ...(presets.length === 1 ? { animation: presets[0] } : { animations: presets }), ...animReq }),
+      estimate: () => ({ credits: C.RETARGET_CREDITS_PER_CLIP * presets.length, note: `${presets.length} 个动作 × ${C.RETARGET_CREDITS_PER_CLIP}` }),
+      out: { kind: 'model', dest: join(dir, i === 0 ? 'animated' : `animated${i + 1}`) },
+    });
   });
+  const animate = animates[0];
 
   let last = animate;
   if (c.convert?.enabled) {
@@ -429,7 +459,7 @@ function planVariant(ctx, vc, ref) {
       out: { kind: 'model', dest: join(dir, 'converted') },
     });
   }
-  add({ key: `${vc.id}:export`, step: 'export', kind: 'local', label: `导出到 ${ctx.rel(join(ctx.paths.out, `${vc.id}.glb`))}`, deps: [last] });
+  add({ key: `${vc.id}:export`, step: 'export', kind: 'local', label: `导出到 ${ctx.rel(join(ctx.paths.out, `${vc.id}.glb`))}`, deps: [last, ...animates.slice(1)] });
   return nodes;
 }
 
@@ -506,7 +536,12 @@ function validate(vcs) {
     if ((rig.out_format ?? 'glb') !== 'glb') errors.push(`${at}：rig.request.out_format 要 glb`);
     const clips = clipsOf(c);
     if (!clips.length) errors.push(`${at}：animate.clips 是空的`);
-    if (clips.length > C.MAX_CLIPS_PER_RETARGET) errors.push(`${at}：一次 retarget 最多 ${C.MAX_CLIPS_PER_RETARGET} 个动作，现在 ${clips.length} 个`);
+    const batches = batchClips(clips);
+    if (batches.length > MAX_BATCHES) errors.push(`${at}：animate.clips 有 ${clips.length} 个动作，最多分 ${MAX_BATCHES} 批（每批最多 ${C.MAX_CLIPS_PER_RETARGET} 个）`);
+    const dups = [...new Set(clips.map(([, p]) => p).filter((p, i, all) => all.indexOf(p) !== i))];
+    if (dups.length) errors.push(`${at}：animate.clips 里有重复的预设 ${dups.join('、')}（同一个预设只要一次，GLB 里的片段名会冲突）`);
+    if (batches.length > 1 && !c.refine?.enabled) errors.push(`${at}：动作有 ${clips.length} 个，要分 ${batches.length} 批 retarget；后面几批的动作只有 Blender 精修能并进同一个 GLB，refine.enabled 要打开`);
+    if (batches.length > 1 && c.convert?.enabled) warnings.push(`${at}：动作分了 ${batches.length} 批，convert 只转第一批；后面几批用 retarget 原样的 GLB 并进来（贴图在精修里限到 2048，不受影响）`);
     const allowed = rigModel === 'v1.0-20240301' ? C.V1_BIPED_PRESETS : C.V25_BIPED_PRESETS;
     for (const [role, p] of clips) if (!allowed.includes(p)) errors.push(`${at}：animate.clips.${role} = ${p} 不在 ${rigModel} 的预设列表里`);
     const a = c.animate?.request ?? {};
@@ -992,7 +1027,8 @@ function writeVisitorManifest(ctx, entry, order) {
 
 async function exportVariant(ctx, vc, nodes, order) {
   const L = ctx.log;
-  const anim = nodes.find((x) => x.step === 'animate');
+  const anims = nodes.filter((x) => ANIMATE_STEPS.includes(x.step));
+  const anim = anims[0];
   const conv = nodes.find((x) => x.step === 'convert');
   let src = ctx.state.nodes[anim.key]?.files?.model;
   let via = 'animate';
@@ -1011,18 +1047,30 @@ async function exportVariant(ctx, vc, nodes, order) {
     L(`  [export] ✗ ${src} 不是 GLB（retarget 的 out_format 要 glb）`);
     return false;
   }
-  // Blender 精修（refine.enabled）：球身整块跟着躯干、腿边配件不跟腿拉伸、清碎片、限面数和贴图。
+  // 后面几批 retarget 的结果（animate2…）：不能直接放进游戏（一个 GLB 只带一批的动作），交给 Blender 并进第一批的骨架
+  const extra = anims.slice(1).map((x) => ctx.state.nodes[x.key]?.files?.model);
+  const lost = extra.findIndex((f) => !f || !existsSync(ctx.abs(f)));
+  if (lost >= 0) {
+    L(`  [export] ✗ 还没有第 ${lost + 2} 批动作的模型文件（${extra[lost] ?? '无'}）`);
+    return false;
+  }
+  if (extra.length && !vc.cfg.refine?.enabled) {
+    L(`  [export] ✗ 动作分了 ${anims.length} 批，后面几批只有 Blender 精修能并进同一个 GLB：visitors.json 里把 refine.enabled 打开，或者把动作减到 ${C.MAX_CLIPS_PER_RETARGET} 个以内`);
+    return false;
+  }
+  // Blender 精修（refine.enabled）：球身整块跟着躯干、腿边配件不跟腿拉伸、清碎片、限面数和贴图；动作分了批的话在这里并到一起。
   // 精修失败就停下，不把没精修的模型放进游戏（要跳过就把 refine.enabled 写成 false）
   let refine = null;
   if (vc.cfg.refine?.enabled) {
     const dir = join(ctx.paths.raw, vc.id);
     const out = join(dir, 'refined.glb');
-    L(`  [export] Blender 精修 ${src} …`);
-    const res = await refineGlb({
+    L(`  [export] Blender 精修 ${src}${extra.length ? `（并入 ${extra.join('、')} 的动作）` : ''} …`);
+    const res = await (ctx.refine ?? refineGlb)({
       src: ctx.abs(src),
       out,
       report: join(dir, 'refine.json'),
       preview: vc.cfg.refine.preview === false ? null : join(dir, 'refine-preview', vc.id),
+      merge: extra.map((f) => ctx.abs(f)),
       args: ['--max-tris', GAME_LIMITS.triangles ?? 15000, '--max-texture', GAME_LIMITS.texture ?? 2048, ...(vc.cfg.refine.args ?? [])],
       log: (s) => L(`    ${s}`),
     });
@@ -1030,9 +1078,9 @@ async function exportVariant(ctx, vc, nodes, order) {
       L(`  [export] ✗ ${res.error}`);
       return false;
     }
-    refine = { from: src, report: ctx.rel(join(dir, 'refine.json')), sheet: res.sheet ? ctx.rel(res.sheet) : null, warnings: res.report.warnings ?? [] };
+    refine = { from: src, ...(extra.length ? { merged: extra } : {}), report: ctx.rel(join(dir, 'refine.json')), sheet: res.sheet ? ctx.rel(res.sheet) : null, warnings: res.report.warnings ?? [] };
     src = ctx.rel(out);
-    via += ' + Blender 精修';
+    via += `${extra.length ? ` + 并入第 ${anims.slice(1).map((_, i) => i + 2).join('、')} 批动作` : ''} + Blender 精修`;
     if (res.sheet) L(`    预览表 ${ctx.rel(res.sheet)}（第一行是权重分类：蓝 = 跟着身体，橙 = 跟着腿 / 手臂）`);
   }
   const buf = readFileSync(ctx.abs(src));
@@ -1046,6 +1094,12 @@ async function exportVariant(ctx, vc, nodes, order) {
   const check = checkForGame(info);
   const roles = Object.fromEntries(clipsOf(vc.cfg));
   const { clips, by } = mapClips(info.animations.map((x) => x.name), roles);
+  // 动作分了批：合并之后每个角色都要对上一个片段，对不上说明后面几批没并进来（骨骼名不一样之类）
+  const unmatched = Object.entries(clips).filter(([, name]) => !name).map(([role]) => role);
+  if (anims.length > 1 && unmatched.length) {
+    check.problems.push(`动作没合齐：${unmatched.join('、')} 没有对上的片段（GLB 里有 ${info.animations.length} 段）`);
+    check.ok = false;
+  }
   mkdirSync(ctx.paths.out, { recursive: true });
   const outGlb = join(ctx.paths.out, `${vc.id}.glb`);
   copyFileSync(ctx.abs(src), `${outGlb}.tmp`);
@@ -1327,8 +1381,8 @@ function parseArgs(argv) {
 
 /**
  * @param {string[]} argv
- * @param {{ paths?: Partial<typeof DEFAULT_PATHS>, baseUrl?: string, log?: (s: string) => void, poll?: object }} [opts]
- *   paths / baseUrl / poll 只给自测用；命令行永远用默认值（真的 API 地址）
+ * @param {{ paths?: Partial<typeof DEFAULT_PATHS>, baseUrl?: string, log?: (s: string) => void, poll?: object, refine?: typeof refineGlb }} [opts]
+ *   paths / baseUrl / poll / refine 只给自测用（refine：换掉真的 Blender 精修，假 GLB 进不了 Blender）；命令行永远用默认值（真的 API 地址）
  * @returns {Promise<number>} 退出码：0 成功，1 出错或停下，2 用法不对 / 缺 --yes
  */
 export async function main(argv, opts = {}) {
@@ -1339,6 +1393,7 @@ export async function main(argv, opts = {}) {
     log: (s) => out(mask(s)),
     baseUrl: opts.baseUrl ?? BASE_URL,
     poll: opts.poll,
+    refine: opts.refine,
     rel: (p) => relative(paths.root, p).split(sep).join('/'),
     abs: (p) => resolve(paths.root, p),
   };

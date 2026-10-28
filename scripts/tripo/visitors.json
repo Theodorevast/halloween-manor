@@ -70,27 +70,30 @@
       }
     },
     "animate": {
-      "$comment": "键对应 src/config/character.ts 的 clips（idle / walk / run / scared），一次 retarget 最多 5 个，每个 10 积分。上次试玩说访客动作太夸张，先选平实的；想加「张望」就加一行 \"lookAround\": \"preset:biped:look_around\"（+10 积分，同一次请求里）。",
+      "$comment": "键对应 src/config/character.ts 的 clips，每个 10 积分。一次 retarget 最多 5 个，多了流水线自动分批（animate、animate2…，尽量平分：8 个 = 4 + 4，第一批还是原来的 idle / walk / run / scared，已经建过的任务不动），后面几批的动作由 Blender 精修并进第一批的骨架（所以 refine.enabled 要开）。上次试玩说访客动作太夸张，先选平实的。2026-10-28 加第二批 4 个（用户同意，四套共 160 积分）：look 张望（察觉、查看时）、afraid 害怕（紧张时站着）、flee 逃跑（代替 run）、scared2 第二种受惊（和 scared 轮流）。",
       "clips": {
         "idle": "preset:biped:idle",
         "walk": "preset:biped:walk",
         "run": "preset:biped:run",
-        "scared": "preset:biped:scared_01"
+        "scared": "preset:biped:scared_01",
+        "look": "preset:biped:look_around",
+        "afraid": "preset:biped:afraid",
+        "flee": "preset:biped:flee_01",
+        "scared2": "preset:biped:scared_02"
       },
       "$alternatives": {
         "idle": [
-          "preset:biped:look_around",
           "preset:biped:standing_relax",
           "preset:biped:wait"
         ],
-        "run": [
-          "preset:biped:flee_01",
+        "flee": [
           "preset:biped:flee_02"
         ],
+        "afraid": [
+          "preset:biped:frightened"
+        ],
         "scared": [
-          "preset:biped:frightened",
-          "preset:biped:afraid",
-          "preset:biped:scared_02"
+          "preset:biped:frightened"
         ]
       },
       "request": {
