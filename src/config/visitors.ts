@@ -159,8 +159,10 @@ export const CROWD = {
 
 /**
  * 鬼魂贴近（2026-10-28 第三人称改版，设计文档第 9 节「新玩法」）。访客看不见鬼魂，但它贴近时会发毛：
- * 恐惧值慢慢上涨（每 chillEvery 秒结算一小步，发 chill 事件）、走慢、偶尔回头张望（什么也看不见）；
+ * 恐惧值慢慢上涨（每 chillEvery 秒结算一小步，发 chill 事件）、走慢；
  * 贴得很近停留够久是一次「后颈一凉」的惊吓。逃跑中的人不理会鬼魂；setGhost(null)（触屏的俯视模式）时全都不生效。
+ * 2026-10-28 访客反馈（设计文档 2.2）：原来的随机回头张望去掉了，改成确定的反应——进入范围 onset 秒内察觉一次（回头照一下），
+ * 一直贴着就按程度递进：发抖 → 发毛到 backAt 后退半步、手电照着背后 → 后颈一凉。发毛范围按性格乘 TRAITS.chillRange。
  * 平衡见 tests/balance.test.ts 的「鬼魂」两条：只靠鬼魂吓不跑 brave，配合附身有帮助但不能一边倒
  */
 export const GHOST = {
@@ -187,18 +189,11 @@ export const GHOST = {
    */
   habitPer: 8,
   habitRecover: 15,
-  /** 发毛程度（0–1，放慢、回头张望、画面发抖用）每秒最多升 / 降多少 */
+  /** 发毛程度（0–1，放慢、后退、画面发抖用）每秒最多升 / 降多少 */
   rise: 2.5,
   fall: 1,
   /** 发毛到满时走路速度 × (1 − slow) */
   slow: 0.35,
-  /** 回头张望：发毛程度至少 glanceMin；满程度时平均每 glanceEvery 秒一次，两次之间至少隔 glanceGap 秒（不是不停回头） */
-  glanceMin: 0.25,
-  glanceEvery: 3,
-  glanceGap: 2.5,
-  /** 回头一次多久（秒）；身体最多跟着扭过去多少（弧度），手电照向鬼魂所在的方向。走着的人先停下再回头 */
-  glanceTime: [0.8, 1.3] as [number, number],
-  glanceBody: 1.1,
   /** 后颈一凉：鬼魂在 neckRadius 米内累计停留 neckDwell 秒；离开时累计的停留每秒回落 neckDecay 秒（短暂离开不清零） */
   neckRadius: 0.8,
   neckDwell: 2,

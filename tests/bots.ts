@@ -16,7 +16,7 @@ import { Grid } from '../src/sim/grid';
 import { alertPath } from '../src/sim/npc';
 import { canHear, canSee } from '../src/sim/perception';
 import { facesToward } from '../src/sim/scares';
-import { cellCenter, FRONT_DOOR, GRID_H, GRID_W } from '../src/config/house';
+import { cellCenter, cellOf, FRONT_DOOR, GRID_H, GRID_W } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
 import { BEHAVIOR, TRAITS, VISION } from '../src/config/visitors';
 import { angleOf } from '../src/lib/angle';
@@ -196,7 +196,10 @@ function moveGhost(w: World, g: GhostBot) {
       g.pos.z += (dz / d) * step;
     }
   }
-  w.setGhost(g.pos);
+  // 穿墙时访客听得见（GHOST.hearWall）：和真的鬼魂一样告诉模拟此刻在不在墙里。
+  // 按格子近似（中心在墙格、窗格里）：真的鬼魂按身体（半径 0.16 米）碰没碰到 0.2 米厚的墙体算，差不了几厘米
+  const [i, j] = cellOf(g.pos.x, g.pos.z);
+  w.setGhost({ x: g.pos.x, z: g.pos.z, inWall: grid.isOpaque(i, j) });
 }
 
 const ready = (o: ScareObjectState) => o.cooldown === 0;

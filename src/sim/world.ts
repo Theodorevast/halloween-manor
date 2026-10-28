@@ -1,12 +1,12 @@
 // 把格子、感知、物件、访客状态机、生成器组合成一个 World。集成阶段只用 createWorld。
-// 每一步（1/60 秒）的顺序：引诱结算 → 惊吓结算 → 尖叫传染 → 鬼魂贴近（发毛、后颈一凉）→ 尖叫传染 →
+// 每一步（1/60 秒）的顺序：引诱结算 → 惊吓结算 → 尖叫传染 → 鬼魂穿墙声 → 鬼魂贴近（发毛、察觉、后退、后颈一凉）→ 尖叫传染 →
 // 访客状态机（移动、互相避让）→ 兜底推开挤在一起的人 → 物件计时 → 时间前进 → 生成 → 移除离开的 → seenBy。
 // 先结算惊吓再移动：玩家点下去的那一刻，看着物件的人就会被吓到，不会因为同一步里转开了而落空。
 import { FRONT_DOOR } from '../config/house';
-import { FEAR, HIT_STOP, VISION } from '../config/visitors';
+import { FEAR, GHOST, HIT_STOP, VISION } from '../config/visitors';
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
-import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, separate, startle, updateNpc, walkTo } from './npc';
+import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhost, separate, startle, updateNpc, walkTo } from './npc';
 import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
@@ -43,6 +43,9 @@ export function createWorld(opts: WorldOptions): World {
   let acc = 0;
   /** 玩家操控的鬼魂（setGhost 给的，复制一份）；null = 没有鬼魂 */
   let ghost: Vec2 | null = null;
+  /** 上一次 setGhost 时鬼魂在不在墙里；刚穿进墙的那一刻（由假变真）记下位置，下一步结算谁听见 */
+  let ghostInWall = false;
+  let wallSound: Vec2 | null = null;
 
   // 尖叫传染：这一步里开始尖叫的人排队结算，每人每步最多传染一次
   const screamQueue: Npc[] = [];
@@ -148,7 +151,15 @@ export function createWorld(opts: WorldOptions): World {
     }
     flushScreams();
 
-    // 鬼魂贴近：发毛、后颈一凉。在移动之前：被吹了一口凉气的人这一步就僵住；没有鬼魂时什么都不变
+    // 鬼魂穿墙的声音（设计文档 2.3）：GHOST.hearWall 米内听得见的人（隔墙按 canHear 打折）察觉、涨一点点恐惧值，盯完去查看
+    if (wallSound) {
+      const src = wallSound;
+      wallSound = null;
+      for (const n of npcs) {
+        if (canBeScared(n) && canHear(grid, n.s.pos, src, GHOST.hearWall)) hearGhost(n, ctx, GHOST.hearFear * n.mult, src);
+      }
+    }
+    // 鬼魂贴近：发毛、察觉、后退、后颈一凉。在移动之前：被吹了一口凉气的人这一步就僵住；没有鬼魂时什么都不变
     ctx.ghost = ghost;
     for (const n of npcs) feelGhost(n, ctx);
     flushScreams();
@@ -197,8 +208,16 @@ export function createWorld(opts: WorldOptions): World {
     state,
 
     setGhost(g: GhostInput | null) {
-      // inWall（穿墙声）先不用，后面的任务接上
-      ghost = g ? { x: g.x, z: g.z } : null;
+      if (!g) {
+        ghost = null;
+        ghostInWall = false;
+        wallSound = null;
+        return;
+      }
+      ghost = { x: g.x, z: g.z };
+      const inWall = g.inWall === true;
+      if (inWall && !ghostInWall) wallSound = { x: g.x, z: g.z };
+      ghostInWall = inWall;
     },
 
     // 主动现身、设机关：接口先放着，行为后面的任务做（先一律返回 false）
