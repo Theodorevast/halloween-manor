@@ -75,6 +75,7 @@ export function createLamp(seed: number): PropRig {
   const light = new THREE.PointLight(PALETTE.lamp, LIGHT.high.intensity, LIGHT.high.distance, 2);
   light.position.y = LIGHT_Y;
   light.castShadow = false;
+  light.userData.lightfx = true; // 现身时跟着附近的灯一起暗（lightfx.ts 收集）
   model.add(light);
 
   let q: Quality = 'high';
