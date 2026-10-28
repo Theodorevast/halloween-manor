@@ -33,7 +33,8 @@ export async function refineGlb({ src, out, report, preview = null, args = [], l
   mkdirSync(dirname(out), { recursive: true });
   mkdirSync(dirname(report), { recursive: true });
   if (preview) mkdirSync(dirname(preview), { recursive: true });
-  const argv = ['-b', '--factory-startup', '-P', join(HERE, 'refine_visitor.py'), '--', '--in', src, '--out', out, '--report', report, ...(preview ? ['--preview', preview] : []), ...args.map(String)];
+  // --python-exit-code：脚本抛错时 Blender 默认照样退出码 0
+  const argv = ['-b', '--factory-startup', '--python-exit-code', '1', '-P', join(HERE, 'refine_visitor.py'), '--', '--in', src, '--out', out, '--report', report, ...(preview ? ['--preview', preview] : []), ...args.map(String)];
   const r = spawnSync(blender, argv, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const lines = `${r.stdout ?? ''}\n${r.stderr ?? ''}`.split(/\r?\n/).filter((l) => /^\[refine\]|Error|Traceback|^\s+File "|Exception/.test(l));
   for (const l of lines) log(l);

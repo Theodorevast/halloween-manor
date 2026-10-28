@@ -34,6 +34,11 @@ const q = new URLSearchParams(location.search);
 if (q.has('missing')) CHARACTER.url = `${import.meta.env.BASE_URL}assets/mascot/__missing__.glb`;
 if (q.get('url')) CHARACTER.url = q.get('url')!;
 if (q.get('facing')) CHARACTER.facingOffset = Number(q.get('facing'));
+// clips=待机,走,跑,受惊（片段名照 GLB 里的原样写，空着的写 -）：试新模型时不用先改 config/character.ts
+if (q.get('clips')) {
+  const [idle, walk, run, scared] = q.get('clips')!.split(',').map((s) => (s && s !== '-' ? s : null));
+  CHARACTER.clips = { idle: idle ?? null, walk: walk ?? null, run: run ?? null, scared: scared ?? null };
+}
 
 // 手电调参：torch=外圈亮度,亮芯亮度,衰减指数  bias=bias,normalBias(high)
 if (q.get('torch')) {

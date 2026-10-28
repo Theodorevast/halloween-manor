@@ -57,8 +57,10 @@ def log(msg):
 bpy.ops.wm.read_factory_settings(use_empty=True)
 # 导入时按场景帧率把秒换成帧，导出时按整帧重新采样：设成 30（Tripo / Mixamo 的动作都是 30 帧）关键帧正好落在整帧上
 bpy.context.scene.render.fps = 30
-# merge_vertices：glTF 在贴图接缝处把顶点拆开了，不合回来的话每块 UV 岛都是一块「孤立碎片」，下面清理碎片时会被误删
-bpy.ops.import_scene.gltf(filepath=A.src, merge_vertices=True)
+# merge_vertices：glTF 在贴图接缝处把顶点拆开了，不合回来的话每块 UV 岛都是一块「孤立碎片」，下面清理碎片时会被误删。
+# disable_bone_shape：导入器默认给骨头建一个显示用的球（也是网格物体），会被当成模型的一部分算面数、拟合球身
+imp = bpy.ops.import_scene.gltf.get_rna_type().properties.keys()
+bpy.ops.import_scene.gltf(filepath=A.src, merge_vertices=True, **({'disable_bone_shape': True} if 'disable_bone_shape' in imp else {}))
 # 片段长度不是整帧时，导出按整帧采样会把最后不到一帧截掉，循环接缝处跳一下：把动作的帧范围向外取整
 for act in bpy.data.actions:
     f0, f1 = act.frame_range
@@ -66,7 +68,9 @@ for act in bpy.data.actions:
         act.use_frame_range = True
         act.frame_start, act.frame_end = math.floor(f0), math.ceil(f1)
 arm = next((o for o in bpy.context.scene.objects if o.type == 'ARMATURE'), None)
-meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+# 骨头的显示形状（老版本导入器没有 disable_bone_shape 时）不算模型
+shapes = {pb.custom_shape for pb in arm.pose.bones if pb.custom_shape} if arm else set()
+meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH' and o not in shapes]
 if not meshes:
     raise SystemExit('[refine] GLB 里没有网格')
 report['meshes'] = [o.name for o in meshes]
@@ -201,7 +205,7 @@ def fit_sphere(pts, tol, iters=400):
 
 
 def sphere_from4(a, b, c, d):
-    m = Matrix(((b - a).x, (b - a).y, (b - a).z), ((c - a).x, (c - a).y, (c - a).z), ((d - a).x, (d - a).y, (d - a).z))
+    m = Matrix((tuple(b - a), tuple(c - a), tuple(d - a)))
     if abs(m.determinant()) < 1e-12:
         return None
     rhs = Vector(((b.length_squared - a.length_squared) / 2, (c.length_squared - a.length_squared) / 2, (d.length_squared - a.length_squared) / 2))
@@ -357,99 +361,53 @@ def reweight(obj):
     return new_weights
 
 
-reweighted = {}
-if skel:
-    for o in meshes:
-        if any(m.type == 'ARMATURE' for m in o.modifiers):
-            reweighted[o.name] = reweight(o)
-
-# ---------------------------------------------------------------- 动作：原地 + 脊柱减幅
-
-
-def fcurves_of(action):
-    # Blender 4.4 起动作分「层 / 条 / 通道包」；老接口 action.fcurves 在 5.x 已经没了
-    try:
-        return list(action.fcurves)
-    except AttributeError:
-        out = []
-        for layer in action.layers:
-            for strip in layer.strips:
-                for bag in strip.channelbags:
-                    out.extend(bag.fcurves)
-        return out
-
-
-root_fixed = []
-for act in bpy.data.actions:
-    fcs = fcurves_of(act)
-    if skel:
-        hips_path = f'pose.bones["{skel["hips"]}"].location'
-        for fc in fcs:
-            # 骨骼局部坐标里哪两个轴是水平的不好说，按世界里「水平漂移」判断太绕；这里看整段的净位移：
-            # 首尾差超过模型高的 5% 就当成根运动，把线性漂移减掉
-            if fc.data_path == hips_path and len(fc.keyframe_points) > 2:
-                k = fc.keyframe_points
-                drift = k[-1].co.y - k[0].co.y
-                span = k[-1].co.x - k[0].co.x
-                if abs(drift) > 0.05 * max(arm.dimensions) and span > 0:
-                    for kp in k:
-                        f = (kp.co.x - k[0].co.x) / span
-                        kp.co.y -= drift * f
-                        kp.handle_left.y -= drift * f
-                        kp.handle_right.y -= drift * f
-                    root_fixed.append(f'{act.name}[{fc.array_index}] {drift:+.3f}')
-        if A.spine_damp < 0.999:
-            for name in skel['spine'][1:]:
-                path = f'pose.bones["{name}"].rotation_quaternion'
-                comps = {fc.array_index: fc for fc in fcs if fc.data_path == path}
-                if len(comps) != 4:
-                    continue
-                n = len(comps[0].keyframe_points)
-                if any(len(c.keyframe_points) != n for c in comps.values()):
-                    continue
-                for i in range(n):
-                    q = Quaternion([comps[j].keyframe_points[i].co.y for j in range(4)])
-                    d = Quaternion().slerp(q, A.spine_damp)
-                    for j in range(4):
-                        comps[j].keyframe_points[i].co.y = d[j]
-    for fc in fcs:
-        fc.update()
-report['root_motion_removed'] = root_fixed
-if root_fixed:
-    log(f'去掉根运动：{root_fixed}')
-
 # ---------------------------------------------------------------- 网格清理：碎片、超预算减面
 
 
 def remove_islands(obj):
+    """删掉孤立的小碎片。连通性按顶点位置算，不按拓扑：glTF 在硬边（法线不同）处把顶点拆开了，
+    merge_vertices 合不回来，按拓扑算的话一个硬边模型的每个面都是一块「碎片」"""
     me = obj.data
-    bm = bmesh.new()
-    bm.from_mesh(me)
-    bm.faces.ensure_lookup_table()
-    seen = set()
-    islands = []
-    for f in bm.faces:
-        if f.index in seen:
-            continue
-        stack, isl = [f], []
-        seen.add(f.index)
-        while stack:
-            cur = stack.pop()
-            isl.append(cur)
-            for e in cur.edges:
-                for nb in e.link_faces:
-                    if nb.index not in seen:
-                        seen.add(nb.index)
-                        stack.append(nb)
-        islands.append(isl)
-    total = len(bm.faces)
-    small = [isl for isl in islands if len(isl) < A.min_island * total]
+    size = max(obj.dimensions) or 1.0
+    q = 1e5 / size  # 位置量化到模型尺寸的十万分之一
+    parent = list(range(len(me.vertices)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    first = {}
+    for v in me.vertices:
+        key = (round(v.co.x * q), round(v.co.y * q), round(v.co.z * q))
+        if key in first:
+            union(v.index, first[key])
+        else:
+            first[key] = v.index
+    for p in me.polygons:
+        vs = p.vertices
+        for k in range(1, len(vs)):
+            union(vs[0], vs[k])
+    islands = {}
+    for p in me.polygons:
+        islands.setdefault(find(p.vertices[0]), []).append(p.index)
+    total = len(me.polygons)
+    small = [isl for isl in islands.values() if len(isl) < A.min_island * total]
     if small:
-        bmesh.ops.delete(bm, geom=[f for isl in small for f in isl], context='FACES')
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        bm.faces.ensure_lookup_table()
+        bmesh.ops.delete(bm, geom=[bm.faces[i] for isl in small for i in isl], context='FACES')
         loose = [v for v in bm.verts if not v.link_faces]
         bmesh.ops.delete(bm, geom=loose, context='VERTS')
         bm.to_mesh(me)
-    bm.free()
+        bm.free()
     return len(islands), len(small), sum(len(i) for i in small)
 
 
@@ -474,6 +432,82 @@ if tris > A.max_tris:
             bpy.ops.object.modifier_apply(modifier=mod.name)
     log(f'减面：{tris} → {tri_count()}')
 report['tris_after'] = tri_count()
+
+# ---------------------------------------------------------------- 在清理、减面之后的网格上重分权重
+
+reweighted = {}
+if skel:
+    for o in meshes:
+        if any(m.type == 'ARMATURE' for m in o.modifiers):
+            reweighted[o.name] = reweight(o)
+
+# ---------------------------------------------------------------- 动作：原地 + 脊柱减幅
+
+
+def fcurves_of(action):
+    # Blender 4.4 起动作分「层 / 条 / 通道包」；老接口 action.fcurves 在 5.x 已经没了
+    try:
+        return list(action.fcurves)
+    except AttributeError:
+        out = []
+        for layer in action.layers:
+            for strip in layer.strips:
+                for bag in strip.channelbags:
+                    out.extend(bag.fcurves)
+        return out
+
+
+def model_height():
+    pts = [o.matrix_world @ Vector(c) for o in meshes for c in o.bound_box]
+    return (max(p.z for p in pts) - min(p.z for p in pts)) or 1.0
+
+
+root_fixed = []
+H = model_height()
+for act in bpy.data.actions:
+    fcs = fcurves_of(act)
+    if skel:
+        hips = arm.data.bones[skel['hips']]
+        hips_path = f'pose.bones["{skel["hips"]}"].location'
+        # pose 的 location 在 hips 骨骼自己的静止坐标系里：换到世界里看是哪个方向、一单位多长
+        basis = arm.matrix_world.to_3x3() @ hips.matrix_local.to_3x3()
+        for fc in fcs:
+            # 只看水平方向的净位移：首尾差超过身高的 5% 就当成根运动，把线性漂移减掉。
+            # 竖直方向不动（受惊片段最后蹲下去、停在低处是对的，不能拉回来）
+            if fc.data_path != hips_path or len(fc.keyframe_points) < 3:
+                continue
+            axis = basis @ Vector([1.0 if i == fc.array_index else 0.0 for i in range(3)])
+            if axis.length < 1e-9 or abs(axis.normalized().z) > 0.5:
+                continue
+            k = fc.keyframe_points
+            drift = k[-1].co.y - k[0].co.y
+            span = k[-1].co.x - k[0].co.x
+            if abs(drift) * axis.length > 0.05 * H and span > 0:
+                for kp in k:
+                    f = (kp.co.x - k[0].co.x) / span
+                    kp.co.y -= drift * f
+                    kp.handle_left.y -= drift * f
+                    kp.handle_right.y -= drift * f
+                root_fixed.append(f'{act.name}[{fc.array_index}] {drift * axis.length:+.3f} m')
+        if A.spine_damp < 0.999:
+            for name in skel['spine'][1:]:
+                path = f'pose.bones["{name}"].rotation_quaternion'
+                comps = {fc.array_index: fc for fc in fcs if fc.data_path == path}
+                if len(comps) != 4:
+                    continue
+                n = len(comps[0].keyframe_points)
+                if any(len(c.keyframe_points) != n for c in comps.values()):
+                    continue
+                for i in range(n):
+                    q = Quaternion([comps[j].keyframe_points[i].co.y for j in range(4)])
+                    d = Quaternion().slerp(q, A.spine_damp)
+                    for j in range(4):
+                        comps[j].keyframe_points[i].co.y = d[j]
+    for fc in fcs:
+        fc.update()
+report['root_motion_removed'] = root_fixed
+if root_fixed:
+    log(f'去掉根运动：{root_fixed}')
 
 # ---------------------------------------------------------------- 贴图限到 max-texture
 
@@ -528,17 +562,17 @@ def render_previews(prefix):
             bpy.ops.render.render(write_still=True)
             files.append(sc.render.filepath)
 
-    # 权重分类图：身体蓝、肢体橙、过渡在中间
+    # 权重分类图：身体蓝、肢体橙、过渡在中间（读最终的顶点组）
     if reweighted:
         sc.display.shading.color_type = 'VERTEX'
         for o in meshes:
-            w = reweighted.get(o.name)
-            if not w:
+            g = o.vertex_groups.get(skel['body'])
+            if not reweighted.get(o.name) or not g:
                 continue
             attr = o.data.color_attributes.new('refine_class', 'BYTE_COLOR', 'POINT')
-            for i, wi in enumerate(w):
-                b = wi.get(skel['body'], 0.0)
-                attr.data[i].color = (0.95 - 0.8 * b, 0.55 - 0.15 * b, 0.15 + 0.8 * b, 1)
+            for v in o.data.vertices:
+                b = next((x.weight for x in v.groups if x.group == g.index), 0.0)
+                attr.data[v.index].color = (0.95 - 0.8 * b, 0.55 - 0.15 * b, 0.15 + 0.8 * b, 1)
             o.data.color_attributes.active_color = attr
         if ad:
             ad.action = None
