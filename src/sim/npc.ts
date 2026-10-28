@@ -222,6 +222,7 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     screaming: 0,
     path: [],
     uneasy: 0,
+    notice: null,
   };
   const npc: Npc = {
     s,

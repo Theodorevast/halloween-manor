@@ -24,11 +24,13 @@ export interface ScareSpec {
 export const SCARES: Record<ScareType, ScareSpec> = {
   musicBox: { kind: 'lure', range: 7, fear: 4, cooldown: 14, active: 4, broken: 0, hitAt: 0 },
   door: { kind: 'lure', range: 9, fear: 10, cooldown: 10, active: 0.6, broken: 0, hitAt: 0 },
-  // 台灯一触发就开始闪；摇椅第一次摆到头（0.25 秒，第一声嘎吱）；肖像砸到地上（0.94 秒）；镜中脸扑出（0.6 秒）
+  // 台灯一触发就开始闪；摇椅第一次摆到头（0.25 秒，第一声嘎吱）；肖像砸到地上（0.94 秒）；镜中脸扑出（0.6 秒）；
+  // 床：被子下面慢慢鼓起一个人形、起伏，2.6 秒时一下子塌平（设计文档 4.1）；蓄势这 2.6 秒里看见它的人被定住盯着
   lamp: { kind: 'sight', range: 6, fear: 18, cooldown: 8, active: 1.5, broken: 6, hitAt: 0 },
   rockingChair: { kind: 'sight', range: 6, fear: 22, cooldown: 10, active: 3, broken: 0, hitAt: 0.25 },
   portrait: { kind: 'sight', range: 6, fear: 32, cooldown: 16, active: 1.8, broken: 10, hitAt: 0.94 },
   mirror: { kind: 'sight', range: 2.5, fear: 48, cooldown: 20, active: 1.5, broken: 0, hitAt: 0.6 },
+  bed: { kind: 'sight', range: 5, fear: 26, cooldown: 14, active: 3.2, broken: 0, hitAt: 2.6 },
 };
 
 /** 引诱声隔着墙（声源和听者之间没有视线）时，听得见的距离乘这个系数 */

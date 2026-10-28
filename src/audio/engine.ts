@@ -70,7 +70,7 @@ const LOOKAHEAD = 0.01;
 /** 两次 braam 至少隔多久 */
 const BRAAM_GAP = 0.8;
 /** 3D 时物件的声音从多高出来（米）：灯罩、画框、镜面中间…… */
-export const SOURCE_Y: Record<ScareType, number> = { musicBox: 0.62, door: 1.0, lamp: 1.36, rockingChair: 0.5, portrait: 1.05, mirror: 1.1 };
+export const SOURCE_Y: Record<ScareType, number> = { musicBox: 0.62, door: 1.0, lamp: 1.36, rockingChair: 0.5, portrait: 1.05, mirror: 1.1, bed: 0.55 };
 /** 3D 时访客没有常驻声道（超过 footsteps.ts 的 FOOT.voices 个人）时，他的声音从多高出来；前门的声音多高 */
 const VOICE_Y = 0.9;
 const DOOR_Y = 1.0;
@@ -264,7 +264,7 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
         switch (e.type) {
           case 'trigger': {
             const o = obj(e.object);
-            TRIGGER[e.scareType](bus, t, placeAt(o?.pos, SOURCE_Y[e.scareType]));
+            TRIGGER[e.scareType]?.(bus, t, placeAt(o?.pos, SOURCE_Y[e.scareType]));
             break;
           }
           case 'reset': {

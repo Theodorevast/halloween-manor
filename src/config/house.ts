@@ -112,6 +112,8 @@ export interface PropPlacement {
  *   卧室八音盒 + 床边落地灯（西墙床头），厨房门 + 摇椅（门里正对门洞，从走廊往里看就在眼前）
  * - 有正面的物件（肖像、镜子）朝南或朝东：默认镜头在东南方向看得见正面；背靠墙、面朝房间，屋里的人都在它正面
  * - 落地镜不跟引诱物件配对：它是最重的惊吓，配上引诱就成了每 20 秒一次的「刷恐惧」，太容易（见 tests/balance.test.ts）
+ * - 床（2026-10-28）：被子下面有人。床本身已经挡路（Tile.Furniture），床面中间那一格改标成 Tile.Prop，不改变能不能走；
+ *   这一格压在床上、四周也都是床，所以和别的物件不一样：不在家具外面，旁边也没有可走的格子
  */
 export const PROPS: PropPlacement[] = [
   { id: 'portrait', type: 'portrait', cell: [7, 1], facing: S, room: 'study' },
@@ -121,6 +123,7 @@ export const PROPS: PropPlacement[] = [
   { id: 'music-box', type: 'musicBox', cell: [1, 17], facing: E, room: 'bedroom' },
   { id: 'lamp-bedroom', type: 'lamp', cell: [1, 16], facing: E, room: 'bedroom' },
   { id: 'mirror', type: 'mirror', cell: [22, 17], facing: E, room: 'bathroom' },
+  { id: 'bed', type: 'bed', cell: [2, 20], facing: E, room: 'bedroom' },
 ];
 
 export const cellCenter = (i: number, j: number) => ({ x: (i + 0.5) * CELL, z: (j + 0.5) * CELL });

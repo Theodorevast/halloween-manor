@@ -3,7 +3,7 @@
 //   const h = await createHarness();
 //   h.add(createSomethingView(h.core, h.rig));
 //   h.start();
-// 按键：1–7 依次附身 PROPS 里的物件；F 让 0 号访客逃跑；Q / E 旋转镜头；空格暂停假访客
+// 按键：1–8 依次附身 PROPS 里的物件（床是第 8 个）；F 让 0 号访客逃跑；Q / E 旋转镜头；空格暂停假访客
 // Playwright 里可以用 window.__harness.trigger('portrait') / .flee(0) / .rotate(1) 驱动
 import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W, PROPS, propCenter } from '../src/config/house';
@@ -114,9 +114,11 @@ export async function createHarness(opts: { ambient?: number } = {}): Promise<Ha
   const state: WorldState = {
     time: 0,
     npcs: [fakeNpc(1, 'Mia', 'timid'), fakeNpc(2, 'Theo', 'brave')],
-    objects: PROPS.map((p) => ({ id: p.id, type: p.type, pos: propCenter(p), facing: p.facing, cooldown: 0, active: 0, broken: 0, seenBy: [] })),
+    objects: PROPS.map((p) => ({ id: p.id, type: p.type, pos: propCenter(p), facing: p.facing, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0 })),
     scaredOff: 0,
     hitStop: 0,
+    manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null },
+    avoid: [],
   };
   const modules: Module[] = [];
   const pending: SimEvent[] = [];

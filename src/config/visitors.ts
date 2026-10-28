@@ -1,5 +1,5 @@
 // 访客（NPC）的参数（设计文档 1. 体验与玩法 /「访客」「节奏」「爽点」）
-import type { Personality } from '../sim/types';
+import type { NoticeKind, Personality } from '../sim/types';
 
 export const PERSONALITIES: Record<Personality, { fearMult: number; weight: number }> = {
   timid: { fearMult: 1.5, weight: 30 },
@@ -70,6 +70,31 @@ export const BEHAVIOR = {
   arrive: 0.15,
   /** 走出前门后再走多远消失（米） */
   exitWalk: 1.2,
+};
+
+/**
+ * 察觉那一拍（2026-10-28 访客反馈，设计文档 2.1）：听到声音、手电照到鬼魂、开始发毛、现身蓄力时，
+ * 访客减速停下，手电先转向来源，身体按平常速度跟上，盯着看一会儿，再按来源和性格决定下一步。
+ * 受惊（startled）、逃跑中不触发
+ */
+export const NOTICE = {
+  /** 盯着看多久（秒，随机），再乘性格的 noticeHold */
+  hold: [0.5, 1.0] as [number, number],
+  /** 察觉时手电转向的速度是 BEHAVIOR.turnRate 的几倍（手电先转，身体按平常速度跟上） */
+  torchTurn: 2,
+  /** 察觉中又来一个来源：优先级高的或一样高的接管 */
+  priority: { manifest: 3, sound: 2, ghost: 1, chill: 0 } as Record<NoticeKind, number>,
+};
+
+/**
+ * 性格差异（设计文档 2.5）。investigateDist：查看声源时走到离声源多近（米；原来全员共用的 BEHAVIOR.investigateDist 就是 1.5）；
+ * noticeHold：察觉盯着看的时长系数；chillRange：发毛范围（GHOST.radius 一类的距离）的系数；
+ * recheck：被惊吓类物件吓过以后，再回头照一眼那个物件的几率（胆大的才有）
+ */
+export const TRAITS: Record<Personality, { investigateDist: number; noticeHold: number; chillRange: number; recheck: number }> = {
+  timid: { investigateDist: 1.5, noticeHold: 1.5, chillRange: 1.2, recheck: 0 },
+  average: { investigateDist: 1.5, noticeHold: 1, chillRange: 1, recheck: 0 },
+  brave: { investigateDist: 0.8, noticeHold: 1, chillRange: 1, recheck: 0.5 },
 };
 
 /**
@@ -187,6 +212,56 @@ export const GHOST = {
   neckFear: 12,
   /** 每人被吹过一次后多久（秒）内不再累计停留 */
   neckCooldown: 8,
+  /** 进入发毛范围后多久内一定有反应（秒）：停一下、回头照一下 */
+  onset: 0.5,
+  /** 发毛到这个程度还贴着：后退半步、手电一直照着背后 */
+  backAt: 0.7,
+  /** 鬼魂穿墙声能被多远的访客听见（米）、听见涨多少恐惧值 */
+  hearWall: 3,
+  hearFear: 2,
+};
+
+/**
+ * 主动现身（2026-10-28，设计文档 3.2）：右键或 F。蓄力 windup 秒（附近的访客察觉、灯暗下来）→ 落下（结算谁被吓到）→
+ * 停留 hold 秒（鬼魂几乎不动）→ 收回，进入冷却。克制：不扑过来、不变大、不说话。
+ * 被吓到的恐惧值 = fear × 距离系数 × 正中系数 × 在光里 × 性格倍率 × 习惯化（按 'manifest' 这一种算）
+ */
+export const MANIFEST = {
+  windup: 0.6,
+  hold: 1.5,
+  cooldown: 18,
+  /** 落下时看得见鬼魂的最远距离（米） */
+  range: 6,
+  fear: 30,
+  /** 距离系数：near[0] 米内 nearMult[0]，near[1] 米处 nearMult[1]，中间线性 */
+  near: [1, 6] as [number, number],
+  nearMult: [1.3, 0.6] as [number, number],
+  /** 正中系数：光锥正中 center[0]，光锥边上 center[1] */
+  center: [1.2, 0.9] as [number, number],
+  /** 鬼魂被这个人的手电照着时再乘 */
+  lit: 1.25,
+  /** 蓄力时多远内的访客会察觉（米） */
+  noticeRadius: 5,
+  /** 被吓到的人：后退到离鬼魂至少 backOff 米，之后 avoidTime 秒内绕开 avoidRadius 米的圆 */
+  backOff: 1.5,
+  avoidRadius: 2.5,
+  avoidTime: 20,
+};
+
+/**
+ * 机关（2026-10-28，设计文档 4.2）：对着物件按住左键设下，访客走进范围时等个时机自动触发。
+ * 同时最多 max 个；设下 expire 秒还没触发就自动解除；恐惧值 × fearMult，冷却照常
+ */
+export const TRAP = {
+  /** 按住多久算「设下」（秒；picking.ts 用） */
+  holdToArm: 0.5,
+  max: 2,
+  expire: 60,
+  /** 背后型：物件在访客背后这么远（米）时开始蓄势 */
+  behind: [1.5, 3] as [number, number],
+  /** 进入范围后最多等多久挑时机（秒） */
+  wait: 1.5,
+  fearMult: 0.9,
 };
 
 export const SPAWN = {

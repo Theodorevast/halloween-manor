@@ -60,7 +60,7 @@ const poses = [
 ];
 const torches = poses.map(() => createFlashlight(core.houseRoot, core.quality));
 
-const state: WorldState = { time: 0, npcs: [], objects: [], scaredOff: 0, hitStop: 0 };
+const state: WorldState = { time: 0, npcs: [], objects: [], scaredOff: 0, hitStop: 0, manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null }, avoid: [] };
 let quality: Quality = q.has('low') ? 'low' : 'high';
 const setQuality = (v: Quality) => {
   quality = v;

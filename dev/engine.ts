@@ -168,7 +168,7 @@ picker.onPick((id) => {
 });
 
 // —— juice：用假事件驱动 ——
-const fakeState: WorldState = { time: 0, npcs: [], objects: [], scaredOff: 0, hitStop: 0 };
+const fakeState: WorldState = { time: 0, npcs: [], objects: [], scaredOff: 0, hitStop: 0, manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null }, avoid: [] };
 const juice = createJuice(rig, core);
 const emit = (e: SimEvent) => juice.onEvent?.(e, fakeState);
 

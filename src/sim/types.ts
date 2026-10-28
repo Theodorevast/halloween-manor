@@ -16,6 +16,20 @@ export type Personality = 'timid' | 'average' | 'brave';
  */
 export type NpcMode = 'entering' | 'wander' | 'alert' | 'startled' | 'fleeing' | 'gone';
 
+/** 察觉的来源：声音（引诱、尖叫、鬼魂穿墙声）、手电照到鬼魂、开始发毛、现身蓄力 */
+export type NoticeKind = 'sound' | 'ghost' | 'chill' | 'manifest';
+
+/** 察觉那一拍（2026-10-28 访客反馈，设计文档 2.1）：停下、手电先转向来源、盯着看一会儿 */
+export interface NoticeState {
+  kind: NoticeKind;
+  /** 来源位置（房屋米坐标） */
+  src: Vec2;
+  /** 已经察觉了多久（秒） */
+  t: number;
+  /** 一共要盯多久（秒，已乘性格系数） */
+  hold: number;
+}
+
 export interface NpcState {
   id: number;
   name: string;
@@ -46,10 +60,15 @@ export interface NpcState {
    * 模拟层每步都写；没有鬼魂（setGhost(null)）时恒为 0。可选只是为了不打扰手写 NpcState 的调试页
    */
   uneasy?: number;
+  /**
+   * 正在察觉（那一拍）：停下、手电先转向来源、盯着看；null = 没有。
+   * 画面、调试用（身体和手电的朝向本来就在 heading / lookDir 里）。可选的理由同 uneasy
+   */
+  notice?: NoticeState | null;
 }
 
 export type ScareKind = 'lure' | 'sight';
-export type ScareType = 'musicBox' | 'door' | 'lamp' | 'rockingChair' | 'portrait' | 'mirror';
+export type ScareType = 'musicBox' | 'door' | 'lamp' | 'rockingChair' | 'portrait' | 'mirror' | 'bed';
 
 export interface ScareObjectState {
   id: string;
@@ -64,7 +83,31 @@ export interface ScareObjectState {
   broken: number;
   /** 此刻能看见它的 NPC id（引诱类物件为空数组） */
   seenBy: number[];
+  /** 机关：设下后的剩余秒数，0 = 没有设下 */
+  armed: number;
 }
+
+/**
+ * idle     没在现身
+ * windup   蓄力：附近的访客察觉、灯暗下来
+ * hold     落下以后停留：鬼魂几乎不动
+ * cooldown 收回以后的冷却
+ */
+export type ManifestPhase = 'idle' | 'windup' | 'hold' | 'cooldown';
+
+/** 主动现身的状态（右键 / F，2026-10-28，设计文档 3.2） */
+export interface ManifestState {
+  phase: ManifestPhase;
+  /** 这一段已经过了多久（秒） */
+  t: number;
+  /** 剩余冷却（秒），0 = 可以现身 */
+  cooldown: number;
+  /** 现身的位置（蓄力开始时鬼魂所在处）；idle 时为 null */
+  pos: Vec2 | null;
+}
+
+/** 访客暂时绕开的地方（看见现身以后），寻路时这里的格子代价很高。until 是模拟时刻（和 WorldState.time 同一个钟） */
+export interface AvoidZone { pos: Vec2; r: number; until: number }
 
 export interface WorldState {
   /** 模拟时间（秒），hit-stop 期间不走 */
@@ -75,6 +118,10 @@ export interface WorldState {
   scaredOff: number;
   /** > 0：hit-stop 剩余秒数，期间模拟暂停（渲染不停） */
   hitStop: number;
+  /** 主动现身：到哪一段了、冷却还剩多久、在哪里现身 */
+  manifest: ManifestState;
+  /** 访客暂时绕开的地方（看见现身以后） */
+  avoid: AvoidZone[];
 }
 
 /**
@@ -105,7 +152,18 @@ export type SimEvent =
    */
   | { type: 'chill'; npc: number; amount: number; neck: boolean }
   /** 物件从「被破坏」状态复原（台灯亮回、肖像立回画架） */
-  | { type: 'reset'; object: string };
+  | { type: 'reset'; object: string }
+  /** 访客察觉那一拍开始（或被优先级更高的新来源接管）：来源的种类和位置 */
+  | { type: 'notice'; npc: number; kind: NoticeKind; src: Vec2 }
+  /** 某个访客的手电开始 / 不再照着鬼魂（只显形、不吓人） */
+  | { type: 'reveal'; npc: number; on: boolean }
+  /** 现身：windup 蓄力开始、drop 落下（scared = 被吓到的人）、end 收回 */
+  | { type: 'manifest'; phase: 'windup' | 'drop' | 'end'; pos: Vec2; scared: number[] }
+  /** 机关：armed 设下、sprung 触发、expired 设下后一直没触发、到时间自动解除 */
+  | { type: 'trap'; object: string; phase: 'armed' | 'sprung' | 'expired' };
+
+/** setGhost 的参数：鬼魂在哪、此刻是不是在墙里（穿墙声）。只给 { x, z } 也行 */
+export interface GhostInput { x: number; z: number; inWall?: boolean }
 
 export interface World {
   readonly state: WorldState;
@@ -115,11 +173,16 @@ export interface World {
   trigger(objectId: string): boolean;
   /** 立刻放进一个访客（测试和调试用；正常游戏由生成器自动放）。默认在门外、状态 entering */
   spawn(opts?: SpawnOptions): NpcState;
+  /** 主动现身。没有鬼魂、冷却中、正在现身时返回 false；成功时下一次 step 返回 manifest windup */
+  manifest(): boolean;
+  /** 设机关。物件不存在、冷却中、已经设下、同时设下的已满时返回 false */
+  arm(objectId: string): boolean;
   /**
    * 玩家操控的鬼魂在哪（房屋米坐标，第三人称模式每帧调一次）；null = 没有鬼魂（触屏的俯视模式）。
+   * inWall：此刻是不是在墙里（鬼魂穿墙声，访客在 GHOST.hearWall 米内听得见）。
    * 访客看不见鬼魂，但鬼魂贴近时会发毛（2026-10-28 第三人称改版）
    */
-  setGhost(pos: Vec2 | null): void;
+  setGhost(g: GhostInput | null): void;
 }
 
 export interface SpawnOptions {

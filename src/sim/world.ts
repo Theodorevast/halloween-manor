@@ -12,7 +12,7 @@ import { canHear, canSee } from './perception';
 import { createRng } from './rng';
 import { createScareObjects, facesToward, tickObject, triggerObject, windingUp } from './scares';
 import { pickName, pickPersonality, Spawner } from './spawner';
-import type { NpcState, SimEvent, SpawnOptions, Vec2, World, WorldOptions, WorldState } from './types';
+import type { GhostInput, NpcState, SimEvent, SpawnOptions, Vec2, World, WorldOptions, WorldState } from './types';
 
 /** 模拟固定步长（秒）：设计文档「架构」 */
 export const SIM_DT = 1 / 60;
@@ -25,7 +25,15 @@ export function createWorld(opts: WorldOptions): World {
   const nav = createNav(grid);
   const objects = createScareObjects();
   const byId = new Map(objects.map((o) => [o.state.id, o]));
-  const state: WorldState = { time: 0, npcs: [], objects: objects.map((o) => o.state), scaredOff: 0, hitStop: 0 };
+  const state: WorldState = {
+    time: 0,
+    npcs: [],
+    objects: objects.map((o) => o.state),
+    scaredOff: 0,
+    hitStop: 0,
+    manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null },
+    avoid: [],
+  };
   /** 和 state.npcs 一一对应（同顺序），带内部状态 */
   const npcs: Npc[] = [];
   const spawner = opts.autoSpawn === false ? null : new Spawner(rng);
@@ -188,8 +196,18 @@ export function createWorld(opts: WorldOptions): World {
   return {
     state,
 
-    setGhost(pos: Vec2 | null) {
-      ghost = pos ? { x: pos.x, z: pos.z } : null;
+    setGhost(g: GhostInput | null) {
+      // inWall（穿墙声）先不用，后面的任务接上
+      ghost = g ? { x: g.x, z: g.z } : null;
+    },
+
+    // 主动现身、设机关：接口先放着，行为后面的任务做（先一律返回 false）
+    manifest(): boolean {
+      return false;
+    },
+
+    arm(_objectId: string): boolean {
+      return false;
     },
 
     step(dt: number): SimEvent[] {

@@ -1053,8 +1053,8 @@ export const spawnDoor: SfxFn = (bus, t, at) => {
   return s.end(t + 1.6 + 2.4);
 };
 
-/** 附身物件 → 声音 */
-export const TRIGGER: Record<ScareType, SfxFn> = { musicBox, door, lamp, rockingChair, portrait, mirror };
+/** 附身物件 → 声音（床的声音还没做，所以是 Partial；声音那一路补上） */
+export const TRIGGER: Partial<Record<ScareType, SfxFn>> = { musicBox, door, lamp, rockingChair, portrait, mirror };
 /** 物件复原 → 声音（只有台灯和肖像有「被破坏」状态） */
 export const RESET: Partial<Record<ScareType, SfxFn>> = { lamp: lampReset, portrait: portraitReset };
 

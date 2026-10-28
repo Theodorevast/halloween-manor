@@ -1,4 +1,4 @@
-// 可附身物件的画面：肖像、两盏落地灯、摇椅、厨房门、八音盒、落地镜。
+// 可附身物件的画面：肖像、两盏落地灯、摇椅、厨房门、八音盒、落地镜、床。
 // 每个物件挂在 houseRoot 下（位置 propCenter、朝向 yawFor(facing)，模型正面朝局部 +z），
 // 自己的模型和惊吓动画在 src/view/props/*.ts；这里统一管：事件分发、幽光（可附身时呼吸、悬停变亮放大）、拾取盒。
 // 第三人称（dissolve）：鬼魂穿过物件时，物件和家具一样在它周围溶开、洞口一圈冷光（walls.ts 的 DISSOLVE），
@@ -9,6 +9,7 @@ import { PROPS, propCenter, type PropPlacement } from '../config/house';
 import type { FrameCtx, Module, Quality, RenderCore } from '../engine/types';
 import { yawFor } from '../lib/angle';
 import type { ScareObjectState, ScareType, SimEvent, WorldState } from '../sim/types';
+import { createBed } from './props/bed';
 import { createDoor } from './props/door';
 import { approach, attachShell, createGlow, hitBox, type Glow, type PropRig } from './props/kit';
 import { createLamp } from './props/lamp';
@@ -45,6 +46,7 @@ const builders: Record<ScareType, (i: number) => PropRig> = {
   door: () => createDoor(),
   musicBox: () => createMusicBox(),
   mirror: () => createMirror(),
+  bed: () => createBed(),
 };
 
 interface Entry {
@@ -122,8 +124,8 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
   let hovered: string | null = null;
 
   // 找不到状态（state 里没有这个物件）时用的占位，保证物件照样能显示。
-  // 每帧直接 find（7 × 7 次比较），不缓存索引：模拟层哪怕整个换掉对象也不会读到旧的
-  const idle = new Map(entries.map((e): [string, ScareObjectState] => [e.p.id, { id: e.p.id, type: e.p.type, pos: propCenter(e.p), facing: e.p.facing, cooldown: 0, active: 0, broken: 0, seenBy: [] }]));
+  // 每帧直接 find（8 × 8 次比较），不缓存索引：模拟层哪怕整个换掉对象也不会读到旧的
+  const idle = new Map(entries.map((e): [string, ScareObjectState] => [e.p.id, { id: e.p.id, type: e.p.type, pos: propCenter(e.p), facing: e.p.facing, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0 }]));
   const objOf = (state: WorldState, e: Entry) => state.objects.find((o) => o.id === e.p.id) ?? idle.get(e.p.id)!;
 
   return {

@@ -16,7 +16,7 @@ describe('Grid', () => {
     expect(g.isOpaque(pi, pj)).toBe(false); // 物件不挡视线
   });
 
-  test('物件格都在房间里、不压在墙和家具上（门在门洞里，八音盒在床头柜上）', () => {
+  test('物件格都在房间里、不压在墙和家具上（门在门洞里，八音盒在床头柜上，床的物件格压在床上）', () => {
     const t = buildTiles();
     for (const p of PROPS) {
       const [i, j] = p.cell;
@@ -28,15 +28,22 @@ describe('Grid', () => {
       const under = FURNITURE.filter((f) => f.blocks && i >= f.rect.x0 && i < f.rect.x1 && j >= f.rect.z0 && j < f.rect.z1);
       if (p.type === 'musicBox') {
         expect(under.map((f) => [f.kind, f.rect.x1 - f.rect.x0, f.rect.z1 - f.rect.z0])).toEqual([['nightstand', 1, 1]]);
+      } else if (p.type === 'bed') {
+        // 床（2026-10-28）：物件格标在床面当中。床本来就挡路，这一格改标成 Prop 不改变能不能走；四周也都是床，所以没有相邻的可走格
+        expect(under.map((f) => f.kind)).toEqual(['bed']);
+        expect(roomAt(i, j)).toBe(p.room);
+        expect(g.isWalkable(i, j)).toBe(false);
+        expect(g.isOpaque(i, j)).toBe(false);
+        continue;
       } else expect(under).toEqual([]);
       expect(roomAt(i, j)).toBe(p.room);
       // 至少有一个相邻格能走（人能走到跟前）
       const around = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([di, dj]) => g.isWalkable(i + di, j + dj));
       expect(around).toBe(true);
     }
-    // 每个房间最多 2 个物件
+    // 每个房间最多 2 个物件（床不算：它是家具上的物件，不另占地方）
     const per = new Map<string, number>();
-    for (const p of PROPS) per.set(p.room, (per.get(p.room) ?? 0) + 1);
+    for (const p of PROPS) if (p.type !== 'bed') per.set(p.room, (per.get(p.room) ?? 0) + 1);
     for (const n of per.values()) expect(n).toBeLessThanOrEqual(2);
   });
 

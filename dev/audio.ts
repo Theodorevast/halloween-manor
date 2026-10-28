@@ -38,9 +38,11 @@ const HOME: Vec2[] = [{ x: 3.5, z: 2.5 }, { x: 8, z: 6 }, { x: 12.5, z: 9 }];
 const state: WorldState = {
   time: 0,
   npcs: [npc(1, 'Mia', 'timid', { ...HOME[0] }), npc(2, 'Theo', 'average', { ...HOME[1] }), npc(3, 'Nora', 'brave', { ...HOME[2] })],
-  objects: PROPS.map((p) => ({ id: p.id, type: p.type, pos: propCenter(p), facing: p.facing, cooldown: 0, active: 0, broken: 0, seenBy: [] })),
+  objects: PROPS.map((p) => ({ id: p.id, type: p.type, pos: propCenter(p), facing: p.facing, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0 })),
   scaredOff: 0,
   hitStop: 0,
+  manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null },
+  avoid: [],
 };
 const objId = (type: ScareType) => state.objects.find((o) => o.type === type)!.id;
 const trig = (type: ScareType): SimEvent => ({ type: 'trigger', object: objId(type), scareType: type });

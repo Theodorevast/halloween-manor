@@ -27,6 +27,7 @@ export function createScareObjects(): ScareObject[] {
       active: 0,
       broken: 0,
       seenBy: [],
+      armed: 0,
     },
     spec: SCARES[p.type],
     scared: new Set<number>(),
