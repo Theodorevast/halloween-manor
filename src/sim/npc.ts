@@ -52,6 +52,8 @@ const GOLDEN = 2.399963;
 // 鬼魂贴近的反应（参数在 GHOST）
 /** 进入发毛范围后最早多久察觉（秒，计划给的定值）：最晚 GHOST.onset */
 const ONSET_MIN = 0.15;
+/** 胆大的被惊吓物件吓完、再照一眼那个物件：盯多久（秒，设计文档 2.5 给的定值） */
+const RECHECK_HOLD = 1;
 /**
  * 发毛到 GHOST.backAt 还贴着：后退半步（米）——退到比现在离鬼魂远这么多的地方。
  * 计划写的是 retreat(…, 0.5)（「离鬼魂至少 0.5 米」），可那样鬼魂在 0.5 米外时（机器人就贴在 0.5 米）一步也不用退
@@ -158,6 +160,8 @@ export interface Npc {
   /** 受惊：还要僵住几秒，结束后恢复成什么 */
   startleLeft: number;
   resume: Resume | null;
+  /** 最近一次吓到他的惊吓物件在哪（胆大的僵住结束后再照一眼用）；被别的吓到（后颈一凉）为 null */
+  lastScareSrc: Vec2 | null;
   /** 逃跑：当前乱晃的目标偏角和保持时间 */
   jitter: number;
   jitterLeft: number;
@@ -264,6 +268,7 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     source: null,
     startleLeft: 0,
     resume: null,
+    lastScareSrc: null,
     jitter: 0,
     jitterLeft: 0,
     transfixOn: null,
@@ -336,13 +341,18 @@ function addFear(npc: Npc, amount: number, now: number, scare = true) {
  */
 export function startle(npc: Npc, ctx: NpcCtx, objectId: string, type: ScareType, objPos: Vec2, base: number): void {
   startleWith(npc, ctx, objectId, exposure(npc, type, base, ctx.now), objPos);
+  if (npc.s.mode === 'startled') npc.lastScareSrc = { x: objPos.x, z: objPos.z };
 }
 
-/** startle 的后半段：已经算好这一下涨多少（后颈一凉先发 chill 再走这里） */
+/**
+ * startle 的后半段：已经算好这一下涨多少（后颈一凉先发 chill 再走这里）。
+ * 尖叫只留给吓破胆的时候（设计文档 2.4）：一次涨了 FEAR.screamAt 以上，或者这一下涨完到了 FEAR.dread（screamDread）
+ */
 function startleWith(npc: Npc, ctx: NpcCtx, objectId: string, amount: number, srcPos: Vec2): void {
   const s = npc.s;
   addFear(npc, amount, ctx.now);
-  const scream = amount >= FEAR.screamAt;
+  npc.lastScareSrc = null; // 物件的 startle 回头再记（见 startle）
+  const scream = amount >= FEAR.screamAt || (FEAR.screamDread && s.fear >= FEAR.dread);
   ctx.events.push({ type: 'startle', npc: s.id, object: objectId, amount, scream });
   if (scream) {
     s.screaming = FEAR.screamTime;
@@ -401,9 +411,10 @@ function listen(npc: Npc, ctx: NpcCtx, amount: number, source: Vec2, event: SimE
 /**
  * 察觉到一个来源（设计文档 2.1）：停下、手电先转向 src、身体跟上，盯 NOTICE.hold（× 性格的 noticeHold）秒，
  * 再按来源决定下一步（见 endNotice）。受惊、逃跑、已离开的人不察觉；正在察觉的来源优先级更高时不接管
- * （NOTICE.priority，一样高或更高就接管：转向新来源、重新计时）。接管成功发 notice 事件、返回 true
+ * （NOTICE.priority，一样高或更高就接管：转向新来源、重新计时）。接管成功发 notice 事件、返回 true。
+ * hold：盯多久（秒）；不给就按 NOTICE.hold 随机再乘性格的 noticeHold
  */
-export function notice(npc: Npc, ctx: NpcCtx, kind: NoticeKind, src: Vec2): boolean {
+export function notice(npc: Npc, ctx: NpcCtx, kind: NoticeKind, src: Vec2, hold?: number): boolean {
   const s = npc.s;
   if (!canBeScared(npc) || s.mode === 'startled') return false;
   const cur = s.notice;
@@ -414,7 +425,7 @@ export function notice(npc: Npc, ctx: NpcCtx, kind: NoticeKind, src: Vec2): bool
     kind,
     src: { x: src.x, z: src.z },
     t: 0,
-    hold: ctx.rng.range(NOTICE.hold[0], NOTICE.hold[1]) * TRAITS[s.personality].noticeHold,
+    hold: hold ?? ctx.rng.range(NOTICE.hold[0], NOTICE.hold[1]) * TRAITS[s.personality].noticeHold,
   };
   ctx.events.push({ type: 'notice', npc: s.id, kind, src: { x: src.x, z: src.z } });
   return true;
@@ -899,8 +910,18 @@ function snapshot(npc: Npc): Resume {
   };
 }
 
-/** 受惊结束：恢复之前的状态（路径还在 s.path 里），手电按限速转回去 */
+/**
+ * 受惊结束：恢复之前的状态（路径还在 s.path 里），手电按限速转回去；僵住期间听到了声音就去查看。
+ * 胆大的被惊吓物件吓完，有 TRAITS.recheck 的几率先再照一眼那个物件（察觉那一拍，盯 RECHECK_HOLD 秒）才走
+ */
 function restore(npc: Npc, ctx: NpcCtx) {
+  resumeAfterStartle(npc, ctx);
+  const src = npc.lastScareSrc, p = TRAITS[npc.s.personality].recheck;
+  npc.lastScareSrc = null;
+  if (src && p > 0 && ctx.rng.next() < p) notice(npc, ctx, 'sound', src, RECHECK_HOLD);
+}
+
+function resumeAfterStartle(npc: Npc, ctx: NpcCtx) {
   const r = npc.resume;
   npc.resume = null;
   npc.startleLeft = 0;
