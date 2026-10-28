@@ -1,12 +1,12 @@
 // 把格子、感知、物件、访客状态机、生成器组合成一个 World。集成阶段只用 createWorld。
 // 每一步（1/60 秒）的顺序：引诱结算 → 惊吓结算 → 尖叫传染 → 鬼魂穿墙声 → 鬼魂贴近（发毛、察觉、后退、后颈一凉）→ 尖叫传染 →
-// 访客状态机（移动、互相避让）→ 兜底推开挤在一起的人 → 物件计时 → 时间前进 → 生成 → 移除离开的 → seenBy。
+// 访客状态机（移动、互相避让）→ 兜底推开挤在一起的人 → 物件计时 → 时间前进 → 生成 → 移除离开的 → 手电照到鬼魂 → seenBy。
 // 先结算惊吓再移动：玩家点下去的那一刻，看着物件的人就会被吓到，不会因为同一步里转开了而落空。
 import { FRONT_DOOR } from '../config/house';
 import { FEAR, GHOST, HIT_STOP, VISION } from '../config/visitors';
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
-import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhost, separate, startle, updateNpc, walkTo } from './npc';
+import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhost, notice, separate, startle, updateNpc, walkTo } from './npc';
 import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
@@ -187,6 +187,17 @@ export function createWorld(opts: WorldOptions): World {
       if (npcs[k].s.mode !== 'gone') continue;
       npcs.splice(k, 1);
       state.npcs.splice(k, 1);
+    }
+
+    // 手电照到鬼魂（设计文档 3.1）：只显形、不吓人。照到的那一刻发 reveal on、愣一下（察觉 kind ghost），不涨恐惧值；
+    // 不再照着（转开了、鬼魂走了或没了、开始逃跑）发 reveal off。逃跑中的人不算
+    const g = ghost;
+    for (const n of npcs) {
+      const lit = g !== null && canBeScared(n) && canSee(grid, n.s, g, VISION.range);
+      if (lit === n.litGhost) continue;
+      n.litGhost = lit;
+      events.push({ type: 'reveal', npc: n.s.id, on: lit });
+      if (lit) notice(n, ctx, 'ghost', g);
     }
 
     // seenBy：此刻看得见的人（逃跑中的不算，他们已经吓不到了）。每步给新数组，画面可以放心比较引用

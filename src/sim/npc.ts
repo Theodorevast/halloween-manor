@@ -225,6 +225,8 @@ export interface Npc {
   backedOff: boolean;
   /** 正在后退（retreat）：走的时候手电一直照着这里（吓到他的地方），到了以后面朝这里左右照 */
   retreatFrom: Vec2 | null;
+  /** 上一步他的手电照没照着鬼魂（world.ts 写；变了就发 reveal） */
+  litGhost: boolean;
 }
 
 export interface NpcInit {
@@ -297,6 +299,7 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     onsetAt: Infinity,
     backedOff: false,
     retreatFrom: null,
+    litGhost: false,
   };
   if (o.mode === 'entering') {
     const inside = { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z };
