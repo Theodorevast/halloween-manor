@@ -38,7 +38,7 @@ import { wrapAngle, yawFor } from '../lib/angle';
 import type { SimEvent, WorldState } from '../sim/types';
 import { TORCH } from './flashlight';
 import type { Frost } from './frost';
-import { thermal, type LightFx } from './lightfx';
+import { MANIFEST_WINDUP_PATTERN, thermal, type LightFx } from './lightfx';
 import { PALETTE } from './palette';
 import { ge, lt, makeSprite, rnd } from './particles/common';
 import { GHOST_SHADOW_LAYER, TORCH_COUNT, torches, type TorchSample } from './torches';
@@ -138,6 +138,8 @@ export const GHOST = {
   /**
    * 主动现身的画面（调研 G2 / G3 / G4、L1、S1，时间轴见设计文档 3.2；几段的时长用 config/visitors.ts 的 MANIFEST）。
    * - 蓄力：radius 米内的灯按 windup 的节奏暗两下（lightfx.pulse，每秒 10 个字母，只放 MANIFEST.windup 秒），脚下的霜往外长到 frost 米；
+   *   windup 这张节奏表在 lightfx.ts（MANIFEST_WINDUP_PATTERN）：声音那边灯每暗一下的咔哒（audio/ghost.ts 的 MANIFEST_SFX.clicks）是从同一张表推出的，
+   *   要改节奏改那里，咔哒自己跟着走；
    * - 落下：附近的灯和手电一起暗 drop.ms 毫秒、暗到 drop.depth（dipAll），这一下过了 swapAt 成、暗到最深的那一帧换上「实」的那份
    *   材质（不淡入）；之后灯压在 hold 这一档（'c' ≈ 42%，设计文档：40% 左右），收的时候放开，holdSlack 秒是兜底；
    * - 停留：不飘，头慢慢抬起（solid.headPitch），连同位置、朝向只每秒更新 stepRate 次（G3）；冷雾从下摆往下淌（GHOST_MIST.pour）；
@@ -147,7 +149,7 @@ export const GHOST = {
    */
   manifest: {
     radius: 5,
-    windup: 'mmamammmmammamamm',
+    windup: MANIFEST_WINDUP_PATTERN,
     frost: 1.2,
     drop: { depth: 0.15, ms: 100 },
     end: { depth: 0.2, ms: 80 },

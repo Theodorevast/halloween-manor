@@ -6,7 +6,9 @@ import { createWorld } from '../src/sim/world';
 import { Grid } from '../src/sim/grid';
 import { createNav, createNpc, walkTo } from '../src/sim/npc';
 import type { NpcCtx } from '../src/sim/npc';
+import { findPath } from '../src/sim/pathfind';
 import { createRng } from '../src/sim/rng';
+import { cellCenter, cellOf, FRONT_DOOR } from '../src/config/house';
 import { MANIFEST, PERSONALITIES, VISION } from '../src/config/visitors';
 import { angleOf, wrapAngle } from '../src/lib/angle';
 import { GHOST_SOURCE } from '../src/sim/types';
@@ -259,6 +261,66 @@ describe('主动现身（吓人、赶人）', () => {
     w2.manifest();
     until(w2, 'drop');
     expect(t.mode).toBe('fleeing');
+  });
+
+  test('鬼魂中心在墙格里不能现身（最终审查 Minor 3）：返回 false，什么都不发生——phase 还是 idle、没有 manifest 事件、附近的人不转头、不进冷却；挪到旁边的空格就可以', () => {
+    const grid = new Grid();
+    const inWall = { x: 5.25, z: 9.5 }; // 门厅西墙（卧室和门厅之间那道墙）正中，格 (10, 19)
+    const beside = { x: 5.75, z: 9.5 }; // 墙东边的门厅里，格 (11, 19)
+    expect(grid.isOpaque(...cellOf(inWall.x, inWall.z))).toBe(true);
+    expect(grid.isOpaque(...cellOf(beside.x, beside.z))).toBe(false);
+    const w = createWorld({ seed: 106, autoSpawn: false });
+    const near = w.spawn({ pos: { x: 7, z: 9.5 }, personality: 'average', lookDir: Math.PI }); // 1.75 米外，本来就朝着那面墙
+    w.setGhost(inWall);
+    expect(w.manifest()).toBe(false);
+    const ev = drive(w, 1, () => inWall);
+    expect(ofType(ev, 'manifest')).toEqual([]);
+    expect(ofType(ev, 'notice').filter((e) => e.kind === 'manifest')).toEqual([]);
+    expect(near.notice ?? null).toBeNull();
+    expect(w.state.manifest).toEqual({ phase: 'idle', t: 0, cooldown: 0, pos: null });
+    // 没进冷却：挪到旁边的空格马上就能现身
+    w.setGhost(beside);
+    expect(w.manifest()).toBe(true);
+    expect(ofType(w.step(DT), 'manifest')).toEqual([{ type: 'manifest', phase: 'windup', pos: beside, scared: [] }]);
+    expect(w.state.manifest).toMatchObject({ phase: 'windup', pos: beside });
+  });
+
+  test('落下时先放绕开圈、再结算受惊（最终审查「S 范围外」）：恐惧值已经很高、这一下当场逃跑的人，第一条逃跑路线绕开圈，不直穿现身的地方', () => {
+    // 客厅：访客站在北边，现身的地方在东边，隔 2.8 米互相看得见；去客厅南墙门洞的直路擦着现身的地方过去，圈外还有路可绕
+    const spot = { x: 10.25, z: 3.25 };
+    const start = { x: 8.25, z: 1.25 };
+    /** 逃跑路线先寻路到前门的门口（npc.ts 的 DOOR_POINT：门洞两格的中点） */
+    const cs = FRONT_DOOR.cells.map(([i, j]) => cellCenter(i, j));
+    const doorPoint = { x: cs.reduce((s, c) => s + c.x, 0) / cs.length, z: cs.reduce((s, c) => s + c.z, 0) / cs.length };
+    /** 从 from 出发走这条折线，离现身的地方最近到多少米（每 2 厘米取一个点） */
+    const closest = (from: Vec2, path: Vec2[]) => {
+      let m = Infinity;
+      let p = from;
+      for (const q of path) {
+        const n = Math.max(1, Math.ceil(dist(p, q) / 0.02));
+        for (let k = 0; k <= n; k++) m = Math.min(m, dist({ x: p.x + ((q.x - p.x) * k) / n, z: p.z + ((q.z - p.z) * k) / n }, spot));
+        p = q;
+      }
+      return m;
+    };
+    // 场景要分得出先后：没有圈时，他到前门的路线擦着现身的地方过去（离圈心不到 1.5 米，圈半径 2.5 米）
+    const grid = new Grid();
+    expect(grid.lineOfSight(start, spot)).toBe(true);
+    expect(closest(start, findPath(grid, start, doorPoint)!)).toBeLessThan(MANIFEST.avoidRadius - 1);
+
+    const w = createWorld({ seed: 107, autoSpawn: false });
+    const a = w.spawn({ pos: start, personality: 'average', lookDir: bearingTo(start, spot) });
+    a.fear = 85; // 落下这一下涨 30 左右，当场涨满
+    w.setGhost(spot);
+    w.manifest();
+    const { ev } = until(w, 'drop');
+    expect(ofType(ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([a.id]);
+    expect(a.mode).toBe('fleeing');
+    expect(ofType(ev, 'flee')).toEqual([{ type: 'flee', npc: a.id }]);
+    expect(w.state.avoid).toMatchObject([{ r: MANIFEST.avoidRadius, who: [a.id] }]);
+    // 他这一刻的路线（刚开始逃，还没走多远）整条在圈外（留 5 厘米：格子路线擦圈边时，两格之间的弦会略微切进圈里）
+    expect(a.path.length).toBeGreaterThan(1);
+    expect(closest(a.pos, a.path)).toBeGreaterThanOrEqual(MANIFEST.avoidRadius - 0.05);
   });
 });
 

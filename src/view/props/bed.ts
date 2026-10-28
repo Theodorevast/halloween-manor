@@ -18,7 +18,10 @@ import { PALETTE } from '../palette';
 import { FURNITURE_TOP } from '../furniture';
 import { C, clamp01, inOutSine, inQuad, mesh, seg, type PropFrame, type PropRig } from './kit';
 
-/** 时间线（秒，从 trigger 算起）。SCARES.bed.hitAt 要和 collapse 一致（惊吓在这一刻落下） */
+/**
+ * 时间线（秒，从 trigger 算起）。SCARES.bed.hitAt 要和 collapse 一致（惊吓在这一刻落下）。
+ * 声音那边 audio/sfx.ts 的 BED.rise、BED.breathAt 是照着这里手抄的（tests/audio.test.ts 钉着它们对得上）：改了这里，声音跟着改，不然布料声和鼓包会错开
+ */
 export const BED_TIMELINE = {
   /** 三个鼓包依次升起：[开始, 结束] */
   rise: { knee: [0, 0.5], torso: [0.3, 0.9], head: [0.7, 1.2] } as const,

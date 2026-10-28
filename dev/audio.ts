@@ -19,6 +19,8 @@
 // 2026-10-28 新增的几组（现身 manifest、被照到 reveal、访客喘气呜咽 breath、床 bed、机关 trap、手电照到鬼魂时那口气 notice）：
 //   有 events / timeline 的出实时按钮（走真正的 createAudio，timeline 是 [相对点击的秒数, 事件]，用 setTimeout 按时刻发出，和模拟的节拍一致）；
 //   喘气、呜咽是恐惧值的函数，没有事件：第三人称区有演示按钮（访客站在鬼魂面前，恐惧值从低涨到高），离线版直接喂 breath.ts
+//   没有事件可发、直接调合成函数的声音（呜咽 whimper、冷气 coldBreath、灯暗的咔哒 lightClick）和听者站在卧室里的 3D 床标 shot：出单发按钮，
+//   在页面自己备的一条实时总线上放离线测量用的那份 render（createAudio 不把总线交出来；听者的站位在 render 里摆）。window.__audio.fire(name) 也能点它们
 import { FRONT_DOOR, HOUSE_W, PROPS, propCenter } from '../src/config/house';
 import { FEAR } from '../src/config/visitors';
 import { createAmbience, dreadTarget, AMB } from '../src/audio/ambience';
@@ -151,6 +153,11 @@ interface Case {
   events?: SimEvent[];
   /** 实时按钮按时刻发的事件：[相对点击的秒数, 事件]；离线渲染时同样按这些时刻放（现身的三个节拍） */
   timeline?: [number, SimEvent][];
+  /**
+   * 单发按钮：没有事件可发的声音（直接调合成函数的）出实时按钮，点一下就在页面自己的实时总线上放一遍 render，
+   * 和离线测量放的是同一份（听者的站位 render 里自己摆）
+   */
+  shot?: boolean;
   /** 离线渲染：在 t 时刻放这个声音 */
   render(bus: MixBus, router: Router, t: number): void;
   /** 断言：rms 应该落在这个范围（dBFS） */
@@ -359,11 +366,11 @@ const CASES: Case[] = [
     listen(bus, HALL_W, EAST);
     r.play([man('drop', [2]), startle(2, true), { type: 'flee', npc: 2 }], state, t);
   } },
-  { name: 'manifest: light click alone', group: 'manifest', seconds: 1.5, win: [0, 0.3], nominal: 0, render: (bus, _r, t) => {
+  { name: 'manifest: light click alone', group: 'manifest', seconds: 1.5, win: [0, 0.3], nominal: 0, shot: true, render: (bus, _r, t) => {
     listen(bus, HALL_W, EAST);
     lightClick(bus, t, v3(4, 1.4, 6));
   } },
-  { name: 'manifest: cold breath alone', group: 'manifest', seconds: 2.5, win: [0, 0.5], nominal: 0, rmsRange: [-40, -27], render: (bus, _r, t) => {
+  { name: 'manifest: cold breath alone', group: 'manifest', seconds: 2.5, win: [0, 0.5], nominal: 0, rmsRange: [-40, -27], shot: true, render: (bus, _r, t) => {
     listen(bus, HALL_W, EAST);
     coldBreath(bus, t, v3(4, 1.4, 6));
   } },
@@ -391,15 +398,15 @@ const CASES: Case[] = [
   { name: 'breath: fear 80, 2.0 m (edge of hearing)', group: 'breath', seconds: 8, win: [0.9, 7.4], nominal: 0, rmsRange: [-68, -53], render: breathAt(2, 80, 2.0, 7.6) },
   { name: 'breath: fear 80, 3.0 m (beyond reach, silent)', group: 'breath', seconds: 8, win: [0.9, 7.4], nominal: 0, rmsRange: [-Infinity, -90], render: breathAt(2, 80, 3.0, 7.6) },
   { name: 'breath: fear 59 (below nervous, silent)', group: 'breath', seconds: 5, win: [0.5, 4.5], nominal: 0, rmsRange: [-Infinity, -90], render: breathAt(2, 59, 0.8, 4.6) },
-  { name: 'whimper: timid (Mia), 0.8 m', group: 'breath', seconds: 2, win: [0, 0.6], nominal: 0, rmsRange: [-43, -30], render: (bus, _r, t) => {
+  { name: 'whimper: timid (Mia), 0.8 m', group: 'breath', seconds: 2, win: [0, 0.6], nominal: 0, rmsRange: [-43, -30], shot: true, render: (bus, _r, t) => {
     listen(bus, HALL_MID, NORTH);
     whimper(bus, t, { id: 1, personality: 'timid', at: bus.space.port(v3(8, 0.6, 5.4), bus.voice) });
   } },
-  { name: 'whimper: average (Theo), 0.8 m', group: 'breath', seconds: 2, win: [0, 0.6], nominal: 0, rmsRange: [-43, -30], render: (bus, _r, t) => {
+  { name: 'whimper: average (Theo), 0.8 m', group: 'breath', seconds: 2, win: [0, 0.6], nominal: 0, rmsRange: [-43, -30], shot: true, render: (bus, _r, t) => {
     listen(bus, HALL_MID, NORTH);
     whimper(bus, t, { id: 2, personality: 'average', at: bus.space.port(v3(8, 0.6, 5.4), bus.voice) });
   } },
-  { name: 'whimper: brave (Nora), 0.8 m', group: 'breath', seconds: 2, win: [0, 0.6], nominal: 0, rmsRange: [-43, -30], render: (bus, _r, t) => {
+  { name: 'whimper: brave (Nora), 0.8 m', group: 'breath', seconds: 2, win: [0, 0.6], nominal: 0, rmsRange: [-43, -30], shot: true, render: (bus, _r, t) => {
     listen(bus, HALL_MID, NORTH);
     whimper(bus, t, { id: 3, personality: 'brave', at: bus.space.port(v3(8, 0.6, 5.4), bus.voice) });
   } },
@@ -407,7 +414,7 @@ const CASES: Case[] = [
 
   // ── 床（trigger bed）和机关（trap armed）──
   { name: 'trigger bed (cloth 0–1.3, muffled breath 1.25–1.95, silence, drop 2.6)', group: 'bed', seconds: 8, win: [0, 3.2], nominal: 0, rmsRange: [-38, -26], events: [trig('bed')], render: viaRouter([trig('bed')]) },
-  { name: '3d: trigger bed, listener 2.5 m east of the pillow', group: 'bed', seconds: 8, win: [0, 3.2], nominal: 0, rmsRange: [-42, -30], render: (bus, r, t) => {
+  { name: '3d: trigger bed, listener 2.5 m east of the pillow', group: 'bed', seconds: 8, win: [0, 3.2], nominal: 0, rmsRange: [-42, -30], shot: true, render: (bus, r, t) => {
     listen(bus, v3(3.4, 1.8, 10), WEST);
     r.play([trig('bed')], state, t);
   } },
@@ -652,9 +659,29 @@ w.renderRaw = async (name, seed) => {
 
 // ── 实时按钮 ──────────────────────────────────────────────────────────────
 const sys = createAudio(pan);
+/**
+ * 单发（shot）：页面自己备一条实时总线（第一次点的时候建，和离线测量一样的 createBus / createRouter），放离线测量用的那份 render。
+ * 这些都是 3D 声音：Chrome 的 HRTF 数据库在第一个 HRTF 声源建出来时才开始异步加载，加载完之前是静音（space.ts），
+ * 所以建好以后先摆一次听者、等一小会儿再放第一声，免得第一下点了没声音
+ */
+let shotRig: Promise<{ ac: AudioContext; bus: MixBus; router: Router }> | null = null;
+const getShotRig = () =>
+  (shotRig ??= (async () => {
+    const ac = new AudioContext({ latencyHint: 'interactive' });
+    const bus = createBus(ac);
+    bus.space.setListener(HALL_W, EAST);
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    return { ac, bus, router: createRouter(bus, pan, createCrowd(bus, true)) };
+  })());
+const fireShot = async (c: Case) => {
+  const { ac, bus, router } = await getShotRig();
+  if (ac.state !== 'running') await ac.resume();
+  c.render(bus, router, ac.currentTime + 0.05);
+};
 const fire = async (name: string) => {
-  await sys.unlock();
   const c = CASES.find((x) => x.name === name);
+  if (c?.shot) return fireShot(c);
+  await sys.unlock();
   if (!c?.events && !c?.timeline) return;
   // flee 的那个人要已经在逃跑；其他人复位
   for (const v of state.npcs) v.mode = 'wander';
@@ -796,10 +823,10 @@ const LIVE3D: { name: string; run(): void }[] = [
 ];
 
 const box = document.getElementById('buttons')!;
-for (const g of ['scare', 'lure', 'voice', 'other', 'manifest', 'reveal', 'bed', 'trap'] as Group[]) {
+for (const g of ['scare', 'lure', 'voice', 'other', 'manifest', 'reveal', 'breath', 'bed', 'trap'] as Group[]) {
   const sec = document.createElement('div');
   sec.innerHTML = `<h2>${g}</h2>`;
-  for (const c of CASES.filter((x) => x.group === g && (x.events || x.timeline))) {
+  for (const c of CASES.filter((x) => x.group === g && (x.events || x.timeline || x.shot))) {
     const b = document.createElement('button');
     b.textContent = c.name;
     b.onclick = () => void fire(c.name);

@@ -176,7 +176,7 @@ export interface World {
   trigger(objectId: string): boolean;
   /** 立刻放进一个访客（测试和调试用；正常游戏由生成器自动放）。默认在门外、状态 entering */
   spawn(opts?: SpawnOptions): NpcState;
-  /** 主动现身。没有鬼魂、冷却中、正在现身时返回 false；成功时下一次 step 返回 manifest windup */
+  /** 主动现身。没有鬼魂、冷却中、正在现身、鬼魂中心所在的格子挡视线（墙、窗）时返回 false（什么都不发生、不进冷却）；成功时下一次 step 返回 manifest windup */
   manifest(): boolean;
   /** 设机关。物件不存在、冷却中、已经设下、同时设下的已满时返回 false */
   arm(objectId: string): boolean;

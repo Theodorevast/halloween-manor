@@ -1,4 +1,5 @@
-// 声音的纯数值部分（WebAudio 节点在 node 里没有，合成本身靠 dev/audio.html 的离线渲染量；这里只守几个不该悄悄变掉的约定），
+// 声音的纯数值部分（WebAudio 节点在 node 里没有，合成本身靠 dev/audio.html 的离线渲染量；这里只守几个不该悄悄变掉的约定，
+// 包括和画面对齐的几个时刻：现身蓄力的灯暗一下一声咔哒、床的布料声和呼吸——看样时调画面那边的数，声音要么自己跟着走，要么这里变红），
 // 外加一组用 WebAudio 最小替身跑真的 Router 的测试：被手电照着的访客走了以后，压力声一定淡出
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CELL, FURNITURE } from '../src/config/house';
@@ -9,6 +10,9 @@ import { createRouter, type MixBus } from '../src/audio/engine';
 import { MANIFEST_SFX, REVEAL, droneTones } from '../src/audio/ghost';
 import { BED, TRIGGER, pillowSpot } from '../src/audio/sfx';
 import type { NpcMode, NpcState, SimEvent, WorldState } from '../src/sim/types';
+import { GHOST } from '../src/view/ghost';
+import { LIGHTFX, MANIFEST_WINDUP_PATTERN, letterLevel, patternDips } from '../src/view/lightfx';
+import { BED_TIMELINE } from '../src/view/props/bed';
 
 const db = (x: number) => 20 * Math.log10(x);
 
@@ -75,6 +79,21 @@ describe('床：声音的时间线', () => {
     expect(BED.breathAt).toBeGreaterThanOrEqual(BED.rise[BED.rise.length - 1][1]);
   });
 
+  it('布料摩擦三段对得上被子鼓包的三段（BED_TIMELINE.rise 的膝、躯干、头）：起点差不超过 0.05 秒，止点不早于动画升完的时刻', () => {
+    const anim = [BED_TIMELINE.rise.knee, BED_TIMELINE.rise.torso, BED_TIMELINE.rise.head];
+    expect(BED.rise).toHaveLength(anim.length);
+    BED.rise.forEach(([from, , to], i) => {
+      expect(Math.abs(from - anim[i][0])).toBeLessThanOrEqual(0.05 + 1e-9);
+      expect(to).toBeGreaterThanOrEqual(anim[i][1] - 1e-9);
+    });
+  });
+
+  it('吸气在头升完（BED_TIMELINE.breathFrom）以后 0.1 秒以内开始，吸完比被子塌平（BED_TIMELINE.collapse）至少早 0.6 秒（前脉冲抑制）', () => {
+    expect(BED.breathAt).toBeGreaterThanOrEqual(BED_TIMELINE.breathFrom - 1e-9);
+    expect(BED.breathAt).toBeLessThanOrEqual(BED_TIMELINE.breathFrom + 0.1 + 1e-9);
+    expect(BED_TIMELINE.collapse - (BED.breathAt + BED.breathDur)).toBeGreaterThanOrEqual(0.6 - 1e-9);
+  });
+
   it('枕头在床的矩形里，并且比床的中心更靠西墙（床头朝西）', () => {
     const bed = FURNITURE.find((f) => f.id === 'bedroom-bed')!;
     const p = pillowSpot()!;
@@ -95,6 +114,16 @@ describe('现身：声音的时间线', () => {
       expect(t).toBeGreaterThan(0);
       expect(t).toBeLessThan(MANIFEST.windup);
     }
+  });
+
+  it('咔哒的时刻就是画面蓄力节奏表里灯暗下去的时刻（单一来源：改 view/lightfx.ts 的 MANIFEST_WINDUP_PATTERN，咔哒自己跟着走）', () => {
+    const table = GHOST.manifest.windup;
+    expect(table).toBe(MANIFEST_WINDUP_PATTERN); // 画面放的就是共用的这一张，没人另写一份
+    const dips = patternDips(table, MANIFEST.windup);
+    expect(dips.length).toBeGreaterThan(0);
+    expect(MANIFEST_SFX.clicks).toEqual(dips);
+    // 咔哒响的那一刻，灯正暗着
+    for (const t of MANIFEST_SFX.clicks) expect(letterLevel(table[Math.round(t * LIGHTFX.rate)])).toBeLessThan(1);
   });
 
   it('保险时间比蓄力 + 停留长，环境声回来的参数是正数', () => {

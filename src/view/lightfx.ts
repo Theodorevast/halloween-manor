@@ -49,11 +49,15 @@ export function patternLevel(pattern: string, t: number): number {
 }
 
 /**
- * 亮度序列（每秒 rate 个采样）里任意 1 秒内最多暗下去几次。「暗一下」= 从上一个高点往下掉了 drop 以上（默认 0.1，
- * WCAG 2.3.1 的「闪一次」是一对相反的、10% 以上的亮度变化），掉的过程算一次，回升 drop 以上之后再掉才算下一次。
- * 给测试和调参用：现身蓄力的节奏 + 落下那一下 + 收那一下，任意 1 秒内不能超过 3
+ * 现身蓄力的节奏表（'a' 最暗、'm' 正常，每秒 LIGHTFX.rate 个字母，只放 MANIFEST.windup 秒）。
+ * 画面（ghost.ts 的 GHOST.manifest.windup）和声音（audio/ghost.ts 的 MANIFEST_SFX.clicks：灯每暗一下一声咔哒）共用这一份：
+ * 咔哒的时刻从它推出（patternDips），改这里，灯和咔哒一起跟着变。放在这里是因为声音不能引用 ghost.ts（它带着 GLTFLoader、TSL 一大串），
+ * 而这个文件只依赖手电登记表，是轻的
  */
-export function countDips(levels: readonly number[], rate = LIGHTFX.rate, drop = 0.1): number {
+export const MANIFEST_WINDUP_PATTERN = 'mmamammmmammamamm';
+
+/** 亮度序列（每秒 rate 个采样）里每一次「暗下去」开始的时刻（秒）。什么算「暗一下」见下面的 countDips */
+export function dipStarts(levels: readonly number[], rate = LIGHTFX.rate, drop = 0.1): number[] {
   const starts: number[] = [];
   let peak = 1, low = 1, falling = false;
   for (let i = 0; i < levels.length; i++) {
@@ -66,6 +70,25 @@ export function countDips(levels: readonly number[], rate = LIGHTFX.rate, drop =
       if (v > low + drop) { falling = false; peak = v; }
     }
   }
+  return starts;
+}
+
+/**
+ * 节奏表里每一次灯暗下去的时刻（秒，相对开始）；within 给了就只要这么多秒以内的（节奏表放的时间可能比它短，
+ * 比如现身蓄力只放 MANIFEST.windup 秒）。和 countDips 数的「暗一下」是同一个算法（dipStarts）：
+ * 连着暗的字母算一次，掉得不到 10% 的抖动不算；现身蓄力的表只用 m 和比 m 暗的字母，就是每段暗字母的头一个
+ */
+export function patternDips(pattern: string, within = Infinity): number[] {
+  return dipStarts(Array.from(pattern, (c) => letterLevel(c))).filter((t) => t < within - 1e-9);
+}
+
+/**
+ * 亮度序列（每秒 rate 个采样）里任意 1 秒内最多暗下去几次。「暗一下」= 从上一个高点往下掉了 drop 以上（默认 0.1，
+ * WCAG 2.3.1 的「闪一次」是一对相反的、10% 以上的亮度变化），掉的过程算一次，回升 drop 以上之后再掉才算下一次。
+ * 给测试和调参用：现身蓄力的节奏 + 落下那一下 + 收那一下，任意 1 秒内不能超过 3
+ */
+export function countDips(levels: readonly number[], rate = LIGHTFX.rate, drop = 0.1): number {
+  const starts = dipStarts(levels, rate, drop);
   let best = 0;
   for (let a = 0; a < starts.length; a++) {
     let n = 0;

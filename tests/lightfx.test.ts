@@ -8,7 +8,7 @@ import { MANIFEST } from '../src/config/visitors';
 import type { RenderCore } from '../src/engine/types';
 import type { WorldState } from '../src/sim/types';
 import { GHOST } from '../src/view/ghost';
-import { LIGHTFX, countDips, createLightFx, letterLevel, patternLevel } from '../src/view/lightfx';
+import { LIGHTFX, countDips, createLightFx, dipStarts, letterLevel, patternDips, patternLevel } from '../src/view/lightfx';
 import { TORCH_COUNT, torchDim, torches } from '../src/view/torches';
 
 const M = GHOST.manifest;
@@ -93,6 +93,28 @@ describe('countDips', () => {
     expect(countDips([0.42, 0.42, 0.2, 1], 10)).toBe(1); // 从压着的 42% 再暗一下也算
     // 隔得超过 1 秒的不算在同一秒里
     expect(countDips([1, 0.3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0.3, 1], 10)).toBe(1);
+  });
+});
+
+describe('patternDips（声音的咔哒从这里推，见 audio/ghost.ts 的 MANIFEST_SFX.clicks）', () => {
+  const at = (i: number) => i / LIGHTFX.rate;
+  it('节奏表里每次灯暗下去的时刻：第 i 个字母从 i / 每秒字母数 秒开始；连着暗的算一次；一开头就暗也算', () => {
+    expect(patternDips('mmamam')).toEqual([at(2), at(4)]);
+    expect(patternDips('mmaammam')).toEqual([at(2), at(6)]);
+    expect(patternDips('amm')).toEqual([0]);
+    expect(patternDips('mlmlml')).toEqual([]); // l 只暗 6%，不到 10% 的抖动不算
+    expect(patternDips('')).toEqual([]);
+  });
+  it('within 只取这么多秒以内的：刚好在 within 上的不要（节奏表放不到那一刻）', () => {
+    expect(patternDips('mmamam', at(5))).toEqual([at(2), at(4)]);
+    expect(patternDips('mmamam', at(4))).toEqual([at(2)]);
+  });
+  it('和 countDips 是同一个算法（dipStarts）：不到 1 秒的节奏表，两边数出一样多的暗下去', () => {
+    for (const p of ['mmamam', 'mmaammam', 'amamam', 'mkmkmm', 'mlmlml']) {
+      const levels = Array.from(p, (c) => letterLevel(c));
+      expect(patternDips(p)).toEqual(dipStarts(levels));
+      expect(patternDips(p).length).toBe(countDips(levels));
+    }
   });
 });
 

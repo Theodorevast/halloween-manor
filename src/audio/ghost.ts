@@ -20,8 +20,9 @@
 //     小喇叭放不出 55 Hz，靠它们听得出有东西在嗡），过 tanh 轻微失真（多出一点互调，粗糙感）、低通 450 Hz；
 //     下面那个音默认不滑（MANIFEST_SFX.drone.slide = 0）：用户的工具库写了「避免滑音」，设计里现身也只写了「一个小二度的低持续音淡入」，
 //     所以整个停留阶段两个音一直是小二度；要不要在蓄力里让它往下滑一点（拍频变快：越来越近，调研 A2）留给用户听过以后再定；0.5 秒淡入。
-//     灯每暗一下一声很轻的咔哒（lightClick，3D 放在现身的位置）：默认 0.2、0.4 秒各一下 —— 对着 lightfx 蓄力节奏表
-//     （"mmamam…"，每秒 10 个字母，a = 暗）里字母 a 的位置；画面那边的暗点改了，这两个数跟着改（MANIFEST_SFX.clicks）
+//     灯每暗一下一声很轻的咔哒（lightClick，3D 放在现身的位置）：时刻从画面的蓄力节奏表推出（view/lightfx.ts 的 MANIFEST_WINDUP_PATTERN，
+//     "mmamam…"，每秒 10 个字母，a = 暗；GHOST.manifest.windup 放的就是它）：灯每次暗下去的那一刻，只取蓄力 MANIFEST.windup 秒以内的，
+//     现在是 0.2、0.4 秒各一下（MANIFEST_SFX.clicks）。画面那边改了节奏表，咔哒自己跟着走，不用再对着改两个数
 //   drop：低频冲击（sfx.ts 的 manifestHit，吓跑 braam 最低一层）+ 很近的一口冷气（voices.ts 的 coldBreath，3D 放在现身的位置）。
 //     同一帧有人被吓跑时（吓跑自己有 braam 和静音），冲击让给它，冷气挪到静音之后
 //   end：持续音 0.8 秒淡出（指数，时间常数 0.27 秒）；灯再暗一下的咔哒（轻 30%）；环境声要等 1.5 秒才开始回来，回来用 1.2 秒（C4：多停两拍）
@@ -32,6 +33,7 @@
 //   中途又照到就从当前音量折回去（setTargetAtTime，没有跳变）；不定位，不是提示音，不「叮」。第一次用到才建节点，建好以后一直在（音量 0 时几乎不占 CPU）
 import { MANIFEST } from '../config/visitors';
 import type { GhostState } from '../engine/types';
+import { MANIFEST_WINDUP_PATTERN, patternDips } from '../view/lightfx';
 import { Snd, bandNoise, creak, db, lightClick, manifestHit, playGrains, rand, type Bus, type CreakSpec, type Grain } from './sfx';
 import type { Place, Port } from './space';
 import { coldBreath } from './voices';
@@ -206,8 +208,12 @@ export const MANIFEST_SFX = {
     in: 0.5,
     out: 0.8,
   },
-  /** 蓄力里灯每暗一下的咔哒：相对蓄力开始的时刻（秒）；收回时灯再暗一下的咔哒强度（0 = 不要） */
-  clicks: [0.2, 0.4] as readonly number[],
+  /**
+   * 蓄力里灯每暗一下的咔哒：相对蓄力开始的时刻（秒）。不手填：从画面的蓄力节奏表推出（MANIFEST_WINDUP_PATTERN，每秒 10 个字母），
+   * 灯每次暗下去的那一刻，只取 MANIFEST.windup 秒以内的（节奏表只放这么久），现在是 0.2、0.4。tests/audio.test.ts 守着它和 GHOST.manifest.windup 对得上
+   */
+  clicks: patternDips(MANIFEST_WINDUP_PATTERN, MANIFEST.windup) as readonly number[],
+  /** 收回时灯再暗一下的咔哒强度（0 = 不要） */
   endClick: 0.7,
   /** 保险：这么久（秒）还没收到 end 就自己收 */
   maxLife: MANIFEST.windup + MANIFEST.hold + 3,

@@ -1,4 +1,5 @@
-// 地上的霜（2026-10-28，调研 S1）：现身时从鬼魂脚下往外长（grow，大号），机关设下时物件脚下一小圈薄霜（small，小号，给玩家的提示）。
+// 地上的霜（2026-10-28，调研 S1）：现身时从鬼魂脚下往外长（grow，大号）；另有一个机关提示用的小号（small：物件脚下一小圈薄霜），
+// 现在没人调它——机关提示用的是 props.ts 里物件表面的那层霜（地上一圈霜看不出是哪个物件），留着它是看样时的另一个选项。
 // 每块霜是一块贴地的方片（高过地毯一点），片元里按到中心的距离和噪声画：从中心往外长，长到的那条边是细碎的冰花，越往外越薄；
 // 停一会儿以后从外往里化掉。受光照（有灯照着才看得清，阴影里是暗的）、不发光，只带墙上的霜那一点点自发光（walls.ts 的
 // DISSOLVE.frostGlow，没灯的时候隐约看得出）；颜色用 DISSOLVE.frostAlbedo，和鬼魂穿墙时墙上结的霜是同一种。
@@ -6,6 +7,7 @@
 // 材质第一次出现时现编会卡一下：网格标 userData.deferCompile，开场按钮可用之后由 main.ts 预编译
 import * as THREE from 'three/webgpu';
 import { clamp, float, length, max, mix, mx_noise_float, positionLocal, positionWorld, pow, smoothstep, uniform, vec2, vec3 } from 'three/tsl';
+import { MANIFEST } from '../config/visitors';
 import type { FrameCtx, Module, RenderCore } from '../engine/types';
 import type { Vec2 } from '../sim/types';
 import { DISSOLVE, v3 } from './walls';
@@ -15,9 +17,12 @@ type F = THREE.Node<'float'>;
 export const FROST = {
   /** 离地高度（米）：地毯、走廊长毯的面在 0.016 米，高过它 */
   y: 0.02,
-  /** 大号（现身）：几块轮流用（上一块还在化，下一次就来了）；长满以后停多久再化（秒，约等于现身停留）、化多久、最浓多少 */
-  big: { count: 2, hold: 1.5, melt: 4, alpha: 0.46 },
-  /** 小号（机关提示）：半径（米）、长出来、化掉各几秒、最浓多少（薄） */
+  /**
+   * 大号（现身）：几块轮流用（上一块还在化，下一次就来了）；长满以后停多久再化（秒）、化多久、最浓多少。
+   * 停多久就是现身的停留 MANIFEST.hold（直接引用，不另写一个数）：霜在鬼魂收回之前不化，改停留时长霜跟着走
+   */
+  big: { count: 2, hold: MANIFEST.hold, melt: 4, alpha: 0.46 },
+  /** 小号（机关提示的另一个选项，现在没人用）：半径（米）、长出来、化掉各几秒、最浓多少（薄） */
   small: { count: 4, radius: 0.42, grow: 0.5, melt: 1.5, alpha: 0.26 },
   /**
    * 边：噪声每个半径几个起伏（按半径算，大小两号的边一样碎）、扰动幅度（占半径的比例）；冰花每米几颗；
@@ -64,7 +69,7 @@ const EXTENT = 1 + FROST.ragged + 0.08;
 export interface Frost extends Module {
   /** pos 处从 0 长到 radius 米（seconds 秒），停 FROST.big.hold 秒，再化 FROST.big.melt 秒 */
   grow(pos: Vec2, radius: number, seconds: number): void;
-  /** 机关提示：on = true 时在 pos 长一小圈薄霜（同一个 id 再调不重来），false 时化掉 */
+  /** 机关提示（现在没人调，见文件开头）：on = true 时在 pos 长一小圈薄霜（同一个 id 再调不重来），false 时化掉 */
   small(id: string, pos: Vec2, on: boolean): void;
   update(ctx: FrameCtx): void;
   dispose(): void;

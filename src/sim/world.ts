@@ -4,7 +4,7 @@
 // 鬼魂穿墙声 → 鬼魂贴近（发毛、察觉、后退、后颈一凉）→ 尖叫传染 →
 // 访客状态机（移动、互相避让）→ 兜底推开挤在一起的人 → 物件计时 → 时间前进 → 生成 → 移除离开的 → 手电照到鬼魂 → seenBy。
 // 先结算惊吓再移动：玩家点下去的那一刻，看着物件的人就会被吓到，不会因为同一步里转开了而落空。
-import { FRONT_DOOR } from '../config/house';
+import { cellOf, FRONT_DOOR } from '../config/house';
 import { FEAR, GHOST, HIT_STOP, MANIFEST, TRAP, VISION } from '../config/visitors';
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
@@ -143,7 +143,8 @@ export function createWorld(opts: WorldOptions): World {
    * - windup：发事件；MANIFEST.noticeRadius 米内的人察觉（kind manifest，隔墙也算：附近的灯在闪），盯着那里直到落下
    * - drop：看得见那里（光锥 + 视线 + MANIFEST.range）的人被吓到：manifestFear × 性格倍率 × 习惯化（按 'manifest' 这一种算），
    *   照常受惊（object = GHOST_SOURCE），僵住结束后后退到离那里至少 MANIFEST.backOff 米；
-   *   有人被吓到就加一个绕开圈（MANIFEST.avoidRadius 米、MANIFEST.avoidTime 秒），只有这一次被吓到的人绕它
+   *   有人被吓到就加一个绕开圈（MANIFEST.avoidRadius 米、MANIFEST.avoidTime 秒），只有这一次被吓到的人绕它。
+   *   圈先放、再结算受惊：恐惧值本来就高、当场吓跑的人，第一条逃跑路线是在 startleWith 里算的，圈要已经在，路线才绕得开
    * - 停留期间：没被这次吓到、看得见那里的人被定住盯着（不加恐惧值）；end 时放开，发事件
    */
   function stepManifest(events: SimEvent[]) {
@@ -162,14 +163,15 @@ export function createWorld(opts: WorldOptions): World {
       const seen = npcs.filter((n) => canBeScared(n) && canSee(grid, n.s, at, MANIFEST.range));
       const base = seen.map((n) => manifestFear(n.s, at));
       events.push({ type: 'manifest', phase: 'drop', pos: { ...at }, scared: seen.map((n) => n.s.id) });
+      // 先放绕开圈（who = 上面已经算好的这批被吓到的人），再结算受惊：当场涨满逃跑的人，第一条路线在 startleWith 里算
+      if (seen.length > 0) {
+        state.avoid.push({ pos: { ...at }, r: MANIFEST.avoidRadius, until: state.time + MANIFEST.avoidTime, who: seen.map((n) => n.s.id) });
+      }
       seen.forEach((n, k) => {
         manifestScared.add(n.s.id);
         startleWith(n, ctx, GHOST_SOURCE, exposure(n, 'manifest', base[k], state.time), at);
         retreat(n, ctx, at, MANIFEST.backOff);
       });
-      if (seen.length > 0) {
-        state.avoid.push({ pos: { ...at }, r: MANIFEST.avoidRadius, until: state.time + MANIFEST.avoidTime, who: seen.map((n) => n.s.id) });
-      }
     } else if (phase === 'end') {
       for (const n of npcs) n.transfixPos = null;
       events.push({ type: 'manifest', phase: 'end', pos: { ...at }, scared: [] });
@@ -226,7 +228,8 @@ export function createWorld(opts: WorldOptions): World {
     stepManifest(events);
     flushScreams();
 
-    // 鬼魂穿墙的声音（设计文档 2.3）：GHOST.hearWall 米内听得见的人（隔墙按 canHear 打折）察觉、涨一点点恐惧值，盯完去查看。
+    // 鬼魂穿墙的声音（设计文档 2.3）：GHOST.hearWall 米内听得见的人（隔墙按 canHear 打折）察觉、回头，盯完走过去查看。
+    // 涨多少恐惧值是 GHOST.hearFear：现在是 0（用户 2026-10-29「先不加」），所以只让人回头、过去查看，恐惧值不涨、也不算被吓；调上去就生效。
     // 每人听见一次以后 GHOST.hearCooldown 秒内不再算，涨的量按习惯化减弱（见 hearGhostWall）
     if (wallSound) {
       const src = wallSound;
@@ -312,8 +315,13 @@ export function createWorld(opts: WorldOptions): World {
     },
 
     manifest(): boolean {
-      // 要有鬼魂（第三人称）；正在现身、冷却中时 start 返回 false
-      return ghost !== null && manifestTl.start(ghost);
+      // 要有鬼魂（第三人称）
+      if (ghost === null) return false;
+      // 鬼魂中心所在的格子挡视线（墙、窗）时不能现身：什么都不发生、不进冷却。落下时的 canSee 连终点格一起查，终点是墙格谁也看不见，
+      // 蓄力时的察觉又只看距离，附近的人会白白转头盯着墙。判断和视线检查（Grid.lineOfSight）用的是同一个：Grid.isOpaque
+      if (grid.isOpaque(...cellOf(ghost.x, ghost.z))) return false;
+      // 正在现身、冷却中时 start 返回 false
+      return manifestTl.start(ghost);
     },
 
     arm(objectId: string): boolean {

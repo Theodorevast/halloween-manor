@@ -1193,8 +1193,9 @@ export function lightClick(bus: Bus, t: number, at: Place, k = 1): number {
 
 export const BED = {
   /**
-   * 布料摩擦三段：膝、躯干、头依次鼓起，[起, 最响, 止]（秒，相对触发）。和物件那一路 bed.ts 的鼓包时间轴对齐
-   * （设计文档 4.1：膝 0–0.5、躯干 0.3–0.9、头 0.7–1.2，这里各往后多一点收尾）
+   * 布料摩擦三段：膝、躯干、头依次鼓起，[起, 最响, 止]（秒，相对触发）。和物件那一路 bed.ts 的鼓包时间轴（BED_TIMELINE.rise）对齐
+   * （设计文档 4.1：膝 0–0.5、躯干 0.3–0.9、头 0.7–1.2，这里各往后多一点收尾）。是照着手抄的，tests/audio.test.ts 钉着：
+   * 起点和动画的起点差不超过 0.05 秒、止点不早于动画的止点；改了 BED_TIMELINE.rise，这里跟着改
    */
   rise: [[0.04, 0.26, 0.6], [0.3, 0.56, 0.95], [0.7, 0.96, 1.3]] as readonly (readonly [number, number, number])[],
   /** 摩擦的峰值（相对 bandNoise 的 RMS 0.5）、三段的中心频率（赫兹）、纤维颗粒的幅度、整体低通（赫兹：厚被子是闷的） */
@@ -1202,7 +1203,10 @@ export const BED = {
   rustleHz: [1000, 1300, 1600] as readonly number[],
   fiber: 0.03,
   rustleLp: 4500,
-  /** 被布闷住的一口吸气：从多久开始、多长（秒）、峰值，过 muffle 赫兹的低通；吸完就屏住，一直到落下都没有声音（要比落下早 0.6 秒以上：调研原则 11 的前脉冲抑制） */
+  /**
+   * 被布闷住的一口吸气：从多久开始（BED_TIMELINE.breathFrom 之后 0.1 秒以内，也是手抄的）、多长（秒）、峰值，过 muffle 赫兹的低通；
+   * 吸完就屏住，一直到落下都没有声音（要比落下早 0.6 秒以上：调研原则 11 的前脉冲抑制）。这几条都由 tests/audio.test.ts 钉着
+   */
   breathAt: 1.25,
   breathDur: 0.7,
   breath: 0.035,
