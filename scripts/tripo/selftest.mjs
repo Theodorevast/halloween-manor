@@ -250,6 +250,12 @@ try {
   real.reference = 'assets-src/mascot/';
   real.defaults.prep.templates = ['t_pose'];
   real.defaults.convert.enabled = false;
+  real.defaults.touchup.enabled = false; // 修图单独测（见「修图」那项），前面的任务数不受它影响
+  delete real.defaults.touchup.source; // 默认走 Tripo 的 image-to-image；本地图那条路单独测（epsilon）
+  real.defaults.refine.enabled = false; // 假 GLB 进不了 Blender；精修脚本另外用真模型测（scripts/blender/refine.mjs）
+  real.defaults.route = 'single'; // 下面的任务数按「默认单图、beta 走四视图」写的；真清单的默认路线不影响这里要测的逻辑
+  // 建模参数也固定成测试写好时的那组（H3.1、12000 面、标准纹理 30 积分）：这里测的是流水线，不是选哪个模型
+  real.defaults.model.request = { model: 'v3.1-20260211', face_limit: 12000, texture: true, pbr: true, texture_quality: 'standard' };
   real.variants = [
     { id: 'alpha', status: 'draft', label: 'Alpha', costume: 'a plain grey wool coat' },
     { id: 'beta', status: 'draft', label: 'Beta', costume: 'a short black cape', route: 'multiview' },
@@ -465,6 +471,52 @@ try {
     assert.equal(c[0].body.texture_size, 2048);
     assert.equal(c[0].body.input, readJson(P.state).nodes['gamma:animate'].task_id);
     assert.match(r.text, /来自 convert/);
+  });
+
+  await test('修图（touchup）：草稿做到修图；建模吃修过的图；--reroll touchup 只作废修图和下游', async () => {
+    setManifest((m) => m.variants.push({ id: 'delta', status: 'draft', label: 'Delta', costume: 'a tall pointed hat', touchup: '2) Remove the extra brooch.', overrides: { touchup: { enabled: true } } }));
+    n0 = mock.creates.length;
+    let r = await run('--run', 'delta', '--yes');
+    assert.equal(r.code, 0, r.text);
+    let c = creates(n0);
+    assert.deepEqual(c.map((x) => x.path.split('/').pop()), ['image-to-image', 'image-to-image']);
+    let st = readJson(P.state);
+    assert.equal(c[1].body.input, st.nodes['delta:costume'].task_id);
+    assert.match(c[1].body.prompt, /2\) Remove the extra brooch\./);
+    assert.ok(!c[1].body.prompt.includes('{extra}'));
+    assert.ok(exists('assets-src/visitors/delta/touchup.png'));
+    assert.match(r.text, /修过的换装图/);
+
+    setManifest((m) => (m.variants[3].status = 'approved'));
+    n0 = mock.creates.length;
+    r = await run('--run', 'delta', '--yes', '--until', 'model');
+    assert.equal(r.code, 0, r.text);
+    c = creates(n0);
+    assert.deepEqual(c.map((x) => x.path.split('/').pop()), ['image-to-model']);
+    st = readJson(P.state);
+    assert.equal(c[0].body.input, st.nodes['delta:touchup'].task_id);
+
+    r = await run('--reroll', 'delta', 'touchup');
+    assert.equal(r.code, 0, r.text);
+    st = readJson(P.state);
+    assert.ok(st.nodes['delta:costume'] && !st.nodes['delta:touchup'] && !st.nodes['delta:model']);
+  });
+
+  await test('本地修图（touchup.source = local）：不调 image-to-image，传本地的 touchup.png 给建模；没有文件就等着', async () => {
+    setManifest((m) => m.variants.push({ id: 'epsilon', status: 'approved', label: 'Epsilon', costume: 'a red scarf', overrides: { touchup: { enabled: true, source: 'local' } } }));
+    n0 = mock.creates.length;
+    let r = await run('--run', 'epsilon', '--yes', '--until', 'model');
+    let c = creates(n0);
+    assert.deepEqual(c.map((x) => x.path.split('/').pop()), ['image-to-image'], r.text); // 只有换装图；没有 touchup.png，建模等着
+    assert.ok(!readJson(P.state).nodes['epsilon:model']);
+    writeFileSync(join(P.raw, 'epsilon', 'touchup.png'), fakePng(2048, 2048));
+    n0 = mock.creates.length;
+    r = await run('--run', 'epsilon', '--yes', '--until', 'model');
+    assert.equal(r.code, 0, r.text);
+    c = creates(n0);
+    assert.deepEqual(c.map((x) => x.path.split('/').pop()), ['image-to-model']);
+    const st = readJson(P.state);
+    assert.equal(c[0].body.input, st.nodes['epsilon:touchup-upload'].file_token);
   });
 
   await test('游戏要求的检查：贴图过大、带根运动都会报出来', async () => {

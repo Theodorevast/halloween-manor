@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import * as C from './catalog.mjs';
 import { BASE_URL, DownloadError, TripoError, apiKeyStatus, createClient, download, mask, readApiKey, shortUrl } from './client.mjs';
 import { GAME_LIMITS, checkForGame, formatInspection, imageInfo, inspectGlb } from './glb.mjs';
+import { refineGlb } from '../blender/refine.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..');
@@ -34,9 +35,9 @@ export const DEFAULT_PATHS = {
   out: join(ROOT, 'public', 'assets', 'visitors'),
 };
 
-export const STEPS = ['upload', 'prep', 'costume', 'costume-upload', 'views', 'model', 'rigcheck', 'rig', 'animate', 'convert', 'export'];
+export const STEPS = ['upload', 'prep', 'costume', 'touchup', 'costume-upload', 'views', 'model', 'rigcheck', 'rig', 'animate', 'convert', 'export'];
 /** 草稿也能跑的步骤（便宜的 2D 预览）；从 model 起要 status: approved */
-const PREVIEW = new Set(['upload', 'prep', 'costume', 'costume-upload', 'views']);
+const PREVIEW = new Set(['upload', 'prep', 'costume', 'touchup', 'costume-upload', 'views']);
 /** file_token 的有效期文档没写；上传免费，超过 30 分钟就重新传（presign 链接也是 30 分钟） */
 const UPLOAD_MAX_AGE_MS = 30 * 60_000;
 const BAD_END = new Set(['failed', 'banned', 'expired', 'cancelled']);
@@ -45,7 +46,7 @@ const HELP = `Tripo 访客流水线：吉祥物换装 → 3D 模型 → 绑骨 �
 
   node scripts/tripo/visitors.mjs --dry-run [id ...]          打印每个请求（key 打码）和积分估算。不联网、不写文件、不花钱
   node scripts/tripo/visitors.mjs --run <id ...|all> --yes     真跑（会扣积分）。重跑只补没做完的步骤，不会重复建任务
-        --until <步骤>       跑到这一步为止，比如 --until costume 只出换装图
+        --until <步骤>       跑到这一步为止，比如 --until costume 只出换装图，--until touchup 出到修过的图
         --max-credits <数>   这一次最多花多少积分（默认 = 估算值）
   node scripts/tripo/visitors.mjs --status                     本地状态：每一步的 task_id、实扣积分、文件（不联网）
   node scripts/tripo/visitors.mjs --balance | --usage          查余额 / 最近的扣费记录（免费接口，也能确认 key 好不好用）
@@ -53,7 +54,7 @@ const HELP = `Tripo 访客流水线：吉祥物换装 → 3D 模型 → 绑骨 �
   node scripts/tripo/visitors.mjs --adopt <id> <步骤> <task_id>  把已经建好的任务记进状态（建任务时断线后对账用）
   node scripts/tripo/visitors.mjs --inspect <文件.glb>         检查 GLB 符不符合游戏要求
 
-步骤：upload → prep → costume → [costume-upload → views] → model → rigcheck → rig → animate → [convert] → export
+步骤：upload → prep → costume → [touchup] → [costume-upload → views] → model → rigcheck → rig → animate → [convert] → export
 清单 scripts/tripo/visitors.json · 状态 assets-src/tripo-state.json · key 读 .env.local 的 TRIPO_API_KEY`;
 
 // ---------------------------------------------------------------- 小工具
@@ -116,6 +117,8 @@ function variantConfigs(manifest) {
       route: v.route ?? cfg.route ?? 'single',
       reference: v.reference ?? manifest.reference,
       costume: v.costume,
+      /** 这个访客额外要修的地方（接在 touchup.promptTemplate 的 {extra} 处），没有就只做默认的修改 */
+      touchup: v.touchup,
       cfg,
     };
   });
@@ -221,7 +224,11 @@ function acquireLock(ctx) {
 function fileOf(ctx, key, field) {
   const f = ctx.state.nodes[key]?.files?.[field];
   if (!f) return null;
-  const p = ctx.abs(f);
+  return localImage(ctx.abs(f));
+}
+
+/** 本地图片（不存在就是 null）：上传节点的 source 用 */
+function localImage(p) {
   if (!existsSync(p)) return null;
   const buf = readFileSync(p);
   return { path: p, sha: sha256(buf), info: imageInfo(buf), bytes: buf.length };
@@ -283,18 +290,53 @@ function planVariant(ctx, vc, ref) {
     out: { kind: 'image', dest: join(dir, 'costume') },
   });
 
+  // 修图（可选，touchup.enabled）：在换装图上只改提示词点名的地方（手指数、多出来的配件），其余照旧。
+  // 下游（建模、四视图）改用修过的图；换装图本身不动，不满意可以只 --reroll <id> touchup。
+  // touchup.source = "local"：修图在别处做（比如公司素材中台 vmc），挑好的图放在 assets-src/visitors/<id>/touchup.png，
+  // 这里只把它传上去（免费）给建模，不再调 image-to-image；换了图会按文件内容重新传，下游会提示 --reroll
+  let look = costume;
+  if (c.touchup?.enabled && c.touchup.source === 'local') {
+    const file = join(dir, 'touchup.png');
+    look = add({
+      key: `${vc.id}:touchup-upload`,
+      step: 'touchup',
+      kind: 'upload',
+      label: '上传修过的换装图（本地文件）',
+      source: () => localImage(file),
+      sourceLabel: `${ctx.rel(dir)}/touchup.png`,
+    });
+  } else if (c.touchup?.enabled) {
+    const touchReq = requestOf(c.touchup.request);
+    const touchPrompt = String(c.touchup.promptTemplate ?? '{extra}')
+      .replaceAll('{extra}', String(vc.touchup ?? '').trim())
+      .replace(/\s+/g, ' ')
+      .trim();
+    look = add({
+      key: `${vc.id}:touchup`,
+      step: 'touchup',
+      kind: 'task',
+      label: '修图（image-to-image）',
+      endpoint: '/generation/image-to-image',
+      deps: [costume],
+      body: (r) => ({ input: r(costume), prompt: touchPrompt, ...touchReq }),
+      estimate: (b) => C.imageCredits(b),
+      out: { kind: 'image', dest: join(dir, 'touchup') },
+    });
+  }
+
   const modelReq = requestOf(c.model?.request);
   const modelOut = { kind: 'model', dest: join(dir, 'model'), preview: join(dir, 'model-preview') };
   let model;
   if (vc.route === 'multiview') {
-    // image-to-multiview 的 input 只收 file_token / URL（不收 task_id），所以要把换装图下回来再传上去
-    const up = add({
+    // image-to-multiview 的 input 只收 file_token / URL（不收 task_id），所以要把换装图下回来再传上去（本地修图本身就是上传，直接用）
+    const lookNode = nodes.find((x) => x.key === look);
+    const up = lookNode.kind === 'upload' ? look : add({
       key: `${vc.id}:costume-upload`,
       step: 'costume-upload',
       kind: 'upload',
-      label: '上传换装图',
-      source: () => fileOf(ctx, costume, 'image'),
-      sourceLabel: `${ctx.rel(dir)}/costume.*`,
+      label: look === costume ? '上传换装图' : '上传修过的换装图',
+      source: () => fileOf(ctx, look, 'image'),
+      sourceLabel: `${ctx.rel(dir)}/${look === costume ? 'costume' : 'touchup'}.*`,
     });
     const views = add({
       key: `${vc.id}:views`,
@@ -326,8 +368,8 @@ function planVariant(ctx, vc, ref) {
       kind: 'task',
       label: '3D 模型（image-to-model）',
       endpoint: '/generation/image-to-model',
-      deps: [costume],
-      body: (r) => ({ input: r(costume), ...modelReq }),
+      deps: [look],
+      body: (r) => ({ input: r(look), ...modelReq }),
       estimate: (b) => C.model3dCredits(b),
       out: modelOut,
     });
@@ -438,7 +480,10 @@ function validate(vcs) {
     if (typeof vc.costume !== 'string' || !vc.costume.trim()) errors.push(`${at}：costume（服装描述）是空的`);
     if (!String(c.costume?.promptTemplate ?? '').includes('{costume}')) warnings.push(`${at}：costume.promptTemplate 里没有 {costume}，服装描述进不了提示词`);
     for (const t of c.prep?.templates ?? []) if (!C.IMAGE_TEMPLATES.includes(t)) errors.push(`${at}：prep.templates 里的 ${t} 不是文档里的模板（${C.IMAGE_TEMPLATES.join(' / ')}）`);
-    for (const [name, req] of [['prep', c.prep?.request], ['costume', c.costume?.request]]) {
+    if (c.touchup?.enabled && !String(c.touchup.promptTemplate ?? '').trim()) errors.push(`${at}：touchup 打开了，但 touchup.promptTemplate 是空的`);
+    if (vc.touchup != null && !c.touchup?.enabled) warnings.push(`${at}：写了 touchup，但 touchup.enabled 没打开，不会修图`);
+    const imageSteps = [['prep', c.prep?.request], ['costume', c.costume?.request], ...(c.touchup?.enabled ? [['touchup', c.touchup.request]] : [])];
+    for (const [name, req] of imageSteps) {
       const model = req?.model ?? 'seedream_v5';
       if (!C.IMAGE_MODELS.includes(model)) warnings.push(`${at}：${name}.request.model = ${model} 不在价目表里，积分算不出来`);
       if (req?.quality != null && !C.QUALITY_MODELS.includes(model)) errors.push(`${at}：${name}.request.quality 只有 chat_image_2 / 2.5 收，${model} 会直接报错（在 overrides 里写 "quality": null 去掉）`);
@@ -963,6 +1008,30 @@ async function exportVariant(ctx, vc, nodes, order) {
     L(`  [export] ✗ ${src} 不是 GLB（retarget 的 out_format 要 glb）`);
     return false;
   }
+  // Blender 精修（refine.enabled）：球身整块跟着躯干、腿边配件不跟腿拉伸、清碎片、限面数和贴图。
+  // 精修失败就停下，不把没精修的模型放进游戏（要跳过就把 refine.enabled 写成 false）
+  let refine = null;
+  if (vc.cfg.refine?.enabled) {
+    const dir = join(ctx.paths.raw, vc.id);
+    const out = join(dir, 'refined.glb');
+    L(`  [export] Blender 精修 ${src} …`);
+    const res = await refineGlb({
+      src: ctx.abs(src),
+      out,
+      report: join(dir, 'refine.json'),
+      preview: vc.cfg.refine.preview === false ? null : join(dir, 'refine-preview', vc.id),
+      args: ['--max-tris', GAME_LIMITS.triangles ?? 15000, '--max-texture', GAME_LIMITS.texture ?? 2048, ...(vc.cfg.refine.args ?? [])],
+      log: (s) => L(`    ${s}`),
+    });
+    if (!res.ok) {
+      L(`  [export] ✗ ${res.error}`);
+      return false;
+    }
+    refine = { from: src, report: ctx.rel(join(dir, 'refine.json')), sheet: res.sheet ? ctx.rel(res.sheet) : null, warnings: res.report.warnings ?? [] };
+    src = ctx.rel(out);
+    via += ' + Blender 精修';
+    if (res.sheet) L(`    预览表 ${ctx.rel(res.sheet)}（第一行是权重分类：蓝 = 跟着身体，橙 = 跟着腿 / 手臂）`);
+  }
   const buf = readFileSync(ctx.abs(src));
   let info;
   try {
@@ -999,6 +1068,7 @@ async function exportVariant(ctx, vc, nodes, order) {
         durations: Object.fromEntries(info.animations.map((x) => [x.name, x.duration])),
       },
       game: { ok: check.ok, problems: check.problems, notes: check.notes },
+      refine,
       source: {
         from: via,
         tasks: Object.fromEntries(own.map((x) => [x.step, ctx.state.nodes[x.key]?.task_id ?? null])),
@@ -1026,9 +1096,11 @@ async function runVariant(ctx, vc, nodes, a, order) {
       return 'until';
     }
     if (!PREVIEW.has(n.step) && vc.status !== 'approved') {
-      const img = ctx.state.nodes[`${vc.id}:costume`]?.files?.image;
-      L(`  ⏸ 草稿到此为止。先看换装图${img ? ` ${img}` : ''}：满意就把 visitors.json 里 ${vc.id} 的 status 改成 "approved"，再 --run ${vc.id} --yes 做 3D；`);
-      L(`    不满意就改 costume，然后 --reroll ${vc.id} costume 再出一张（约 10 积分）`);
+      const localTouch = join(ctx.paths.raw, vc.id, 'touchup.png');
+      const touched = ctx.state.nodes[`${vc.id}:touchup`]?.files?.image ?? (vc.cfg.touchup?.source === 'local' && existsSync(localTouch) ? ctx.rel(localTouch) : undefined);
+      const img = touched ?? ctx.state.nodes[`${vc.id}:costume`]?.files?.image;
+      L(`  ⏸ 草稿到此为止。先看${touched ? '修过的' : ''}换装图${img ? ` ${img}` : ''}：满意就把 visitors.json 里 ${vc.id} 的 status 改成 "approved"，再 --run ${vc.id} --yes 做 3D；`);
+      L(`    不满意就改 costume，然后 --reroll ${vc.id} costume 再出一张（约 10 积分）${touched ? `；只是修得不对就改 touchup，--reroll ${vc.id} touchup` : ''}`);
       return 'gated';
     }
     if (n.kind === 'upload') continue; // 用到时再传
