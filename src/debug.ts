@@ -33,12 +33,27 @@ export interface HauntDebug {
   setTimeScale(n: number): void;
   /** 物件在画布上的像素位置（离地 0.8 米处，大致是物件中部），测试用它来点中物件 */
   screenOf(objectId: string): { x: number; y: number } | null;
+  /** 取走记下的模拟事件（主循环和 step 推进出来的都算，只留最近 EVENT_LOG 个），取完清空。冒烟测试看现身、机关有没有发事件 */
+  events(): SimEvent[];
 }
 
 const f1 = (n: number) => n.toFixed(1);
+/** events() 最多留多少个 */
+const EVENT_LOG = 500;
 
 export function installDebug(d: DebugDeps) {
   if (!new URLSearchParams(location.search).has('debug')) return;
+  // 事件记录：包一层 world.step（主循环、快进都走它），只在 ?debug 时
+  let log: SimEvent[] = [];
+  const step0 = d.world.step.bind(d.world);
+  d.world.step = (dt) => {
+    const evs = step0(dt);
+    if (evs.length) {
+      log.push(...evs);
+      if (log.length > EVENT_LOG) log = log.slice(-EVENT_LOG);
+    }
+    return evs;
+  };
   const api: HauntDebug = {
     backend: d.core.backend,
     state() {
@@ -70,6 +85,11 @@ export function installDebug(d: DebugDeps) {
     screenOf(objectId) {
       const o = d.world.state.objects.find((x) => x.id === objectId);
       return o ? d.rig.toScreen(o.pos, 0.8) : null;
+    },
+    events() {
+      const out = structuredClone(log);
+      log = [];
+      return out;
     },
   };
   (window as unknown as { __haunt: HauntDebug }).__haunt = api;

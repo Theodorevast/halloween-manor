@@ -290,6 +290,69 @@ try {
   }
   check('第三人称：准星对准每个物件、点击附身到它自己', gMisses.length === 0, gMisses.join('；'));
   await gp.screenshot({ path: `shots/smoke-4-ghost${WEBGL ? '-webgl' : ''}.png` });
+  // 床（2026-10-28）在场：物件 7 → 8，上面那项也对准、附身过它
+  check('第三人称：床在场（8 个物件）', ids.length === 8 && ids.includes('bed'), ids.join(', '));
+
+  // 现身（2026-10-29）：F 现身，蓄力 0.6 秒后落下，准星外面出现冷却环；冷却中右键不理，冷却完右键能现身
+  const twoFrames = () => gp.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  await gp.evaluate(() => {
+    const h = window.__haunt;
+    h.step(25000);
+    h.ghost.place(9.3, 10.1, Math.PI / 2);
+    h.events();
+  });
+  await twoFrames(); // 主循环把鬼魂交给模拟（setGhost）
+  await gp.keyboard.press('KeyF');
+  const byF = await gp.evaluate(() => {
+    const h = window.__haunt;
+    h.step(800);
+    return h.events().filter((e) => e.type === 'manifest').map((e) => e.phase);
+  });
+  await twoFrames();
+  const ringOn = await gp.evaluate(() => document.querySelector('.hud-cool').classList.contains('is-on'));
+  check('第三人称：F 现身（蓄力、落下），准星外面出现冷却环', byF.includes('windup') && byF.includes('drop') && ringOn, `${byF.join(' → ') || '没有事件'}，冷却环 ${ringOn ? '有' : '无'}`);
+  await gp.mouse.down({ button: 'right' });
+  await gp.mouse.up({ button: 'right' });
+  const busy = await gp.evaluate(() => {
+    const h = window.__haunt;
+    h.step(100);
+    return h.events().filter((e) => e.type === 'manifest' && e.phase === 'windup').length;
+  });
+  await gp.evaluate(() => window.__haunt.step(25000)); // 停留、冷却走完
+  await gp.mouse.down({ button: 'right' });
+  await gp.mouse.up({ button: 'right' });
+  const byRight = await gp.evaluate(() => {
+    const h = window.__haunt;
+    h.step(800);
+    return h.events().filter((e) => e.type === 'manifest').map((e) => e.phase);
+  });
+  check('第三人称：冷却中右键不理，冷却完右键现身', busy === 0 && byRight.includes('windup') && byRight.includes('drop'), `冷却中 ${busy} 次蓄力，冷却完 ${byRight.join(' → ') || '没有事件'}`);
+  await gp.evaluate(() => window.__haunt.step(25000));
+
+  // 按住设机关（2026-10-28）：对准肖像按住 0.6 秒 → 设下（armed > 0、trap armed 事件），这一下不附身
+  await gp.evaluate(() => {
+    const h = window.__haunt;
+    h.ghost.aimAt('portrait', { from: 2.2 });
+    h.events();
+  });
+  await sleep(150); // 拾取器每帧更新一次准星对着的物件
+  await gp.mouse.down();
+  await sleep(700);
+  await gp.mouse.up();
+  await sleep(100);
+  const trap = await gp.evaluate(() => {
+    const h = window.__haunt;
+    const o = h.raw().objects.find((x) => x.id === 'portrait');
+    return { armed: Number(o.armed.toFixed(1)), cooldown: o.cooldown, ev: h.events().filter((e) => e.type === 'trap').map((e) => e.phase) };
+  });
+  check('第三人称：按住 0.6 秒设机关，不附身', trap.armed > 0 && trap.cooldown === 0 && trap.ev.includes('armed'), JSON.stringify(trap));
+  await gp.screenshot({ path: `shots/smoke-4b-trap${WEBGL ? '-webgl' : ''}.png` });
+  // 等机关到期（或被路过的人触发）、冷却走完，免得下面「点了也不附身」那几项把它算进去
+  await gp.evaluate(() => {
+    const h = window.__haunt;
+    h.step(61000);
+    h.step(40000);
+  });
 
   // 够不着的不算：离得太远（同一个房间里约 5 米），或者隔着墙（走廊里看卧室的八音盒，中间是墙）
   const reach = await gp.evaluate(async () => {

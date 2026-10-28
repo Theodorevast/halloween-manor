@@ -20,6 +20,7 @@
 //   有 events / timeline 的出实时按钮（走真正的 createAudio，timeline 是 [相对点击的秒数, 事件]，用 setTimeout 按时刻发出，和模拟的节拍一致）；
 //   喘气、呜咽是恐惧值的函数，没有事件：第三人称区有演示按钮（访客站在鬼魂面前，恐惧值从低涨到高），离线版直接喂 breath.ts
 import { FRONT_DOOR, HOUSE_W, PROPS, propCenter } from '../src/config/house';
+import { FEAR } from '../src/config/visitors';
 import { createAmbience, dreadTarget, AMB } from '../src/audio/ambience';
 import { createBreath } from '../src/audio/breath';
 import { createAudio, createBus, createRouter, type MixBus, type Router } from '../src/audio/engine';
@@ -59,7 +60,7 @@ const startle = (id: number, scream: boolean, object: string | null = 'portrait'
 const chill = (id: number, amount = 1): SimEvent => ({ type: 'chill', npc: id, amount, neck: false });
 const neckScare = (id: number, amount: number): SimEvent[] => [
   { type: 'chill', npc: id, amount, neck: true },
-  { type: 'startle', npc: id, object: 'ghost', amount, scream: amount >= 15 },
+  { type: 'startle', npc: id, object: 'ghost', amount, scream: amount >= FEAR.screamAt },
 ];
 /** 现身的三个节拍（模拟：蓄力 0.6 秒、停留 1.5 秒，见 config/visitors.ts 的 MANIFEST）；pos 是鬼魂此刻的位置 */
 const MAN_POS: Vec2 = { x: 4, z: 6 };

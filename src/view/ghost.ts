@@ -31,7 +31,7 @@ import {
 } from 'three/tsl';
 import { GHOST_MODEL } from '../config/ghost';
 import { CELL, Tile, buildTiles, cellOf, idx, inGrid } from '../config/house';
-import { MANIFEST } from '../config/visitors';
+import { MANIFEST, VISION } from '../config/visitors';
 import { ghostSees } from '../engine/ghostRig';
 import type { FrameCtx, GhostRig, Module, Quality, RenderCore } from '../engine/types';
 import { wrapAngle, yawFor } from '../lib/angle';
@@ -124,7 +124,7 @@ export const GHOST = {
   renderOrder: 2.7,
   /**
    * 被手电照出（G1）。片元在第 i 支手电的光锥里的程度 =
-   * smoothstep(cos 半角, mix(cos 半角, 1, edge), cosθ) × (1 − smoothstep(照多远 × far, 照多远, 距离)) × 强度 × 中间没有墙；
+   * smoothstep(cos 半角, mix(cos 半角, 1, edge), cosθ) × (1 − smoothstep(照多远 × far, 照多远, 距离)) × 强度 × 中间没有墙（半角、照多远用模拟的 VISION，见 SEE_COS）；
    * 四支取最亮的 = reveal。身体的不透明度 × mix(1, density, reveal)（雾晕不乘：照着时外面那圈糊的不跟着变浓，轮廓才清楚）；
    * soft 区间的下限往 soft 收（轮廓收紧）；颜色往手电的暖色（warmColor）偏 reveal × warm。
    * losTau：中间有没有墙是 CPU 每帧按格子判的 0 / 1，平滑这么久（秒），走过门框边时不跳
@@ -429,7 +429,14 @@ function smokeNoise(u: GhostUniforms, P: V3n, layer: GhostLayer, stepped: boolea
 }
 export type GhostUniforms = ReturnType<typeof makeGhostUniforms>;
 
-/** 片元 P（世界坐标）被手电照着的程度 0..1：四支里最亮的那支（公式见 GHOST.reveal） */
+/**
+ * 照出鬼魂用的光锥半角和照程：用访客看得见的范围（模拟的 VISION，30°、7 米），不用灯本身的（外圈半角 ×1.1、照程 ×1.3）。
+ * 这样画面上照得出鬼魂的地方，就是访客察觉得到的地方（2026-10-29 整合：原来 7–9 米处照得很清楚，访客却没反应）
+ */
+const SEE_COS = Math.cos(VISION.halfAngle);
+const SEE_RANGE = VISION.range;
+
+/** 片元 P（世界坐标）被手电照着的程度 0..1：四支里最亮的那支（公式见 GHOST.reveal，光锥和照程见 SEE_COS） */
 function torchReveal(u: GhostUniforms, P: V3n): F {
   const R = GHOST.reveal;
   let reveal: F = float(0);
@@ -438,8 +445,8 @@ function torchReveal(u: GhostUniforms, P: V3n): F {
     const L = P.sub(tp.xyz);
     const d = length(L);
     const cosT = dot(L.div(max(d, 0.001)), td.xyz);
-    const cone = smoothstep(td.w, mix(td.w, float(1), R.edge), cosT);
-    const reach = float(1).sub(smoothstep(tp.w.mul(R.far), tp.w, d));
+    const cone = smoothstep(SEE_COS, SEE_COS + (1 - SEE_COS) * R.edge, cosT);
+    const reach = float(1).sub(smoothstep(SEE_RANGE * R.far, SEE_RANGE, d));
     reveal = max(reveal, cone.mul(reach).mul(u.torchPow[i]));
   }
   return reveal;
@@ -491,8 +498,7 @@ function torchRevealAt(t: TorchSample, los: number, x: number, y: number, z: num
   const lx = x - t.x, ly = y - t.y, lz = z - t.z;
   const d = Math.hypot(lx, ly, lz);
   const cosT = (lx * t.dx + ly * t.dy + lz * t.dz) / Math.max(d, 0.001);
-  const c0 = Math.cos(t.angle);
-  return smooth01(c0, lerp(c0, 1, R.edge), cosT) * (1 - smooth01(t.range * R.far, t.range, d)) * t.power * los;
+  return smooth01(SEE_COS, lerp(SEE_COS, 1, R.edge), cosT) * (1 - smooth01(SEE_RANGE * R.far, SEE_RANGE, d)) * t.power * los;
 }
 
 /** 鬼魂这一层是什么：身体（被照着时变浓）、雾晕（不变浓） */

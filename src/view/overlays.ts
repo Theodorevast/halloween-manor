@@ -340,9 +340,11 @@ export function createOverlays(
       showTip(false);
       return;
     }
-    const ready = o.cooldown <= 0;
+    // 设了机关的写「Trap set」（这时点一下附身会把机关用掉），不写 Ready
+    const armed = o.armed > 0;
+    const ready = o.cooldown <= 0 && !armed;
     const name = STRINGS.propName[o.type];
-    const state = ready ? STRINGS.ready : STRINGS.cooldown(o.cooldown);
+    const state = armed ? STRINGS.trapSet : ready ? STRINGS.ready : STRINGS.cooldown(o.cooldown);
     let measure = false;
     if (name !== tipNameText) {
       tipNameText = name;

@@ -358,6 +358,14 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
       beginBtn.disabled = !r;
     },
     onEvent(e, state) {
+      // 现身落下：被吓到的每人一行（同一步的 startle 是 object = 'ghost'，tickerLine 不播）
+      if (e.type === 'manifest' && e.phase === 'drop') {
+        for (const id of e.scared) {
+          const n = state.npcs.find((x) => x.id === id)?.name;
+          if (n) push(STRINGS.ticker.seen(n), 'scare');
+        }
+        return;
+      }
       const l = tickerLine(e, state);
       if (l) push(l.text, l.tone);
       if (e.type === 'exit') setCount(e.total, true);

@@ -36,6 +36,8 @@ export const STRINGS = {
   bootFailed: 'Something went wrong while lighting the manor. Reload the page, or try a recent Chrome, Edge, Firefox or Safari.',
   deviceLost: 'The candles went out: your browser lost its graphics device. Click anywhere to relight the manor.',
   ready: 'Ready',
+  /** 悬停标签：这个物件设了机关（按住左键设的），等人从它跟前走过 */
+  trapSet: 'Trap set',
   personalityTag: { timid: 'scaredy-cat', average: '', brave: 'skeptic' } satisfies Record<Personality, string>,
   propName: {
     musicBox: 'Music box',
@@ -53,6 +55,8 @@ export const STRINGS = {
     startleScream: (name: string) => `${name} flinched at a scream`,
     /** 鬼魂贴在身后够久：「后颈一凉」 */
     neck: (name: string) => `${name} felt a cold breath on their neck`,
+    /** 主动现身吓到了他（manifest drop 的 scared） */
+    seen: (name: string) => `${name} saw you in the dark`,
     flee: (name: string) => `${name} fled screaming!`,
     exit: (name: string) => `${name} is gone. Who's next?`,
   },

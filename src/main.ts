@@ -17,9 +17,11 @@ import type { ManifestState, SimEvent } from './sim/types';
 import { createWorld } from './sim/world';
 import { createHud } from './ui/hud';
 import { createCharactersView } from './view/characters';
-import { createGhostView } from './view/ghost';
+import { createFrost } from './view/frost';
+import { GHOST, createGhostView, loadGhostModel } from './view/ghost';
 import { createFogView } from './view/fog';
 import { createHouseView } from './view/house';
+import { createLightFx } from './view/lightfx';
 import { createOverlays } from './view/overlays';
 import { createParticlesView } from './view/particles';
 import { createPropsView } from './view/props';
@@ -113,6 +115,9 @@ function start() {
   cinematic?.intro(2.5);
 }
 
+/** ?debug：冷启动各段的时刻（离导航开始的毫秒），排查「开场按钮为什么这么久才可用」 */
+const bootMark = (what: string) => { if (new URLSearchParams(location.search).has('debug')) console.info(`[boot] ${what} ${Math.round(performance.now())} ms`); };
+
 async function boot() {
   try {
     // ?webgl 强制走 WebGL2：排查「是不是 WebGPU 的问题」时用，冒烟测试也靠它测回退路径
@@ -151,11 +156,21 @@ async function boot() {
   // 第三人称：物件在鬼魂周围溶开（和墙、家具一样；?noghostfx 时都不溶）
   const props = createPropsView(c, { dissolve: isGhostRig(r) && !new URLSearchParams(location.search).has('noghostfx') });
   const overlays = createOverlays(document.getElementById('overlay')!, r);
+  bootMark('渲染器就绪');
   const characters = await createCharactersView(c);
+  bootMark('访客模型加载完');
   const cine = (cinematic = createCinematic(r, c));
+  // 第三人称：鬼魂现身时借附近的灯闪（lightfx）、脚下结霜（frost）；鬼魂的模型按 config/ghost.ts（url 为 null 用程序化的人形）
+  const ghostFx = isGhostRig(r) ? { lights: createLightFx(c), frost: createFrost(c), model: await loadGhostModel().catch((err) => {
+    console.warn('鬼魂模型加载失败，改用程序化的人形', err);
+    return null;
+  }) } : null;
+  // ?solid=0.1：现身时「实」的那份没被照着时的暗度（默认 0.03 是暗色剪影，0.1 是偏灰的实雾；看样时对比用）。建鬼魂之前改
+  const solid = Number(new URLSearchParams(location.search).get('solid') || NaN);
+  if (Number.isFinite(solid) && solid >= 0) GHOST.solid.dark = solid;
   modules.push(
     createHouseView(c, r), createFogView(c, r), props, characters, createParticlesView(c),
-    ...(isGhostRig(r) ? [createGhostView(c, r)] : []),
+    ...(ghostFx && isGhostRig(r) ? [createGhostView(c, r, ghostFx), ghostFx.lights, ghostFx.frost] : []),
     createJuice(r, c), cine, audio, overlays, hud,
   );
 
@@ -187,7 +202,9 @@ async function boot() {
   c.scene.traverse((o) => { if (o.userData.deferCompile) deferred.push(o); });
   const deferredWasVisible = deferred.map((o) => o.visible);
   for (const o of deferred) o.visible = false;
+  bootMark('场景建好，开始阻塞的预编译');
   await characters.prewarm(compile).catch((err) => console.warn('预编译着色器失败，改为边画边编', err));
+  bootMark('阻塞的预编译完');
   for (const [i, o] of deferred.entries()) o.visible = deferredWasVisible[i];
 
   /** ready 之后还要把延后编译的物件临时画进去的帧数 */
