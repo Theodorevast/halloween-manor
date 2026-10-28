@@ -5,6 +5,7 @@
 //     --eval "window.renderAll()" --eval-wait 8000 --eval "JSON.stringify(window.__audioReport)"
 //   window.__audio.bench() → 第一次 / 再次 unlock 的同步耗时、脚步样本现算的耗时（毫秒）
 //   window.renderAll(seed?) → Promise<Row[]>；window.renderOne(name, seed?) 只渲染一个（seed 默认 12345，换种子看随机部分的离散）；window.__audio = { sys, state, fire(name) }
+//   window.renderRaw(name, seed?) → 原始采样（左右声道 Float32Array），画频谱图、量包络用
 // 指标口径：
 //   peak    整段（含混响尾巴）的采样峰值，dBFS
 //   rms     「声音窗」里的 RMS（两个声道合起来）：画面上这件事发生的那段时间（台灯 0–1.2、肖像 0–1.3……），不含混响尾巴
@@ -13,15 +14,20 @@
 //   lr      声音窗里左声道比右声道响多少 dB（3D 定位的左右检查：声源在左边应为正）
 //   cent    声音窗的频谱质心（赫兹）：脚步声木地板 / 瓷砖 / 地毯的明暗对比
 //   rmsA    声音窗的 A 计权 RMS（dBFS）：小声的、频谱差别大的声音（脚步、气声、低频涌起）比响度时看这个，比 rms 接近听感
-// 第三人称（3D）的几组（calib3d、step、ghost、chill、3d）都先在总线的 space 上 setListener，再放声音：
-//   听者站在走廊、客厅、厨房里（房屋米坐标，离地 1.8 米，大致是第三人称镜头的高度）
+// 第三人称（3D）的几组（calib3d、step、ghost、chill、3d、manifest、reveal、breath、bed）都先在总线的 space 上 setListener，再放声音：
+//   听者站在走廊、客厅、厨房、卧室里（房屋米坐标，离地 1.8 米，大致是第三人称镜头的高度）
+// 2026-10-28 新增的几组（现身 manifest、被照到 reveal、访客喘气呜咽 breath、床 bed、机关 trap、手电照到鬼魂时那口气 notice）：
+//   有 events / timeline 的出实时按钮（走真正的 createAudio，timeline 是 [相对点击的秒数, 事件]，用 setTimeout 按时刻发出，和模拟的节拍一致）；
+//   喘气、呜咽是恐惧值的函数，没有事件：第三人称区有演示按钮（访客站在鬼魂面前，恐惧值从低涨到高），离线版直接喂 breath.ts
 import { FRONT_DOOR, HOUSE_W, PROPS, propCenter } from '../src/config/house';
 import { createAmbience, dreadTarget, AMB } from '../src/audio/ambience';
+import { createBreath } from '../src/audio/breath';
 import { createAudio, createBus, createRouter, type MixBus, type Router } from '../src/audio/engine';
 import { createCrowd, stepBanks } from '../src/audio/footsteps';
 import { createGhostSound, wallWhoosh } from '../src/audio/ghost';
-import { Snd, bandNoise, braam, rng } from '../src/audio/sfx';
+import { Snd, bandNoise, braam, lightClick, rng } from '../src/audio/sfx';
 import type { Vec3 } from '../src/audio/space';
+import { coldBreath, whimper } from '../src/audio/voices';
 import type { GhostState } from '../src/engine/types';
 import type { NpcMode, NpcState, Personality, ScareType, SimEvent, Vec2, WorldState } from '../src/sim/types';
 
@@ -54,12 +60,21 @@ const neckScare = (id: number, amount: number): SimEvent[] => [
   { type: 'chill', npc: id, amount, neck: true },
   { type: 'startle', npc: id, object: 'ghost', amount, scream: amount >= 15 },
 ];
+/** 现身的三个节拍（模拟：蓄力 0.6 秒、停留 1.5 秒，见 config/visitors.ts 的 MANIFEST）；pos 是鬼魂此刻的位置 */
+const MAN_POS: Vec2 = { x: 4, z: 6 };
+const man = (phase: 'windup' | 'drop' | 'end', scared: number[] = []): SimEvent => ({ type: 'manifest', phase, pos: MAN_POS, scared });
+const MAN_LINE: [number, SimEvent][] = [[0, man('windup')], [0.6, man('drop', [2])], [2.1, man('end')]];
+const reveal = (id: number, on: boolean): SimEvent => ({ type: 'reveal', npc: id, on });
+const trap = (object: string, phase: 'armed' | 'sprung' | 'expired'): SimEvent => ({ type: 'trap', object, phase });
 
 // ── 3D 场景：听者的站位、走路的路线 ────────────────────────────────────────
 const v3 = (x: number, y: number, z: number): Vec3 => ({ x, y, z });
 const EAST = v3(1, 0, 0), WEST = v3(-1, 0, 0), NORTH = v3(0, 0, -1), SOUTH = v3(0, 0, 1);
 /** 走廊西头，面朝东：正前方 2.5 米也在走廊里（没有墙） */
 const HALL_W = v3(2, 1.6, 6);
+/** 走廊中间，鬼魂站在 (8, 6.2)、镜头在它身后 1.4 米（面朝北）：喘气、呜咽的站位 */
+const HALL_MID = v3(8, 1.9, 7.6);
+const GHOST_AT: Vec2 = { x: 8, z: 6.2 };
 
 /** 沿折线走：每帧（1/60 秒）返回位置 */
 function* walkPath(path: Vec2[], speed: number): Generator<Vec2> {
@@ -98,13 +113,29 @@ function simulateWalk(bus: MixBus, t: number, who: NpcState, path: Vec2[], speed
   }
 }
 
+/** 离线：一个访客站在 pos，恐惧值 fear，耳朵（鬼魂）在 ear；按 60 帧/秒喂给喘气模块 */
+function simulateBreath(bus: MixBus, t: number, who: NpcState, pos: Vec2, ear: Vec2, fear: number, seconds: number) {
+  const crowd = createCrowd(bus, true);
+  const breath = createBreath(bus, crowd);
+  const w: NpcState = { ...who, pos: { ...pos }, mode: 'wander', speed: 0, fear, nervous: fear >= 60 };
+  for (let f = 0; f < seconds * 60; f++) {
+    crowd.update([w], t + f / 60, 1 / 60);
+    breath.update([w], t + f / 60, 1 / 60, ear);
+  }
+}
+/** 站在鬼魂正前方 d 米处的访客喘气（先摆好听者） */
+const breathAt = (who: number, fear: number, d: number, seconds: number) => (bus: MixBus, _r: Router, t: number) => {
+  listen(bus, HALL_MID, NORTH);
+  simulateBreath(bus, t, state.npcs.find((x) => x.id === who)!, { x: GHOST_AT.x, z: GHOST_AT.z - d }, GHOST_AT, fear, seconds);
+};
+
 const LIVING_WALK: Vec2[] = [{ x: 6, z: 2 }, { x: 10, z: 2 }];
 const KITCHEN_WALK: Vec2[] = [{ x: 11.6, z: 3.2 }, { x: 15, z: 3.2 }];
 const RUG_WALK: Vec2[] = [{ x: 3, z: 6 }, { x: 7, z: 6 }];
 const STUDY_WALK: Vec2[] = [{ x: 1.5, z: 2.6 }, { x: 4.6, z: 2.6 }];
 
 // ── 声音清单（按钮和离线测量共用） ─────────────────────────────────────────
-type Group = 'ambience' | 'scare' | 'lure' | 'voice' | 'other' | 'stress' | 'calib' | 'calib3d' | 'step' | 'ghost' | 'chill' | '3d';
+type Group = 'ambience' | 'scare' | 'lure' | 'voice' | 'other' | 'stress' | 'calib' | 'calib3d' | 'step' | 'ghost' | 'chill' | '3d' | 'manifest' | 'reveal' | 'breath' | 'bed' | 'trap';
 interface Case {
   name: string;
   group: Group;
@@ -116,6 +147,8 @@ interface Case {
   nominal: number;
   /** 实时按钮发的事件（没有就不出按钮） */
   events?: SimEvent[];
+  /** 实时按钮按时刻发的事件：[相对点击的秒数, 事件]；离线渲染时同样按这些时刻放（现身的三个节拍） */
+  timeline?: [number, SimEvent][];
   /** 离线渲染：在 t 时刻放这个声音 */
   render(bus: MixBus, router: Router, t: number): void;
   /** 断言：rms 应该落在这个范围（dBFS） */
@@ -124,6 +157,9 @@ interface Case {
   side?: -1 | 0 | 1;
 }
 const viaRouter = (events: SimEvent[]) => (_bus: MixBus, router: Router, t: number) => router.play(events, state, t);
+const viaTimeline = (tl: [number, SimEvent][]) => (_bus: MixBus, router: Router, t: number) => {
+  for (const [at, e] of tl) router.play([e], state, t + at);
+};
 const ambience = (d: number, presence = 0) => (bus: MixBus, _r: Router, t: number) => {
   const a = createAmbience(bus);
   a.start(t, 0.5);
@@ -303,6 +339,78 @@ const CASES: Case[] = [
     a.setPresence(AMB.presence3d, t);
     a.creak(t, v3(3, 0.05, 2.5), false);
   } },
+  // ── 现身（manifest）：蓄力 0.6 秒 → 落下 → 停留 1.5 秒 → 收回；鬼魂在听者正前方 2 米 ──
+  { name: 'manifest: full (windup → drop 0.6 s → end 2.1 s) over ambience', group: 'manifest', seconds: 10, win: [2, 4.1], nominal: 0, timeline: MAN_LINE, render: (bus, r, t) => {
+    listen(bus, HALL_W, EAST);
+    ambience(0, AMB.presence3d)(bus, r, t);
+    viaTimeline(MAN_LINE)(bus, r, t + 2);
+  } },
+  { name: 'manifest: windup only (drone + 2 light clicks + ambience hush)', group: 'manifest', seconds: 6, win: [0, 2], nominal: 0, rmsRange: [-42, -28], events: [man('windup')], render: (bus, r, t) => {
+    listen(bus, HALL_W, EAST);
+    r.play([man('windup')], state, t);
+  } },
+  { name: 'manifest: drop only (low hit + cold breath)', group: 'manifest', seconds: 4, win: [0, 1], nominal: 0, rmsRange: [-30, -18], events: [man('drop', [2])], render: (bus, r, t) => {
+    listen(bus, HALL_W, EAST);
+    r.play([man('drop', [2])], state, t);
+  } },
+  { name: 'manifest: drop with a flee in the same frame (hit yields to braam)', group: 'manifest', seconds: 5, win: [0, 1.7], nominal: 0, rmsRange: [-20, -9], events: [man('drop', [2]), startle(2, true), { type: 'flee', npc: 2 }], render: (bus, r, t) => {
+    listen(bus, HALL_W, EAST);
+    r.play([man('drop', [2]), startle(2, true), { type: 'flee', npc: 2 }], state, t);
+  } },
+  { name: 'manifest: light click alone', group: 'manifest', seconds: 1.5, win: [0, 0.3], nominal: 0, render: (bus, _r, t) => {
+    listen(bus, HALL_W, EAST);
+    lightClick(bus, t, v3(4, 1.4, 6));
+  } },
+  { name: 'manifest: cold breath alone', group: 'manifest', seconds: 2.5, win: [0, 0.5], nominal: 0, rmsRange: [-40, -27], render: (bus, _r, t) => {
+    listen(bus, HALL_W, EAST);
+    coldBreath(bus, t, v3(4, 1.4, 6));
+  } },
+
+  // ── 被手电照到（reveal）：压力声 ──
+  { name: 'reveal: on (steady pressure layer)', group: 'reveal', seconds: 4, win: [1, 3.5], nominal: 0, rmsRange: [-39, -27], events: [reveal(2, true)], render: (bus, r, t) => {
+    listen(bus, HALL_W, EAST);
+    r.play([reveal(2, true)], state, t);
+  } },
+  { name: 'reveal: on → off 2.5 s later (fade in 0.4 s, out 0.8 s)', group: 'reveal', seconds: 5, win: [0.2, 3.5], nominal: 0, rmsRange: [-40, -27], timeline: [[0, reveal(2, true)], [2.5, reveal(2, false)]], render: (bus, r, t) => {
+    listen(bus, HALL_W, EAST);
+    viaTimeline([[0.2, reveal(2, true)], [2.7, reveal(2, false)]])(bus, r, t);
+  } },
+  { name: 'notice: flashlight finds the ghost (soft gasp, Theo 2.5 m ahead)', group: 'voice', seconds: 1.5, win: [0.03, 0.4], nominal: 0, rmsRange: [-60, -34],
+    events: [{ type: 'notice', npc: 2, kind: 'ghost', src: GHOST_AT }], render: (bus, r, t) => {
+      listen(bus, HALL_W, EAST);
+      at3d(bus, r, t, 2, { x: 4.5, z: 6 }, [{ type: 'notice', npc: 2, kind: 'ghost', src: GHOST_AT }]);
+    } },
+
+  // ── 访客喘气、呜咽（恐惧值的函数）：鬼魂在 (8, 6.2)，访客站在它正前方 d 米，镜头在鬼魂身后 1.4 米 ──
+  { name: 'breath: fear 60 (period 2.2 s), 0.8 m', group: 'breath', seconds: 8, win: [0.9, 7.4], nominal: 0, rmsRange: [-49, -36], render: breathAt(2, 60, 0.8, 7.6) },
+  { name: 'breath: fear 80 (period 1.75 s), 0.8 m', group: 'breath', seconds: 8, win: [0.9, 7.4], nominal: 0, rmsRange: [-47, -34], render: breathAt(2, 80, 0.8, 7.6) },
+  { name: 'breath: fear 100 (period 1.3 s), 0.8 m', group: 'breath', seconds: 8, win: [0.9, 7.4], nominal: 0, rmsRange: [-45, -32], render: breathAt(2, 100, 0.8, 7.6) },
+  { name: 'breath: fear 80, 1.5 m', group: 'breath', seconds: 8, win: [0.9, 7.4], nominal: 0, rmsRange: [-56, -43], render: breathAt(2, 80, 1.5, 7.6) },
+  { name: 'breath: fear 80, 2.0 m (edge of hearing)', group: 'breath', seconds: 8, win: [0.9, 7.4], nominal: 0, rmsRange: [-68, -53], render: breathAt(2, 80, 2.0, 7.6) },
+  { name: 'breath: fear 80, 3.0 m (beyond reach, silent)', group: 'breath', seconds: 8, win: [0.9, 7.4], nominal: 0, rmsRange: [-Infinity, -90], render: breathAt(2, 80, 3.0, 7.6) },
+  { name: 'breath: fear 59 (below nervous, silent)', group: 'breath', seconds: 5, win: [0.5, 4.5], nominal: 0, rmsRange: [-Infinity, -90], render: breathAt(2, 59, 0.8, 4.6) },
+  { name: 'whimper: timid (Mia), 0.8 m', group: 'breath', seconds: 2, win: [0, 0.6], nominal: 0, rmsRange: [-43, -30], render: (bus, _r, t) => {
+    listen(bus, HALL_MID, NORTH);
+    whimper(bus, t, { id: 1, personality: 'timid', at: bus.space.port(v3(8, 0.6, 5.4), bus.voice) });
+  } },
+  { name: 'whimper: average (Theo), 0.8 m', group: 'breath', seconds: 2, win: [0, 0.6], nominal: 0, rmsRange: [-43, -30], render: (bus, _r, t) => {
+    listen(bus, HALL_MID, NORTH);
+    whimper(bus, t, { id: 2, personality: 'average', at: bus.space.port(v3(8, 0.6, 5.4), bus.voice) });
+  } },
+  { name: 'whimper: brave (Nora), 0.8 m', group: 'breath', seconds: 2, win: [0, 0.6], nominal: 0, rmsRange: [-43, -30], render: (bus, _r, t) => {
+    listen(bus, HALL_MID, NORTH);
+    whimper(bus, t, { id: 3, personality: 'brave', at: bus.space.port(v3(8, 0.6, 5.4), bus.voice) });
+  } },
+  { name: 'breath + whimper schedule: fear 90, 0.8 m, 14 s', group: 'breath', seconds: 15, win: [1, 14.5], nominal: 0, rmsRange: [-46, -33], render: breathAt(2, 90, 0.8, 14.5) },
+
+  // ── 床（trigger bed）和机关（trap armed）──
+  { name: 'trigger bed (cloth 0–1.3, muffled breath 1.25–1.95, silence, drop 2.6)', group: 'bed', seconds: 8, win: [0, 3.2], nominal: 0, rmsRange: [-38, -26], events: [trig('bed')], render: viaRouter([trig('bed')]) },
+  { name: '3d: trigger bed, listener 2.5 m east of the pillow', group: 'bed', seconds: 8, win: [0, 3.2], nominal: 0, rmsRange: [-42, -30], render: (bus, r, t) => {
+    listen(bus, v3(3.4, 1.8, 10), WEST);
+    r.play([trig('bed')], state, t);
+  } },
+  { name: 'trap: armed (very light ice crack, not positional)', group: 'trap', seconds: 2, win: [0, 0.5], nominal: 0, rmsRange: [-68, -52], events: [trap('bed', 'armed')], render: viaRouter([trap('bed', 'armed')]) },
+
   { name: '3d: object sounds 3 m ahead (portrait)', group: '3d', seconds: 4, win: [0, 1.3], nominal: 1.3, rmsRange: [-24, -10], render: (bus, r, t) => {
     // 书房里，肖像在 (3.75, 0.75)，听者在它南边 3 米（第三人称：鬼魂 1 米、镜头再往后 2 米）
     listen(bus, v3(3.75, 1.8, 3.75), NORTH);
@@ -484,22 +592,27 @@ function seeded(seed: number) {
   };
 }
 
-async function renderCase(c: Case, seed = 12345): Promise<Row> {
+async function renderBuffer(c: Case, seed = 12345): Promise<AudioBuffer> {
   const prev = rng.next;
   rng.next = seeded(seed);
   try {
     const ac = new OfflineAudioContext({ numberOfChannels: 2, length: Math.ceil(c.seconds * SR), sampleRate: SR });
     const bus = createBus(ac);
     c.render(bus, createRouter(bus, pan, createCrowd(bus, true)), T0);
-    return measure(await ac.startRendering(), c);
+    return await ac.startRendering();
   } finally {
     rng.next = prev;
   }
+}
+async function renderCase(c: Case, seed = 12345): Promise<Row> {
+  return measure(await renderBuffer(c, seed), c);
 }
 
 const w = window as unknown as {
   renderAll(seed?: number, only?: string): Promise<Row[]>;
   renderOne(name: string, seed?: number): Promise<Row | null>;
+  /** 渲染一个用例，返回原始采样（起点 = 0，声音从 T0 秒开始）：画频谱图、量包络用 */
+  renderRaw(name: string, seed?: number): Promise<{ sampleRate: number; t0: number; left: Float32Array; right: Float32Array } | null>;
   __audioReport?: Row[];
   __audio?: unknown;
 };
@@ -528,18 +641,30 @@ w.renderOne = async (name, seed) => {
   const c = CASES.find((x) => x.name === name);
   return c ? renderCase(c, seed) : null;
 };
+w.renderRaw = async (name, seed) => {
+  const c = CASES.find((x) => x.name === name);
+  if (!c) return null;
+  const b = await renderBuffer(c, seed);
+  return { sampleRate: b.sampleRate, t0: T0, left: b.getChannelData(0), right: b.getChannelData(1) };
+};
 
 // ── 实时按钮 ──────────────────────────────────────────────────────────────
 const sys = createAudio(pan);
 const fire = async (name: string) => {
   await sys.unlock();
   const c = CASES.find((x) => x.name === name);
-  if (!c?.events) return;
+  if (!c?.events && !c?.timeline) return;
   // flee 的那个人要已经在逃跑；其他人复位
   for (const v of state.npcs) v.mode = 'wander';
-  for (const e of c.events) {
+  const send = (e: SimEvent) => {
     if (e.type === 'flee') state.npcs.find((v) => v.id === e.npc)!.mode = 'fleeing';
     sys.onEvent?.(e, state);
+  };
+  for (const e of c.events ?? []) send(e);
+  // 按模拟的节拍发：reveal 的 on / off、现身的 windup / drop / end
+  for (const [at, e] of c.timeline ?? []) {
+    if (at <= 0) send(e);
+    else setTimeout(() => send(e), at * 1000);
   }
 };
 /** 第一次 unlock（建 AudioContext、总线、混响冲激响应、环境层）在点击里同步花多久；第二次（已在运行）花多久；脚步样本现算多久 */
@@ -629,7 +754,36 @@ const ghostDemo = (): Demo => {
   };
 };
 
+/**
+ * 访客 id 站在鬼魂（8, 6.2）正前方 dist 米，恐惧值在 seconds 秒里从 from 线性涨到 to，再撑 1 秒；鬼魂不动，镜头在它身后 1.4 米。
+ * 听喘气（60 起，周期 2.2 → 1.3 秒）和呜咽（80 起，每 6–10 秒一声）。结束时把访客放回原处
+ */
+const breathDemo = (id: number, from: number, to: number, seconds: number, dist: number): Demo => {
+  const n = state.npcs.find((x) => x.id === id)!;
+  const keep = { pos: { ...n.pos }, fear: n.fear, mode: n.mode, speed: n.speed };
+  let t = 0;
+  ghostOn = true;
+  Object.assign(ghost, { x: GHOST_AT.x, z: GHOST_AT.z, speed: 0, inWall: false });
+  Object.assign(listenerPos, { x: HALL_MID.x, y: HALL_MID.y, z: HALL_MID.z });
+  Object.assign(n, { pos: { x: GHOST_AT.x, z: GHOST_AT.z - dist }, mode: 'wander', speed: 0 });
+  return {
+    step(dt) {
+      t += dt;
+      n.fear = from + (to - from) * Math.min(1, t / seconds);
+      if (t < seconds + 1) return true;
+      Object.assign(n, keep);
+      ghostOn = false;
+      Object.assign(listenerPos, { x: 8, y: 1.8, z: 6.2 });
+      return false;
+    },
+  };
+};
+
 const LIVE3D: { name: string; run(): void }[] = [
+  { name: 'breath: Theo fear 60 → 100 over 12 s, 1 m in front of the ghost (period 2.2 → 1.3 s)', run: () => (demo = breathDemo(2, 60, 100, 12, 1)) },
+  { name: 'breath: Theo fear 100, 3 m away (should be silent)', run: () => (demo = breathDemo(2, 100, 100, 6, 3)) },
+  { name: 'breath + whimper: Mia (timid) fear 90, 1 m, 20 s', run: () => (demo = breathDemo(1, 90, 90, 20, 1)) },
+  { name: 'breath + whimper: Nora (brave) fear 90, 1 m, 20 s', run: () => (demo = breathDemo(3, 90, 90, 20, 1)) },
   { name: 'visitor walks: living (wood) → hall (rug) → kitchen (tile)', run: () => (demo = walkDemo(2, [{ x: 6, z: 2.5 }, { x: 8, z: 3.5 }, { x: 8, z: 4.75 }, { x: 8.5, z: 6 }, { x: 12.5, z: 6 }, { x: 13, z: 4.75 }, { x: 13.5, z: 2.5 }, { x: 14.5, z: 2 }], 1.3, 'wander')) },
   { name: 'visitor flees: kitchen → front door', run: () => (demo = walkDemo(2, [{ x: 13.5, z: 2.5 }, { x: 13, z: 4.75 }, { x: 8.5, z: 6 }, { x: 8, z: 7.25 }, { x: 8, z: 11.75 }, { x: 8, z: 13.2 }], 3.2, 'fleeing')) },
   { name: 'visitor walks in the study (behind a wall)', run: () => (demo = walkDemo(1, [{ x: 1.5, z: 2.6 }, { x: 4.6, z: 2.6 }, { x: 4.6, z: 1.5 }, { x: 1.5, z: 1.5 }], 1.3, 'wander')) },
@@ -640,14 +794,24 @@ const LIVE3D: { name: string; run(): void }[] = [
 ];
 
 const box = document.getElementById('buttons')!;
-for (const g of ['scare', 'lure', 'voice', 'other'] as Group[]) {
+for (const g of ['scare', 'lure', 'voice', 'other', 'manifest', 'reveal', 'bed', 'trap'] as Group[]) {
   const sec = document.createElement('div');
   sec.innerHTML = `<h2>${g}</h2>`;
-  for (const c of CASES.filter((x) => x.group === g && x.events)) {
+  for (const c of CASES.filter((x) => x.group === g && (x.events || x.timeline))) {
     const b = document.createElement('button');
     b.textContent = c.name;
     b.onclick = () => void fire(c.name);
     sec.appendChild(b);
+  }
+  if (g === 'reveal') {
+    // 「on」那个按钮会一直照着：这个把手电从鬼魂身上移开（单独听淡出）
+    const off = document.createElement('button');
+    off.textContent = 'reveal: off (the flashlight leaves the ghost)';
+    off.onclick = async () => {
+      await sys.unlock();
+      sys.onEvent?.(reveal(2, false), state);
+    };
+    sec.appendChild(off);
   }
   box.appendChild(sec);
 }
