@@ -4,7 +4,8 @@
 // 2026-10-28 第二次试玩（「动作太夸张、生硬、穿模」）之后收敛：跳得低、不在空中扭身、不再不停回头张望，
 // 转身和起步停步都平滑（朝向用临界阻尼弹簧，动画按平滑后的速度混合）。
 //
-// 换模型只改 config/character.ts。这里负责把任何来路的模型「摆正」：
+// 换模型只改 config/character.ts（VISITOR_SPECS 有几套就轮流分给进门的人；一套都加载不到时用 CHARACTER）。
+// 这里负责把任何来路的模型「摆正」：
 //   量包围盒（Box3.setFromObject：量化 / meshopt 压缩过的模型，accessor 里的范围不是真实尺寸）→
 //   缩放到 targetHeight（身长超过 maxLength 时再缩）、x / z 居中、脚底贴 y = 0 → 抵消 facingOffset，让正面朝 +z
 //
@@ -14,7 +15,7 @@ import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { CHARACTER, FLASHLIGHT_HEIGHT, type CharacterSpec } from '../config/character';
+import { CHARACTER, FLASHLIGHT_HEIGHT, VISITOR_SPECS, type CharacterSpec } from '../config/character';
 import { FEAR, SPAWN } from '../config/visitors';
 import type { FrameCtx, Module, RenderCore } from '../engine/types';
 import { angleOf, wrapAngle, yawFor } from '../lib/angle';
@@ -189,8 +190,16 @@ interface JumpShape {
 /** 临界阻尼弹簧的状态：值和速度 */
 interface Spring { x: number; v: number }
 
+/** 一套加载好的访客造型：配置 + 摆正好的模型（asset 为 null = 备用小人） */
+interface Outfit {
+  spec: CharacterSpec;
+  asset: CharacterAsset | null;
+}
+
 interface Visual {
   id: number;
+  /** 这个人穿的是哪一套：动画片段名、步频速率、手电高度都按它的配置 */
+  outfit: Outfit;
   root: THREE.Group;
   body: THREE.Group;
   /** body 和模型之间：缩身、前探（剪切），矩阵手动设置 */
@@ -348,13 +357,23 @@ function cowerTarget(nervous: boolean, fear: number): number {
 
 export async function createCharactersView(core: RenderCore): Promise<CharactersView> {
   const parent = core.houseRoot;
-  const spec = CHARACTER;
-  let asset: CharacterAsset | null = null;
-  try {
-    asset = await loadCharacterAsset(spec);
-  } catch (err) {
-    console.warn(`[characters] 角色模型 ${spec.url} 加载失败，改用备用小人。`, err);
+  // 换装吉祥物几套一起加载，加载失败的跳过；一套都没有就用 CHARACTER，它也失败就用备用小人
+  const load = async (specs: CharacterSpec[]) => {
+    const got = await Promise.allSettled(specs.map((s) => loadCharacterAsset(s)));
+    return got.flatMap((r, i): Outfit[] => {
+      if (r.status === 'fulfilled') return [{ spec: specs[i], asset: r.value }];
+      console.warn(`[characters] 角色模型 ${specs[i].url} 加载失败，跳过。`, r.reason);
+      return [];
+    });
+  };
+  let outfits = VISITOR_SPECS.length ? await load(VISITOR_SPECS) : [];
+  if (!outfits.length) outfits = await load([CHARACTER]);
+  if (!outfits.length) {
+    console.warn('[characters] 没有可用的角色模型，改用备用小人。');
+    outfits = [{ spec: CHARACTER, asset: null }];
   }
+  /** 进门的人按编号轮流分一套：相邻两个人穿得不一样 */
+  const outfitFor = (id: number) => outfits[((id % outfits.length) + outfits.length) % outfits.length];
 
   const torches: Flashlight[] = Array.from({ length: TORCH_SLOTS }, () => createFlashlight(parent, core.quality));
   const owner = new Map<Flashlight, number>();
@@ -363,15 +382,16 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
   const pendingJump = new Map<number, { amount: number; src: Vec2 | null }>();
   let now = 0;
 
-  const makeModel = (personality: Personality) => {
+  const makeModel = ({ spec, asset }: Outfit, personality: Personality) => {
     if (asset) return { model: SkeletonUtils.clone(asset.template), front: asset.front, halfWidth: asset.halfWidth, height: asset.height };
     // 备用小人自己的正面就是 +z，不用 facingOffset
     const n = normalizeModel(createFallbackCharacter(personality), spec.targetHeight, 0, spec.maxLength);
     return { model: n.template, front: n.front, halfWidth: n.halfWidth, height: n.height };
   };
 
-  const create = (npc: NpcState): Visual => {
-    const { model, front, halfWidth, height } = makeModel(npc.personality);
+  const create = (npc: NpcState, outfit = outfitFor(npc.id)): Visual => {
+    const { spec, asset } = outfit;
+    const { model, front, halfWidth, height } = makeModel(outfit, npc.personality);
     const materials: THREE.Material[] = [];
     model.traverse((o) => {
       const mesh = o as THREE.Mesh;
@@ -439,7 +459,7 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     const torch = torches.find((t) => !owner.has(t)) ?? null;
     if (torch) owner.set(torch, npc.id);
     const v: Visual = {
-      id: npc.id, root, body, pose, materials, mixer, actions, weights: { idle: 1, walk: 0, run: 0, scared: 0 },
+      id: npc.id, outfit, root, body, pose, materials, mixer, actions, weights: { idle: 1, walk: 0, run: 0, scared: 0 },
       front, halfWidth, height, torch,
       x: npc.pos.x, z: npc.pos.z, heading: npc.heading, look: npc.lookDir, speed: npc.speed, mode: npc.mode, nervous: npc.nervous, fear: npc.fear, uneasy: npc.uneasy ?? 0,
       alpha: 0, leaving: false, jumpT: -1, lastJump: -10, jump: jumpShape(0), turnSrc: null, turn: { x: 0, v: 0 },
@@ -466,7 +486,7 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     v.mixer?.stopAllAction();
     v.mixer?.uncacheRoot(v.mixer.getRoot());
     for (const m of v.materials) m.dispose();
-    if (!asset) {
+    if (!v.outfit.asset) {
       // 备用小人的几何体是每人一份的
       v.root.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
     }
@@ -511,6 +531,7 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
     if (!A.run) v.weights.walk += v.weights.run;
     for (const p of POSES) A[p]?.setEffectiveWeight(v.weights[p]);
     const sim = Math.max(0, v.speed);
+    const { spec } = v.outfit;
     if (A.walk) A.walk.timeScale = sim * spec.walkRateAt1ms * (1 + COWER.cadence * cw);
     if (A.run) A.run.timeScale = sim * spec.runRateAt1ms;
     return A.walk ? 0 : moving;
@@ -617,7 +638,7 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
       const k = sxz * shrinkXZ;
       const reach = (Math.abs(Math.cos(rel)) * v.front + Math.abs(Math.sin(rel)) * v.halfWidth) * k + HAND.ahead;
       const lx = Math.cos(look), lz = Math.sin(look);
-      const hand = FLASHLIGHT_HEIGHT * Math.min(1, v.height / spec.targetHeight) * shrinkY;
+      const hand = FLASHLIGHT_HEIGHT * Math.min(1, v.height / v.outfit.spec.targetHeight) * shrinkY;
       const lean = hand * Math.sin(v.lean), hunch = hand * shear; // 逃跑前倾沿 heading，前探 / 后缩沿身体朝向
       v.torch.update({
         x: v.x + lx * reach - lz * HAND.side + Math.cos(heading) * lean + Math.cos(facing) * hunch,
@@ -631,25 +652,31 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
   };
 
   const view: CharactersView = {
-    get source() { return asset ? 'glb' : 'fallback'; },
+    get source() { return outfits.some((o) => o.asset) ? 'glb' : 'fallback'; },
     async prewarm(compile) {
-      const fake: NpcState = {
-        id: -1, name: '', personality: 'average', pos: { x: 8, z: 6 }, heading: 0, lookDir: 0, mode: 'wander', modeTime: 0,
+      // 每套造型各放一个（贴图组合不同的材质可能各要一条管线），并排站着
+      const vs = outfits.map((outfit, i) => create({
+        id: -1 - i, name: '', personality: 'average', pos: { x: 8 + i * 0.9, z: 6 }, heading: 0, lookDir: 0, mode: 'wander', modeTime: 0,
         fear: 0, nervous: false, speed: 0, screaming: 0, path: [],
-      };
-      const v = create(fake);
+      }, outfit));
       try {
-        setAlpha(v, 1);
-        step(v, 0, 0); // 摆好位置、点亮手电（手电的光锥材质也要编）
+        for (const v of vs) {
+          setAlpha(v, 1);
+          step(v, 0, 0); // 摆好位置、点亮手电（手电的光锥材质也要编）
+        }
         await compile();
-        setAlpha(v, 0.5);
-        step(v, 0, 0);
+        for (const v of vs) {
+          setAlpha(v, 0.5);
+          step(v, 0, 0);
+        }
         await compile();
       } finally {
         // 试过只移出场景、不 dispose 材质（怕 three 回收刚编好的管线），实测第一个访客进门的卡顿没有变化（都是约 150 ms），
         // 所以照常释放（2026-10-27）
-        v.leaving = true;
-        destroy(v);
+        for (const v of vs) {
+          v.leaving = true;
+          destroy(v);
+        }
       }
     },
     onEvent(e: SimEvent, state: WorldState) {

@@ -1,7 +1,10 @@
 // 可附身物件的画面：肖像、两盏落地灯、摇椅、厨房门、八音盒、落地镜。
 // 每个物件挂在 houseRoot 下（位置 propCenter、朝向 yawFor(facing)，模型正面朝局部 +z），
 // 自己的模型和惊吓动画在 src/view/props/*.ts；这里统一管：事件分发、幽光（可附身时呼吸、悬停变亮放大）、拾取盒。
+// 第三人称（dissolve）：鬼魂穿过物件时，物件和家具一样在它周围溶开、洞口一圈冷光（walls.ts 的 DISSOLVE），
+// 不然飘进摇椅里就是直接穿模（2026-10-28 第二次试玩）
 import * as THREE from 'three/webgpu';
+import { add, and, bool, materialEmissive, normalWorld, positionWorld, uniform } from 'three/tsl';
 import { PROPS, propCenter, type PropPlacement } from '../config/house';
 import type { FrameCtx, Module, Quality, RenderCore } from '../engine/types';
 import { yawFor } from '../lib/angle';
@@ -13,6 +16,7 @@ import { createMirror } from './props/mirror';
 import { createMusicBox } from './props/musicBox';
 import { createPortrait } from './props/portrait';
 import { createRockingChair } from './props/rockingChair';
+import { DISSOLVE, dissolveAt, ghostDissolve, v3 } from './walls';
 
 export type PropsView = Module & {
   /** 给拾取器用：每个物件一个不可见的碰撞盒，userData.propId = 物件 id */
@@ -58,7 +62,32 @@ interface Entry {
   phase: number;
 }
 
-export function createPropsView(core: RenderCore): PropsView {
+export interface PropsOptions {
+  /** 第三人称：物件在鬼魂周围溶开（用全页共用的 ghostDissolve，house.ts 每帧写） */
+  dissolve?: boolean;
+}
+
+export function createPropsView(core: RenderCore, opts: PropsOptions = {}): PropsView {
+  // 溶解按房屋坐标算：物件会动（摇椅、门），用片元的世界坐标减去 houseRoot 的偏移（houseRoot 只平移不旋转）
+  const houseOffset = uniform(new THREE.Vector3());
+  const dissolved = new Set<THREE.Material>();
+  const dissolveMaterial = (m: THREE.Material) => {
+    if (dissolved.has(m) || !(m as THREE.NodeMaterial).isNodeMaterial) return;
+    dissolved.add(m);
+    const nm = m as THREE.NodeMaterial;
+    const d = dissolveAt(ghostDissolve, positionWorld.sub(houseOffset), normalWorld, DISSOLVE.furniture);
+    nm.maskNode = nm.maskNode ? and(nm.maskNode as THREE.Node<'bool'>, d.keep) : d.keep;
+    // 影子照旧：溶开的只是「看穿」
+    nm.maskShadowNode = bool(true);
+    // 洞口一圈冷光、附近一点霜光（受光材质才有自发光；不受光的灯泡、外壳只挖洞）
+    if ((m as THREE.MeshStandardNodeMaterial).isMeshStandardNodeMaterial) {
+      const sm = m as THREE.MeshStandardNodeMaterial;
+      const edge = v3(DISSOLVE.rimGlow).mul(d.rim).add(v3(DISSOLVE.frostGlow).mul(d.frost));
+      sm.emissiveNode = add((sm.emissiveNode as THREE.Node<'vec3'> | null) ?? materialEmissive, edge);
+    }
+    m.needsUpdate = true;
+  };
+
   const entries: Entry[] = PROPS.map((p, i) => {
     const root = new THREE.Group();
     root.name = `prop:${p.id}`;
@@ -77,6 +106,13 @@ export function createPropsView(core: RenderCore): PropsView {
       return m;
     });
     const hit = hitBox(p.id, rig.hit.size, rig.hit.center);
+    if (opts.dissolve) {
+      // 模型和幽光外壳都挖洞（外壳不挖的话，物件溶开的地方会剩一圈发光的轮廓）；拾取盒不画，不用管
+      root.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh) for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) dissolveMaterial(m);
+      });
+    }
     root.add(hit);
     core.houseRoot.add(root);
     return { p, root, rig, glow, shells, hit, ready: 1, hover: 0, flash: 0, phase: i * 1.7 };
@@ -107,6 +143,7 @@ export function createPropsView(core: RenderCore): PropsView {
     },
     update(ctx: FrameCtx) {
       const { dt, time, state } = ctx;
+      houseOffset.value.copy(core.houseRoot.position);
       for (const e of entries) {
         const obj = objOf(state, e);
         e.rig.update({ dt, time, obj, state });

@@ -33,5 +33,12 @@ export const CHARACTER: CharacterSpec = {
   runRateAt1ms: 0.72,
 };
 
+/**
+ * 换装吉祥物访客（scripts/Tripo 流水线 + Blender 精修产出的 public/assets/visitors/<id>.glb）。
+ * 每个访客进门时按编号轮流分一套，相邻两个人穿得不一样。一个都加载不到时退回上面的 CHARACTER。
+ * 片段名照 public/assets/visitors/manifest.json 里的 clips 填；facingOffset 和两个速率用 dev/characters.html 的 calibrate() 量
+ */
+export const VISITOR_SPECS: CharacterSpec[] = [];
+
 /** 手电挂在角色身上的高度（米），按 targetHeight 的身高定；模型因 maxLength 变矮时按比例降低（占位狐狸约 0.52 米） */
 export const FLASHLIGHT_HEIGHT = 0.8;

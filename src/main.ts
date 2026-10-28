@@ -131,7 +131,8 @@ async function boot() {
   watchDpr();
   fit();
 
-  const props = createPropsView(c);
+  // 第三人称：物件在鬼魂周围溶开（和墙、家具一样；?noghostfx 时都不溶）
+  const props = createPropsView(c, { dissolve: isGhostRig(r) && !new URLSearchParams(location.search).has('noghostfx') });
   const overlays = createOverlays(document.getElementById('overlay')!, r);
   const characters = await createCharactersView(c);
   const cine = (cinematic = createCinematic(r, c));
@@ -155,6 +156,7 @@ async function boot() {
   // 访客的材质要等第一个人进门才出现，所以先放一个临时访客一起编（prewarm 内部各编一次不透明、半透明）。
   // compileAsync 只编主相机那一遍，阴影那几遍（狐狸投到月光和手电的阴影图里）不管，所以再真画一帧：
   // 这时开场遮罩还写着「Lighting the candles…」，多花的这点时间玩家看不见
+  // compileAsync 只编镜头视锥里的物体（r186 的 _projectObject 做了视锥剔除）：别的房间里的那些，ready 之后在后台编（见文件末尾）
   const compile = async () => {
     await c.renderer.compileAsync(c.scene, r.camera);
     c.render(r.camera);
@@ -171,6 +173,19 @@ async function boot() {
   /** ready 之后还要把延后编译的物件临时画进去的帧数 */
   const DEFERRED_WARM_FRAMES = 3;
   let warmFrames = 0;
+  /** 后台预编译编完后，整栋房子真画一帧（见动画循环） */
+  let warmAll = false;
+  /** 关掉整个场景的视锥剔除，返回被关掉的那些（画完再开回来） */
+  const cullOff = () => {
+    const out: Object3D[] = [];
+    c.scene.traverse((o) => {
+      if (o.frustumCulled) {
+        out.push(o);
+        o.frustumCulled = false;
+      }
+    });
+    return out;
+  };
   const frameWatch = watchFrameTime(() => { if (quality === 'high' && !qualityPicked) setQuality('low'); });
   let last = performance.now();
   let time = 0;
@@ -200,7 +215,14 @@ async function boot() {
     const warm = warmFrames > 0;
     const was = warm ? deferred.map((o) => o.visible) : null;
     if (warm) for (const o of deferred) o.visible = true;
+    // 后台预编译编完、玩家还停在开场画面：整栋房子不剔除地真画一帧，补上 compileAsync 管不到的那些（阴影 pass 等）。
+    // 开场遮罩挡着，多花的这一帧看不见；玩家已经开始了就不画（会卡一下）
+    const all = warmAll && !started ? cullOff() : null;
     c.render(r.camera);
+    if (all) {
+      for (const o of all) o.frustumCulled = true;
+      warmAll = false;
+    }
     if (was) {
       for (const [i, o] of deferred.entries()) o.visible = was[i];
       warmFrames--;
@@ -215,6 +237,24 @@ async function boot() {
   // 而场景是后处理管线自己的 pass 画的（格式、多重采样都不一样），编出来的管线用不上，所以和预热一样真画一帧。
   // 这一帧画在开场遮罩后面，玩家看不见；这些物件这时都是透明 / 缩成 0 的，下一帧各模块的 update 再按需要藏起来
   warmFrames = DEFERRED_WARM_FRAMES;
+
+  // 镜头视锥外的物体（别的房间里的物件、家具）也在后台编好：不编的话第三人称第一次飞到肖像、摇椅、八音盒、镜子跟前
+  // 各卡 0.2–0.7 秒（2026-10-28 实测）。不放进上面那次阻塞的预编译：整栋房子一起编，冷启动从约 4 秒变成约 9 秒。
+  // 编给后处理的场景 pass；compileAsync 逐个物体让出主线程，开场画面照常动，玩家读标题、看开场镜头的这几秒里编完
+  // 延后编译的物件（镜中人脸、肖像的地上印子、粒子）也一起：上面那几帧暖机只画得到视锥里的，别的房间的照样会卡。
+  // precompileAll 在调用的这一下就把要编的物体收集完了，调用一返回就能把它们藏回去
+  const t0 = performance.now();
+  const deferredVisible = deferred.map((o) => o.visible);
+  for (const o of deferred) o.visible = true;
+  const precompiled = c.precompileAll(r.camera);
+  for (const [i, o] of deferred.entries()) o.visible = deferredVisible[i];
+  precompiled.then(
+    () => {
+      warmAll = true;
+      if (new URLSearchParams(location.search).has('debug')) console.info(`[boot] 后台预编译完成 ${Math.round(performance.now() - t0)} ms`);
+    },
+    (err) => console.warn('[boot] 后台预编译失败，改为边画边编', err),
+  );
 }
 
 // 渲染器建好之后的任何一步抛错（某些浏览器 / 显卡不支持某个节点等），都要告诉玩家，而不是让开场按钮永远停在加载中

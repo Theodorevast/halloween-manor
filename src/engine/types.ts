@@ -58,6 +58,11 @@ export interface RenderCore {
   resize(w: number, h: number): void;
   /** 每帧调一次：有后处理时走后处理，否则直接渲染 */
   render(camera: THREE.Camera): void;
+  /**
+   * 在后台把场景里所有可见物体的渲染管线编好，包括镜头视锥外的（别的房间）。编给后处理场景 pass 的渲染目标
+   * （格式和画布不同，编给画布的管线用不上）。three 的 compileAsync 逐个物体让出主线程，画面照常动；返回编完的 Promise
+   */
+  precompileAll(camera: THREE.Camera): Promise<void>;
   /** 后处理特效的触发口 */
   fx: {
     /** 暗角泛起一圈颜色再退去（吓跑瞬间用暗红） */

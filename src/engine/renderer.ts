@@ -137,6 +137,26 @@ export async function createRenderCore(canvas: HTMLCanvasElement, opts: RenderCo
       else renderer.render(scene, camera);
       if (gpuOn()) trackGpu();
     },
+    precompileAll(camera) {
+      // compileAsync 只收集视锥里的物体（_projectObject 做了视锥剔除）：临时关掉剔除。它的同步部分（收集物体、
+      // 定下渲染目标）在这次调用里就做完了，之后才逐个异步编，所以调用一返回就能把剔除和渲染目标恢复
+      const culled: THREE.Object3D[] = [];
+      scene.traverse((o) => {
+        if (o.frustumCulled) {
+          culled.push(o);
+          o.frustumCulled = false;
+        }
+      });
+      const prev = renderer.getRenderTarget();
+      try {
+        const target = post?.sceneTarget(camera);
+        if (target) renderer.setRenderTarget(target);
+        return renderer.compileAsync(scene, camera);
+      } finally {
+        renderer.setRenderTarget(prev);
+        for (const o of culled) o.frustumCulled = true;
+      }
+    },
     gpuTime(reset = false) {
       if (!gpuOn()) return null;
       const r = { ms: gpu.frames > 0 ? gpu.ms / gpu.frames : 0, frames: gpu.frames };

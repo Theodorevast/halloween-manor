@@ -137,6 +137,8 @@ export interface PostFx {
   /** 调试：切换各效果（重建管线） */
   setFlags(f: Partial<FxFlags>): void;
   readonly flags: Readonly<FxFlags>;
+  /** 场景 pass 的渲染目标（按这个镜头建好管线）：后台预编译要编给它，见 RenderCore.precompileAll */
+  sceneTarget(camera: THREE.Camera): THREE.RenderTarget;
   /** 调试：颗粒花样不再变化（A/B 截图做差时用） */
   freezeGrain: boolean;
   /** 调试：临时改 AO 强度（不重建管线，同一帧前后对比用）；null = AO.strength */
@@ -536,6 +538,14 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
     set view(v: number) { uView.value = v; },
     get bloomOn() { return bloomOn; },
     get flags() { return flags; },
+    sceneTarget(camera) {
+      if (!built || built.camera !== camera) {
+        disposeBuilt();
+        built = build(camera);
+        lastDpr = -1;
+      }
+      return built.scenePass.renderTarget;
+    },
     render(camera) {
       const now = performance.now();
       const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
