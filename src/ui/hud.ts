@@ -73,6 +73,7 @@ const TEMPLATE = `
   <p class="hud-counter" aria-live="polite"><span class="hud-counter-label"></span><span class="hud-counter-n"></span></p>
   <ol class="hud-ticker" role="log"></ol>
   <div class="hud-aim" aria-hidden="true"></div>
+  <div class="hud-cool" aria-hidden="true"></div>
   <p class="hud-keys"></p>
   <p class="hud-resume" role="status"></p>
   <div class="hud-controls">
@@ -141,6 +142,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   const left = btn('left'), right = btn('right'), mute = btn('mute'), quality = btn('quality');
   const qualityText = $('.hud-btn-text');
   const aim = $('.hud-aim');
+  const cool = $('.hud-cool');
   const keysHint = $('.hud-keys');
   const resume = $('.hud-resume');
   keysHint.textContent = STRINGS.ghost.controls;
@@ -205,7 +207,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   }
 
   // ── 第三人称：准星、操作提示、「点一下继续」 ─────────────────────
-  const ghost = { active: false, engaged: false, locked: false, pending: false, aiming: false };
+  const ghost = { active: false, engaged: false, locked: false, pending: false, aiming: false, cool: 0 };
   let keysShown = false;
   let keysTimer = 0;
   // toggle 带第二个参数时，类名没变就不写属性，状态变化时整体刷一遍即可
@@ -214,6 +216,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     left.hidden = right.hidden = ghost.active;
     aim.classList.toggle('is-on', live && ghost.locked);
     aim.classList.toggle('is-aiming', live && ghost.locked && ghost.aiming);
+    cool.classList.toggle('is-on', live && ghost.locked && ghost.cool > 0);
     resume.classList.toggle('is-on', live && ghost.engaged && !ghost.locked && !ghost.pending);
   }
   // 操作提示一页只出现一次：重新锁定指针时不再出来
@@ -226,11 +229,16 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     }, KEYS_DELAY * 1000);
   }
   const unwatchGhost = watchGhostUi((s) => {
+    // 能操控鬼魂（第三人称）时开场提示多一句：访客只看得见手电照着的东西
+    if (s.active !== ghost.active) hint.textContent = s.active ? `${STRINGS.start.hint} ${STRINGS.start.ghostHint}` : STRINGS.start.hint;
     ghost.active = s.active;
     ghost.engaged = s.engaged;
     ghost.locked = s.locked;
     ghost.pending = s.pending;
     ghost.aiming = s.aim !== null;
+    // 现身的冷却环：剩多少画多少（一段弧），用完了淡出（淡出时弧停在最后的长度，不跳）
+    if (s.manifestCooldown > 0) cool.style.setProperty('--cool', s.manifestCooldown.toFixed(3));
+    ghost.cool = s.manifestCooldown;
     showKeysOnce();
     refreshGhost();
   });

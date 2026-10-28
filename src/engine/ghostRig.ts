@@ -220,9 +220,11 @@ export interface GhostUi {
   pending: boolean;
   /** 准星此刻对着哪个够得着的物件（picking.ts 写） */
   aim: string | null;
+  /** 现身的冷却还剩多少（0..1，1 = 刚用、0 = 可以再用；main.ts 每帧按模拟写）：准星外面那圈很淡的环 */
+  manifestCooldown: number;
 }
 
-const ui: GhostUi = { active: false, engaged: false, locked: false, pending: false, aim: null };
+const ui: GhostUi = { active: false, engaged: false, locked: false, pending: false, aim: null, manifestCooldown: 0 };
 const uiCbs = new Set<(s: Readonly<GhostUi>) => void>();
 
 /** 订阅第三人称的界面状态：注册时先按当前值回调一次，之后每次变化回调；返回取消订阅的函数 */
@@ -277,6 +279,10 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   let followX = ghost.x, followZ = ghost.z;
   const followV = [0, 0];
   let clock = 0;
+  /** 浮动的相位（秒）：定住时不走，浮动停在那一刻的高度 */
+  let bobClock = 0;
+  /** 现身的蓄力和停留期间定住（pin） */
+  let pinned = false;
   let trauma = 0;
   let intro: { t: number; dur: number } | null = null;
   /** 镜头位置（房屋米坐标），调试口和 viewDir 用 */
@@ -334,9 +340,13 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
     ['KeyW', [1, 0]], ['ArrowUp', [1, 0]], ['KeyS', [-1, 0]], ['ArrowDown', [-1, 0]], ['KeyA', [0, -1]], ['KeyD', [0, 1]],
   ]);
   const TURN = new Map<string, number>([['ArrowLeft', -1], ['ArrowRight', 1]]);
+  /** 现身（右键或 F）：只在操控鬼魂时算，没锁定时那一下是「点一下继续」 */
+  const manifestCbs: (() => void)[] = [];
+  const manifest = () => { for (const cb of manifestCbs) cb(); };
   addEventListener('keydown', (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return; // 浏览器快捷键，松开时可能收不到 keyup
     if (MOVE.has(e.code) || TURN.has(e.code)) held.add(e.code);
+    if (e.code === 'KeyF' && !e.repeat && controlling()) manifest();
   });
   addEventListener('keyup', (e) => { held.delete(e.code); });
   // 切走窗口时 keyup 收不到：全部松开，鬼魂不会自己一直飘
@@ -373,9 +383,15 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   document.addEventListener('pointerlockchange', settle);
   document.addEventListener('pointerlockerror', settle);
   canvas.addEventListener('pointerdown', (e) => {
+    if (e.button === 2 && controlling()) {
+      manifest();
+      return;
+    }
     if (e.button !== 0 || !engaged || controlling()) return;
     requestLock();
   });
+  // 右键是现身：画布上不弹浏览器菜单（没锁定时也不弹，免得点一下继续时误开）
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   document.addEventListener('mousemove', (e) => {
     if (!controlling()) return;
@@ -420,12 +436,12 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
       clock += dt;
       const calm = reduced();
 
-      // 按键：开场之前不动（开场遮罩后面的鬼魂停在起点）
+      // 按键：开场之前不动（开场遮罩后面的鬼魂停在起点）；现身期间定住，只能转视角
       let fwd = 0, side = 0, turn = 0;
       if (engaged) {
         for (const code of held) {
           const m = MOVE.get(code);
-          if (m) { fwd += m[0]; side += m[1]; }
+          if (m && !pinned) { fwd += m[0]; side += m[1]; }
           turn += TURN.get(code) ?? 0;
         }
       }
@@ -447,13 +463,18 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
       const kMove = 1 - Math.exp(-dt / (n > 0 ? GHOST.accel : GHOST.decel));
       vx += (tx - vx) * kMove;
       vz += (tz - vz) * kMove;
-      if (n === 0 && Math.hypot(vx, vz) < 1e-3) vx = vz = 0;
+      // 定住：立刻停（不滑）。模拟按蓄力开始那一刻的位置结算现身，鬼魂再滑出半米，画面上现身的地方就对不上了
+      if ((n === 0 && Math.hypot(vx, vz) < 1e-3) || pinned) vx = vz = 0;
       ghost.x += vx * dt;
       ghost.z += vz * dt;
       clampToHouse();
       ghost.speed = Math.hypot(vx, vz);
-      ghost.heading = wrapAngle(yaw);
-      ghost.y = GHOST.height + (calm ? 0 : GHOST.bob * Math.sin((clock / GHOST.bobPeriod) * TAU));
+      // 定住时身体朝向也停住（现身时鬼魂不动），视角照常转，镜头绕着它看；放开后身体再转回视角的方向
+      if (!pinned) {
+        ghost.heading = wrapAngle(yaw);
+        bobClock += dt;
+      }
+      ghost.y = GHOST.height + (calm ? 0 : GHOST.bob * Math.sin((bobClock / GHOST.bobPeriod) * TAU));
       ghost.inWall = inWallAt(ghost.x, ghost.z, GHOST.radius);
 
       // 镜头：跟随点用临界阻尼弹簧追鬼魂（不含浮动），开场时吊臂先长一截再缓缓收回
@@ -489,6 +510,12 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
       // 必须同步调：浏览器只认用户手势调用栈里的请求
       requestLock();
       publish();
+    },
+    onManifest(cb) {
+      manifestCbs.push(cb);
+    },
+    pin(on) {
+      pinned = on;
     },
   };
 

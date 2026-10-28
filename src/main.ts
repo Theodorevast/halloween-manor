@@ -3,16 +3,17 @@
 import './styles.css';
 import { createAudio, type AudioSys } from './audio/engine';
 import { STRINGS } from './config/strings';
+import { MANIFEST } from './config/visitors';
 import { installDebug } from './debug';
 import { createCameraRig } from './engine/camera';
-import { createGhostRig } from './engine/ghostRig';
+import { createGhostRig, setGhostUi } from './engine/ghostRig';
 import { createCinematic, type Cinematic } from './engine/cinematic';
 import { createJuice } from './engine/juice';
 import { createPicker } from './engine/picking';
 import { createRenderCore, watchFrameTime } from './engine/renderer';
 import { isGhostRig, type CameraRig, type FrameCtx, type Module, type Quality, type RenderCore } from './engine/types';
 import type { Object3D } from 'three/webgpu';
-import type { SimEvent } from './sim/types';
+import type { ManifestState, SimEvent } from './sim/types';
 import { createWorld } from './sim/world';
 import { createHud } from './ui/hud';
 import { createCharactersView } from './view/characters';
@@ -85,6 +86,9 @@ const control = { timeScale: 1 };
 const dispatch = (evs: SimEvent[]) => {
   for (const e of evs) for (const m of modules) m.onEvent?.(e, world.state);
 };
+/** 现身的冷却还剩多少（0..1）给准星外面的环：正在现身时算满，冷却中按剩下的秒数；取到 1/100，界面不用每帧都改 */
+const manifestLeft = (m: ManifestState) =>
+  m.phase === 'windup' || m.phase === 'hold' ? 1 : m.phase === 'cooldown' ? Math.ceil((m.cooldown / MANIFEST.cooldown) * 100) / 100 : 0;
 
 function begin(): boolean {
   if (wantBegin) return true;
@@ -161,6 +165,9 @@ async function boot() {
     overlays.setHover(id);
   });
   picker.onPick((id) => { if (started) world.trigger(id); });
+  // 第三人称：按住设机关；右键或 F 现身（冷却中、正在现身时模拟自己不理）
+  picker.onArm((id) => { if (started) world.arm(id); });
+  if (isGhostRig(r)) r.onManifest(() => { if (started) world.manifest(); });
 
   installDebug({ world, dispatch, control, rig: r, core: c });
 
@@ -208,9 +215,15 @@ async function boot() {
     const dt = Math.min(0.1, (now - last) / 1000);
     last = now;
     time += dt;
-    // 鬼魂位置先交给模拟（贴近发毛），再推进模拟
-    world.setGhost(isGhostRig(r) && started ? { x: r.ghost.x, z: r.ghost.z } : null);
+    // 鬼魂位置先交给模拟（贴近发毛、手电照到、穿墙声），再推进模拟
+    world.setGhost(isGhostRig(r) && started ? { x: r.ghost.x, z: r.ghost.z, inWall: r.ghost.inWall } : null);
     if (started) dispatch(world.step(dt * control.timeScale));
+    // 现身的蓄力和停留期间鬼魂定住（模拟按蓄力开始那一刻的位置结算）；准星外面的冷却环
+    if (isGhostRig(r)) {
+      const m = world.state.manifest;
+      r.pin(m.phase === 'windup' || m.phase === 'hold');
+      setGhostUi({ manifestCooldown: manifestLeft(m) });
+    }
     const ctx: FrameCtx = { dt, time, state: world.state };
     r.update(dt);
     // 第三人称：听者放在镜头处（房屋米坐标 = 世界坐标 − houseRoot 的偏移；houseRoot 只平移不旋转），

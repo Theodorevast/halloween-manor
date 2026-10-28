@@ -9,6 +9,8 @@ export const STRINGS = {
     /** 渲染器和模型还在加载时，开场按钮上的文案 */
     loading: 'Lighting the candles…',
     hint: 'Possess objects to scare the visitors out the front door.',
+    /** 第三人称（能操控鬼魂）时接在 hint 后面 */
+    ghostHint: 'They only see what their flashlight shows.',
   },
   counter: (n: number) => `Scared off tonight: ${n}`,
   buttons: {
@@ -24,7 +26,7 @@ export const STRINGS = {
   /** 第三人称（有鼠标的设备，engine/ghostRig.ts） */
   ghost: {
     /** 开场后在画面下方停几秒的操作说明，只出现一次 */
-    controls: 'WASD drift · Mouse look · Click to possess · Wheel zoom',
+    controls: 'WASD drift · Mouse look · Click to possess · Hold to set a trap · Right-click or F to appear',
     /** 丢了指针锁定（按了 Esc、切走了窗口）：点一下继续 */
     resume: 'Click to resume',
   },

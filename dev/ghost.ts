@@ -75,6 +75,8 @@ function makeRig(): GhostRig {
     quarter: 0,
     viewDir: { x: Math.SQRT1_2, z: Math.SQRT1_2 },
     lockPointer() {},
+    onManifest() {},
+    pin() {},
     rotate() {},
     zoom(f) { opt.dist = Math.min(4, Math.max(1, opt.dist / f)); },
     shake() {},

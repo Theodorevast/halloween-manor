@@ -42,6 +42,10 @@ export interface GhostRig extends CameraRig {
   readonly ghost: GhostState;
   /** 指针锁定后鼠标转向；开场点击时调用（必须在用户手势里） */
   lockPointer(): void;
+  /** 现身：指针锁定时按右键或 F，每按一下回调一次（冷却、能不能现身由模拟判断） */
+  onManifest(cb: () => void): void;
+  /** 定住鬼魂（现身的蓄力和停留期间，main.ts 每帧按模拟设）：按键不再推动，浮动和身体朝向停住；视角、镜头照常转 */
+  pin(on: boolean): void;
 }
 
 export const isGhostRig = (r: CameraRig): r is GhostRig => 'ghost' in r;

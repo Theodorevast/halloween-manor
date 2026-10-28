@@ -709,13 +709,38 @@ body {
   transform: none;
 }
 
+/* 现身的冷却环（2026-10-29）：准星外面一圈很淡的细弧，剩多少冷却画多少（从正上方起，顺时针），冷却完慢慢淡出 */
+.hud-cool {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 50%;
+  background: conic-gradient(rgba(220, 210, 189, 0.3) calc(var(--cool, 0) * 360deg), transparent 0);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 1.6px), #000 calc(100% - 1px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 1.6px), #000 calc(100% - 1px));
+  opacity: 0;
+  transition: opacity 0.8s ease;
+  pointer-events: none;
+}
+
+.hud-cool.is-on {
+  opacity: 1;
+}
+
 .hud-keys {
   position: absolute;
   left: 50%;
   bottom: max(30px, env(safe-area-inset-bottom));
   margin: 0;
   transform: translateX(-50%);
-  white-space: nowrap;
+  /* 操作说明有五项：窄窗口里在「·」处折成均匀的两行，不出屏 */
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  text-align: center;
+  text-wrap: balance;
   font-variant-caps: all-small-caps;
   letter-spacing: 0.13em;
   font-size: 1.05rem;
