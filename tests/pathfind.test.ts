@@ -158,7 +158,8 @@ describe('findPath', () => {
 describe('findPath：绕开现身的地方（avoid，圆里的格子代价 × AVOID_COST）', () => {
   // 门厅：5 米 × 4 米，中间放一个半径 1 米的圈，圈上下各剩 1 米能走
   const from = { x: 6, z: 9.5 }, to = { x: 10, z: 9.5 };
-  const zone = { pos: { x: 8, z: 9.5 }, r: 1, until: 10 };
+  // findPath 不看 who：谁绕哪个圈由访客那边挑（npc.ts 的 zonesOf），传进来的就都绕
+  const zone = { pos: { x: 8, z: 9.5 }, r: 1, until: 10, who: [] };
   const closest = (pts: Vec2[]) => Math.min(...pts.map((p) => Math.hypot(p.x - zone.pos.x, p.z - zone.pos.z)));
 
   test('能绕就绕：没有圈时直线穿过圈心，有圈时一路都在圈外；过期的圈不算', () => {

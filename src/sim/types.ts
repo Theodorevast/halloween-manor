@@ -106,8 +106,11 @@ export interface ManifestState {
   pos: Vec2 | null;
 }
 
-/** 访客暂时绕开的地方（看见现身以后），寻路时这里的格子代价很高。until 是模拟时刻（和 WorldState.time 同一个钟） */
-export interface AvoidZone { pos: Vec2; r: number; until: number }
+/**
+ * 访客暂时绕开的地方（看见现身以后），寻路时这里的格子代价很高。until 是模拟时刻（和 WorldState.time 同一个钟）。
+ * who：谁绕开——被这一次现身吓到的人（manifest drop 事件的 scared）；没看见的人照常走（用户 2026-10-29 定的）
+ */
+export interface AvoidZone { pos: Vec2; r: number; until: number; who: number[] }
 
 export interface WorldState {
   /** 模拟时间（秒），hit-stop 期间不走 */
@@ -120,7 +123,7 @@ export interface WorldState {
   hitStop: number;
   /** 主动现身：到哪一段了、冷却还剩多久、在哪里现身 */
   manifest: ManifestState;
-  /** 访客暂时绕开的地方（看见现身以后） */
+  /** 访客暂时绕开的地方（看见现身以后）；每个圈只有被那一次吓到的人（who）绕 */
   avoid: AvoidZone[];
 }
 

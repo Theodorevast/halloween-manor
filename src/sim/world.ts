@@ -143,7 +143,7 @@ export function createWorld(opts: WorldOptions): World {
    * - windup：发事件；MANIFEST.noticeRadius 米内的人察觉（kind manifest，隔墙也算：附近的灯在闪），盯着那里直到落下
    * - drop：看得见那里（光锥 + 视线 + MANIFEST.range）的人被吓到：manifestFear × 性格倍率 × 习惯化（按 'manifest' 这一种算），
    *   照常受惊（object = GHOST_SOURCE），僵住结束后后退到离那里至少 MANIFEST.backOff 米；
-   *   有人被吓到就加一个绕开圈（MANIFEST.avoidRadius 米、MANIFEST.avoidTime 秒）
+   *   有人被吓到就加一个绕开圈（MANIFEST.avoidRadius 米、MANIFEST.avoidTime 秒），只有这一次被吓到的人绕它
    * - 停留期间：没被这次吓到、看得见那里的人被定住盯着（不加恐惧值）；end 时放开，发事件
    */
   function stepManifest(events: SimEvent[]) {
@@ -167,7 +167,9 @@ export function createWorld(opts: WorldOptions): World {
         startleWith(n, ctx, GHOST_SOURCE, exposure(n, 'manifest', base[k], state.time), at);
         retreat(n, ctx, at, MANIFEST.backOff);
       });
-      if (seen.length > 0) state.avoid.push({ pos: { ...at }, r: MANIFEST.avoidRadius, until: state.time + MANIFEST.avoidTime });
+      if (seen.length > 0) {
+        state.avoid.push({ pos: { ...at }, r: MANIFEST.avoidRadius, until: state.time + MANIFEST.avoidTime, who: seen.map((n) => n.s.id) });
+      }
     } else if (phase === 'end') {
       for (const n of npcs) n.transfixPos = null;
       events.push({ type: 'manifest', phase: 'end', pos: { ...at }, scared: [] });

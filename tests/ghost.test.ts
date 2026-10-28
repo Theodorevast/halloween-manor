@@ -403,7 +403,7 @@ describe('鬼魂：World', () => {
     expect(average).toEqual({ notices: 0, chills: 0 });
   });
 
-  test('鬼魂穿墙：inWall 由假变真的那一步，3 米内听得见的人察觉（kind sound）、恐惧值 + hearFear × 性格倍率，盯完去查看；4 米外的没有；不发 heard', () => {
+  test('鬼魂穿墙：inWall 由假变真的那一步，3 米内听得见的人察觉（kind sound），盯完去查看，恐惧值不变（hearFear 暂时为 0）；4 米外的没有；不发 heard', () => {
     const w = createWorld({ seed: 85, autoSpawn: false });
     // 门厅北墙（第 14 行）：鬼魂从门厅往北穿进墙里，身体刚碰到墙的那一刻中心还在门厅这一侧
     const wall = { x: 9.5, z: 7.5 };
@@ -418,7 +418,8 @@ describe('鬼魂：World', () => {
     const ev = w.step(DT);
     expect(ofType(ev, 'notice').map((e) => [e.npc, e.kind])).toEqual([[a.id, 'sound']]);
     expect(ofType(ev, 'notice')[0].src).toEqual(wall);
-    expect(a.fear - fa).toBeCloseTo(GHOST.hearFear * PERSONALITIES.average.fearMult, 9);
+    expect(GHOST.hearFear).toBe(0); // 用户 2026-10-29「先不加」
+    expect(a.fear).toBe(fa);
     expect(b.fear).toBe(fb);
     expect(ofType(ev, 'heard')).toEqual([]);
     // 一直在墙里：不再响
@@ -452,10 +453,13 @@ describe('鬼魂：World', () => {
     n.pos.z = p.z;
   };
 
-  test('门框边上 inWall 一秒里由假变真 10 次：附近每人最多察觉一次，恐惧值最多涨一次 hearFear × 性格倍率', () => {
+  test('门框边上 inWall 一秒里由假变真 10 次：附近每人只察觉一次，恐惧值不变', () => {
     const w = createWorld({ seed: 86, autoSpawn: false });
     const a = w.spawn({ pos: FOYER_SPOT, personality: 'average', lookDir: Math.PI / 2 });
     const b = w.spawn({ pos: HALL_SPOT, personality: 'timid', lookDir: Math.PI });
+    // 先有一点恐惧值：刚生成，回落要 FEAR.decayDelay 秒以后才开始，这 1 秒里本来就不变
+    a.fear = 30;
+    b.fear = 30;
     const ev: SimEvent[] = [];
     let inWall = true, edges = 0;
     for (let k = 0; k < 60; k++) {
@@ -469,9 +473,24 @@ describe('鬼魂：World', () => {
     expect(edges).toBe(10);
     for (const n of [a, b]) {
       expect(ofType(ev, 'notice').filter((e) => e.npc === n.id).map((e) => e.kind)).toEqual(['sound']);
-      expect(n.fear).toBeGreaterThan(0);
-      expect(n.fear).toBeLessThanOrEqual(GHOST.hearFear * PERSONALITIES[n.personality].fearMult + 1e-9);
+      expect(n.fear).toBe(30);
     }
+  });
+
+  test('穿墙声不算被吓：恐惧值正在回落的人听见了，照样接着回落', () => {
+    const w = createWorld({ seed: 90, autoSpawn: false });
+    const a = w.spawn({ pos: FOYER_SPOT, personality: 'average', lookDir: Math.PI / 2 });
+    a.fear = 40;
+    drive(w, FEAR.decayDelay + 1, () => null); // 已经回落了 1 秒
+    const f0 = a.fear;
+    expect(f0).toBeLessThan(40);
+    putBack(a, FOYER_SPOT); // 这几秒里他闲逛走开了：请回来，离门框 2.3 米，不会发毛
+    const { ev } = brush(w);
+    expect(soundNotices(ev, a).length).toBe(1);
+    expect(a.fear).toBeLessThan(f0); // 那两步里也在回落
+    const f1 = a.fear;
+    drive(w, 1, () => null);
+    expect(f1 - a.fear).toBeCloseTo(FEAR.decayRate, 6); // 回落没有因为这一声重新计时：1 秒整整落了 decayRate
   });
 
   test('每人听过一次以后 GHOST.hearCooldown 秒内不再算（没听过的人照样算），过了冷却又算', () => {
@@ -492,7 +511,19 @@ describe('鬼魂：World', () => {
     expect(soundNotices(third, c)).toEqual([]);
   });
 
-  test('同一个人反复听见：涨的恐惧值按习惯化减弱（hearFear × 性格倍率 × habituation^n，n 每 habituationRecover 秒恢复 1）', () => {
+  test('以后 hearFear 调上去：反复听见涨的量按习惯化减弱（hearFear × 性格倍率 × habituation^n，n 每 habituationRecover 秒恢复 1）', () => {
+    // 现在 hearFear 是 0（用户定的先不加），这里临时调成 3（lane S 用过的值）确认习惯化那条路还通，测完改回去
+    const saved = GHOST.hearFear;
+    GHOST.hearFear = 3;
+    try {
+      reHear();
+    } finally {
+      GHOST.hearFear = saved;
+    }
+  });
+
+  /** 同一个 timid 隔 hearCooldown 秒听三次：每次都察觉，涨的量按习惯化减弱 */
+  function reHear() {
     const w = createWorld({ seed: 88, autoSpawn: false });
     const a = w.spawn({ pos: FOYER_SPOT, personality: 'timid', lookDir: Math.PI / 2 });
     const rises: number[] = [], at: number[] = [];
@@ -516,6 +547,17 @@ describe('鬼魂：World', () => {
     expect(rises[2]).toBeCloseTo(base * FEAR.habituation ** n2, 9);
     expect(rises[1]).toBeLessThan(rises[0]);
     expect(rises[2]).toBeLessThan(rises[1]);
+  }
+
+  test('现在（hearFear = 0）同一个人隔着冷却反复听见：每次都察觉，恐惧值一直不变', () => {
+    const w = createWorld({ seed: 91, autoSpawn: false });
+    const a = w.spawn({ pos: FOYER_SPOT, personality: 'timid', lookDir: Math.PI / 2 });
+    for (let k = 0; k < 3; k++) {
+      putBack(a, FOYER_SPOT);
+      expect(soundNotices(brush(w).ev, a).length).toBe(1);
+      expect(a.fear).toBe(0);
+      drive(w, GHOST.hearCooldown, () => null);
+    }
   });
 
   test('刚出现就在墙里（上一次没有鬼魂）不算穿墙；和声音那边一样，要先在墙外过', () => {

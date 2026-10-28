@@ -9,7 +9,7 @@
 // 发毛不再随机回头张望：进入范围 GHOST.onset 秒内一定察觉一次，贴着发毛到 GHOST.backAt 就后退（retreat）；
 // 鬼魂穿墙的声音也听得见（hearGhost）。
 // 主动现身（设计文档 3.2，world.ts 结算）：蓄力时被定住盯着（transfixPos），被吓到的人僵住结束后后退（retreat），
-// 之后一段时间寻路绕开那里（NpcCtx.avoid，圆里的格子代价高），闲逛也不挑那里的目标
+// 之后一段时间寻路绕开那里（NpcCtx.avoid 里 who 有他的圈，圆里的格子代价高），闲逛也不挑那里的目标；没看见的人照常走
 import { CELL, cellCenter, cellOf, FRONT_DOOR, GRID_H, idx, inGrid, ROOMS, roomAt, Tile } from '../config/house';
 import type { RoomId } from '../config/house';
 import { BEHAVIOR, CROWD, FEAR, GHOST, MOTION, NOTICE, PERSONALITIES, SPEED, TRAITS } from '../config/visitors';
@@ -124,17 +124,19 @@ export interface NpcCtx {
   ghost: Vec2 | null;
   /**
    * 看见现身以后暂时绕开的圆（WorldState.avoid，until 和 now 同一个钟）：寻路时圆里的格子代价高，闲逛不挑圆里的目标。
-   * 可选只是为了测试里手写的沙盒；不给就是没有
+   * 每个圈只管 who 里的人（被那一次现身吓到的）。可选只是为了测试里手写的沙盒；不给就是没有
    */
   avoid?: readonly AvoidZone[];
 }
 
 /** 寻路要的那一点上下文：要绕开的圆和此刻的时间（都可以没有） */
 type PathCtx = Pick<NpcCtx, 'nav'> & Partial<Pick<NpcCtx, 'avoid' | 'now'>>;
-/** 按 ctx 里要绕开的圆寻路 */
-const pathFor = (ctx: PathCtx, from: Vec2, to: Vec2, grid: Grid = ctx.nav.grid) => findPath(grid, from, to, ctx.avoid ?? [], ctx.now ?? 0);
-/** 这一点在不在 ctx 里某个还没过期的圆里 */
-const avoided = (ctx: PathCtx, p: Vec2) => !!ctx.avoid && ctx.avoid.length > 0 && inZones(ctx.avoid.filter((z) => z.until > (ctx.now ?? 0)), p);
+/** 这个人要绕开的圆：ctx 里 who 有他的那些（被那一次现身吓到的人才绕） */
+const zonesOf = (npc: Npc, ctx: PathCtx): AvoidZone[] => (ctx.avoid ?? []).filter((z) => z.who.includes(npc.s.id));
+/** 这个人从他现在的位置寻路到 to，绕开他要绕的圆 */
+const pathFor = (npc: Npc, ctx: PathCtx, to: Vec2, grid: Grid = ctx.nav.grid) => findPath(grid, npc.s.pos, to, zonesOf(npc, ctx), ctx.now ?? 0);
+/** 这一点在不在他要绕的、还没过期的圆里 */
+const avoided = (npc: Npc, ctx: PathCtx, p: Vec2) => inZones(zonesOf(npc, ctx).filter((z) => z.until > (ctx.now ?? 0)), p);
 
 /** walk = 沿 s.path 走；look = 原地停留（闲逛到达后左右照 / 警觉到达后查看） */
 type Act = 'walk' | 'look';
@@ -417,7 +419,8 @@ export function hear(npc: Npc, ctx: NpcCtx, amount: number, source: Vec2, event:
 /** hear / hearGhost 的共同部分：event 为 null 时不发事件 */
 function listen(npc: Npc, ctx: NpcCtx, amount: number, source: Vec2, event: SimEvent | null) {
   const s = npc.s;
-  addFear(npc, amount, ctx.now);
+  // 一点没涨（穿墙声暂时 GHOST.hearFear = 0）就不算被吓：只察觉、回头，恐惧值照常回落
+  addFear(npc, amount, ctx.now, amount > 0);
   if (event) ctx.events.push(event);
   if (s.fear >= FEAR.max) {
     beginFlee(npc, ctx);
@@ -613,7 +616,8 @@ export function feelGhost(npc: Npc, ctx: NpcCtx): void {
 }
 
 /**
- * 听到鬼魂穿墙的声音（hearGhostWall 过了每人的冷却、算好习惯化以后调）：恐惧值涨 amount（算「被吓」，回落重新计时），
+ * 听到鬼魂穿墙的声音（hearGhostWall 过了每人的冷却、算好习惯化以后调）：恐惧值涨 amount（涨了才算「被吓」、回落重新计时；
+ * GHOST.hearFear 暂时为 0，只察觉），
  * 其余和 hear 一样：先察觉那一拍（kind sound，来源是穿墙的地方），盯完走过去查看；受惊中只改恢复目标。
  * 不发 heard 事件：heard 的 object 是物件 id，界面的滚动提示会按它查物件名
  */
@@ -818,8 +822,8 @@ export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'> & Partial
     if (pool.length === 0) continue;
     const [i, j] = ctx.rng.pick(pool);
     const goal = cellCenter(i, j);
-    if (avoided(ctx, goal)) continue;
-    const path = pathFor(ctx, s.pos, goal);
+    if (avoided(npc, ctx, goal)) continue;
+    const path = pathFor(npc, ctx, goal);
     if (path && path.length > 0) {
       setPath(npc, path);
       npc.act = 'walk';
@@ -831,7 +835,7 @@ export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'> & Partial
 
 /** 测试和调试用（world.spawn 的 goal）：转入闲逛，寻路走到 goal，到了再左右照。到不了返回 false（原状态不变） */
 export function walkTo(npc: Npc, ctx: PathCtx, goal: Vec2): boolean {
-  const path = pathFor(ctx, npc.s.pos, goal);
+  const path = pathFor(npc, ctx, goal);
   if (!path || path.length === 0) return false;
   npc.s.mode = 'wander';
   npc.s.modeTime = 0;
@@ -877,7 +881,7 @@ function beginAlert(npc: Npc, ctx: NpcCtx, source: Vec2) {
   s.modeTime = 0;
   npc.source = { x: source.x, z: source.z };
   npc.retreatFrom = null;
-  const path = alertPath(ctx.nav.grid, s.pos, source, TRAITS[s.personality].investigateDist, ctx.avoid ?? [], ctx.now);
+  const path = alertPath(ctx.nav.grid, s.pos, source, TRAITS[s.personality].investigateDist, zonesOf(npc, ctx), ctx.now);
   if (path && path.length > 0) {
     setPath(npc, path);
     npc.act = 'walk';
@@ -942,7 +946,7 @@ function beginFlee(npc: Npc, ctx: NpcCtx) {
   npc.retreatFrom = null;
   clearNotice(npc);
   const [i, j] = cellOf(s.pos.x, s.pos.z);
-  const path = inGrid(i, j) ? pathFor(ctx, s.pos, DOOR_POINT) ?? [{ ...DOOR_POINT }] : [];
+  const path = inGrid(i, j) ? pathFor(npc, ctx, DOOR_POINT) ?? [{ ...DOOR_POINT }] : [];
   path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
   setPath(npc, path);
   ctx.events.push({ type: 'flee', npc: s.id });
@@ -1242,7 +1246,7 @@ function reroute(npc: Npc, ctx: NpcCtx): boolean {
   const [ci, cj] = cellOf(s.pos.x, s.pos.z);
   if (!inGrid(ci, cj) || s.path.length === 0) return false;
   const fleeing = s.mode === 'fleeing';
-  const path = pathFor(ctx, s.pos, fleeing ? DOOR_POINT : s.path[s.path.length - 1]);
+  const path = pathFor(npc, ctx, fleeing ? DOOR_POINT : s.path[s.path.length - 1]);
   if (!path || path.length === 0) return false;
   if (fleeing) path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
   s.path = path;
@@ -1552,7 +1556,7 @@ function replan(npc: Npc, ctx: NpcCtx): boolean {
       }
     }
   }
-  const path = pathFor(ctx, s.pos, goal, new Grid(tiles));
+  const path = pathFor(npc, ctx, goal, new Grid(tiles));
   if (!path || path.length === 0) return false;
   if (fleeing) path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
   setPath(npc, path);

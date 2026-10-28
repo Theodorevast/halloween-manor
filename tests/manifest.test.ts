@@ -4,6 +4,9 @@
 import { describe, expect, test } from 'vitest';
 import { createWorld } from '../src/sim/world';
 import { Grid } from '../src/sim/grid';
+import { createNav, createNpc, walkTo } from '../src/sim/npc';
+import type { NpcCtx } from '../src/sim/npc';
+import { createRng } from '../src/sim/rng';
 import { MANIFEST, PERSONALITIES, VISION } from '../src/config/visitors';
 import { angleOf, wrapAngle } from '../src/lib/angle';
 import { GHOST_SOURCE } from '../src/sim/types';
@@ -203,7 +206,7 @@ describe('主动现身（吓人、赶人）', () => {
     w.manifest();
     const drop = until(w, 'drop');
     expect(ofType(drop.ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([a.id]);
-    expect(w.state.avoid).toEqual([{ pos: G, r: MANIFEST.avoidRadius, until: expect.closeTo(drop.at + MANIFEST.avoidTime, 6) }]);
+    expect(w.state.avoid).toEqual([{ pos: G, r: MANIFEST.avoidRadius, until: expect.closeTo(drop.at + MANIFEST.avoidTime, 6), who: [a.id] }]);
     let moved = false;
     for (let k = 0; k < Math.round(2 / DT); k++) {
       w.step(DT);
@@ -256,5 +259,48 @@ describe('主动现身（吓人、赶人）', () => {
     w2.manifest();
     until(w2, 'drop');
     expect(t.mode).toBe('fleeing');
+  });
+});
+
+describe('绕开圈只管被吓到的人（用户 2026-10-29）', () => {
+  const G = { x: 8, z: 9.5 };
+  const bearingTo2 = (from: Vec2, to: Vec2) => angleOf(to.x - from.x, to.z - from.z);
+
+  test('落下时一个看着、一个背对着：圈里只记被吓到的那个（和 drop 的 scared 一样）', () => {
+    const w = createWorld({ seed: 120, autoSpawn: false });
+    const a = w.spawn({ pos: { x: G.x - 2, z: G.z }, personality: 'average', lookDir: 0 });
+    const b = w.spawn({ pos: { x: G.x, z: G.z - 5.5 }, personality: 'average', lookDir: -Math.PI / 2 });
+    w.setGhost(G);
+    w.manifest();
+    let drop: Extract<SimEvent, { type: 'manifest' }> | undefined;
+    for (let k = 0; k < 60 && !drop; k++) {
+      b.lookDir = -Math.PI / 2; // 一直背对着
+      drop = ofType(w.step(DT), 'manifest').find((e) => e.phase === 'drop');
+    }
+    expect(drop!.scared).toEqual([a.id]);
+    expect(w.state.avoid.map((z) => z.who)).toEqual([[a.id]]);
+    expect(bearingTo2(a.pos, G)).toBeCloseTo(0, 6);
+  });
+
+  test('同一个地方、同一个目的地：被吓到的人绕开圈走，没看见的人照常直着走过去', () => {
+    // 门厅：圈心 (8, 9.5)、半径 1 米，圈上下各剩 1 米能走；两个人都从圈西边走到圈东边
+    const nav = createNav(new Grid());
+    const from = { x: 6, z: 9.5 }, to = { x: 10, z: 9.5 };
+    const zone = { pos: G, r: 1, until: 10, who: [1] };
+    const ctx = { nav, rng: createRng(1), now: 5, avoid: [zone] } as unknown as NpcCtx;
+    const scared = createNpc({ id: 1, name: 'A', personality: 'average', pos: from, lookDir: 0, mode: 'wander', now: 0 }, { rng: createRng(1), nav });
+    const other = createNpc({ id: 2, name: 'B', personality: 'average', pos: from, lookDir: 0, mode: 'wander', now: 0 }, { rng: createRng(1), nav });
+    expect(walkTo(scared, ctx, to)).toBe(true);
+    expect(walkTo(other, ctx, to)).toBe(true);
+    const closest = (path: Vec2[]) => {
+      let m = Infinity, a = from;
+      for (const q of path) {
+        for (let t = 0; t <= 1; t += 0.02) m = Math.min(m, dist({ x: a.x + (q.x - a.x) * t, z: a.z + (q.z - a.z) * t }, G));
+        a = q;
+      }
+      return m;
+    };
+    expect(closest(scared.s.path)).toBeGreaterThanOrEqual(zone.r - 1e-6);
+    expect(closest(other.s.path)).toBeLessThan(0.1);
   });
 });

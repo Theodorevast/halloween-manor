@@ -141,6 +141,7 @@ function margins(): string[] {
     ['鬼魂 3 第三人称中位存活 ≥ 45 s', life(skilledReach), '≥', LIFE.min],
     ['现身 只靠现身单个 brave 5 分钟内吓跑（局）', manifestLone.filter((r) => r.exits === 1).length, '≥', LONE_SEEDS.length],
     ['现身 只靠现身中位 > 附身加现身中位（s）', manifestLife(manifestLone), '>', manifestLife(skilledManifestLone)],
+    ['现身 只靠现身中位 / 附身加现身中位（倍）', manifestLife(manifestLone) / manifestLife(skilledManifestLone), '>', 1],
   ];
   return [
     'margins:',
