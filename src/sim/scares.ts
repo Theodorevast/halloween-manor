@@ -1,4 +1,5 @@
 // 可附身物件的运行时：冷却、生效窗口、被破坏 / 复原。生效（谁被吓到）由 world.ts 结合感知来算。
+// 机关（设下、等时机触发）见 traps.ts；它触发时也走 triggerObject，只是恐惧值打折（fearMult）。
 import { PROPS, propCenter } from '../config/house';
 import { SCARES } from '../config/scares';
 import type { ScareSpec } from '../config/scares';
@@ -14,6 +15,10 @@ export interface ScareObject {
   readonly scared: Set<number>;
   /** 引诱类刚被触发，下一步结算谁听见 */
   pendingLure: boolean;
+  /** 这一次触发的恐惧值倍数：玩家附身是 1，机关触发是 TRAP.fearMult（world.ts 结算 startle / 引诱时乘上） */
+  fearMult: number;
+  /** 机关等时机：从什么时候开始等、等的是谁（有人进了范围、还没到最好的时机）；没在等为 null（见 traps.ts） */
+  trapWait: { since: number; npc: number } | null;
 }
 
 export function createScareObjects(): ScareObject[] {
@@ -32,13 +37,21 @@ export function createScareObjects(): ScareObject[] {
     spec: SCARES[p.type],
     scared: new Set<number>(),
     pendingLure: false,
+    fearMult: 1,
+    trapWait: null,
   }));
 }
 
-/** 附身。冷却中返回 false；否则设冷却、生效窗口（惊吓类再设被破坏时长），返回 true */
-export function triggerObject(o: ScareObject): boolean {
+/**
+ * 附身。冷却中返回 false；否则设冷却、生效窗口（惊吓类再设被破坏时长），返回 true。
+ * fearMult：这一次的恐惧值倍数（机关触发时 TRAP.fearMult）。设下的机关跟着作废（玩家直接附身了它也算）
+ */
+export function triggerObject(o: ScareObject, fearMult = 1): boolean {
   const s = o.state;
   if (s.cooldown > 0) return false;
+  s.armed = 0;
+  o.trapWait = null;
+  o.fearMult = fearMult;
   s.cooldown = o.spec.cooldown;
   s.active = o.spec.active;
   if (o.spec.kind === 'sight' && o.spec.broken > 0) s.broken = o.spec.broken;

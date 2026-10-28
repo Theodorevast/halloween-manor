@@ -1,10 +1,11 @@
 // 把格子、感知、物件、访客状态机、生成器组合成一个 World。集成阶段只用 createWorld。
-// 每一步（1/60 秒）的顺序：过期的绕开圈 → 引诱结算 → 惊吓结算 → 主动现身（蓄力察觉 / 落下吓人 / 停留定住 / 收回）→ 尖叫传染 →
+// 每一步（1/60 秒）的顺序：过期的绕开圈 → 机关（到时机就触发，和玩家点一下一样）→ 引诱结算 → 惊吓结算 →
+// 主动现身（蓄力察觉 / 落下吓人 / 停留定住 / 收回）→ 尖叫传染 →
 // 鬼魂穿墙声 → 鬼魂贴近（发毛、察觉、后退、后颈一凉）→ 尖叫传染 →
 // 访客状态机（移动、互相避让）→ 兜底推开挤在一起的人 → 物件计时 → 时间前进 → 生成 → 移除离开的 → 手电照到鬼魂 → seenBy。
 // 先结算惊吓再移动：玩家点下去的那一刻，看着物件的人就会被吓到，不会因为同一步里转开了而落空。
 import { FRONT_DOOR } from '../config/house';
-import { FEAR, GHOST, HIT_STOP, MANIFEST, VISION } from '../config/visitors';
+import { FEAR, GHOST, HIT_STOP, MANIFEST, TRAP, VISION } from '../config/visitors';
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
 import { createManifest, idleManifest, manifestFear } from './manifest';
@@ -13,6 +14,8 @@ import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
 import { createScareObjects, facesToward, tickObject, triggerObject, windingUp } from './scares';
+import type { ScareObject } from './scares';
+import { armTrap, startledByWindup, tickTraps, trapKind } from './traps';
 import { pickName, pickPersonality, Spawner } from './spawner';
 import { GHOST_SOURCE } from './types';
 import type { GhostInput, NpcState, SimEvent, SpawnOptions, Vec2, World, WorldOptions, WorldState } from './types';
@@ -77,6 +80,18 @@ export function createWorld(opts: WorldOptions): World {
   };
 
   const inHouse = () => npcs.reduce((c, n) => c + (canBeScared(n) ? 1 : 0), 0);
+
+  /**
+   * 机关到了时机：和玩家点一下一样附身（恐惧值 × TRAP.fearMult），发 trap sprung + trigger。
+   * 背后型：蓄势的声音让附近听得见、还没看着它的人察觉（kind sound）、回头——回过头来看见了，照常被吓到
+   */
+  function fireTrap(o: ScareObject) {
+    if (!triggerObject(o, TRAP.fearMult)) return;
+    ctx.events.push({ type: 'trap', object: o.state.id, phase: 'sprung' });
+    ctx.events.push({ type: 'trigger', object: o.state.id, scareType: o.state.type });
+    if (trapKind(o) !== 'behind') return;
+    for (const n of npcs) if (startledByWindup(o, n, grid)) notice(n, ctx, 'sound', o.state.pos);
+  }
 
   function addNpc(o: SpawnOptions, events: SimEvent[]): NpcState {
     const personality = o.personality ?? pickPersonality(rng);
@@ -168,6 +183,8 @@ export function createWorld(opts: WorldOptions): World {
     screamQueue.length = 0;
     // 看见现身以后的绕开圈：到期就去掉（原地删，ctx.avoid 是同一个数组）
     for (let k = state.avoid.length - 1; k >= 0; k--) if (state.avoid[k].until <= state.time + EPS) state.avoid.splice(k, 1);
+    // 机关：在引诱、惊吓结算之前触发，这一步就照常结算（和玩家在这一步之前点了一下一样）
+    tickTraps(objects, npcs, grid, state.time, SIM_DT, fireTrap, events);
     // 尖叫倒计时放在最前面：这一步新开始的尖叫，步末仍是完整的 FEAR.screamTime
     for (const n of npcs) n.s.screaming = Math.max(0, n.s.screaming - SIM_DT);
 
@@ -177,7 +194,7 @@ export function createWorld(opts: WorldOptions): World {
       o.pendingLure = false;
       for (const n of npcs) {
         if (!canBeScared(n) || !canHear(grid, n.s.pos, o.state.pos, o.spec.range)) continue;
-        const amount = exposure(n, o.state.type, o.spec.fear, state.time);
+        const amount = exposure(n, o.state.type, o.spec.fear * o.fearMult, state.time);
         hear(n, ctx, amount, o.state.pos, { type: 'heard', npc: n.s.id, object: o.state.id });
       }
     }
@@ -197,7 +214,7 @@ export function createWorld(opts: WorldOptions): World {
         if (!canBeScared(n) || o.scared.has(n.s.id)) continue;
         if (!facesToward(o.state, n.s.pos) || !canSee(grid, n.s, o.state.pos, range)) continue;
         o.scared.add(n.s.id);
-        startle(n, ctx, o.state.id, o.state.type, o.state.pos, o.spec.fear);
+        startle(n, ctx, o.state.id, o.state.type, o.state.pos, o.spec.fear * o.fearMult);
       }
     }
     stepManifest(events);
@@ -288,9 +305,11 @@ export function createWorld(opts: WorldOptions): World {
       return ghost !== null && manifestTl.start(ghost);
     },
 
-    // 设机关：接口先放着，行为后面的任务做（先一律返回 false）
-    arm(_objectId: string): boolean {
-      return false;
+    arm(objectId: string): boolean {
+      const o = byId.get(objectId);
+      if (!o || !armTrap(o, objects.reduce((c, x) => c + (x.state.armed > 0 ? 1 : 0), 0))) return false;
+      pending.push({ type: 'trap', object: o.state.id, phase: 'armed' });
+      return true;
     },
 
     step(dt: number): SimEvent[] {

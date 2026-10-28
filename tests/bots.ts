@@ -5,6 +5,8 @@
 //      途中或查看时会看见一个可用的惊吓物件，就拉响引诱。lureCoverage 统计这在多少位置成立
 //      （旧布局：厨房门 1/231、八音盒 10/86，几乎用不上；现布局见 tests/balance.test.ts 目标 5）
 //   3. 续恐惧：听得见的人已经在害怕、此刻没在警觉 / 受惊，也拉响引诱（恐惧值上涨、回落计时重来）
+//   4. 机关（2026-10-28）：每 TRAP_EVERY 步看一次，设下的不到 TRAP.max 个，就在没人看得见的背后型物件（摇椅、床）里
+//      挑离访客最近的那个设下（TRAP_NEAR 米以内有人才设：等人路过时在他背后发作）
 // - random：每 3 秒随机点一个能附身的物件，不看时机
 // - idle：不附身（只用来看鬼魂单独有多大用）
 // 鬼魂（第三人称改版，opts.ghost = 'hover'）：和上面任何一种叠加。每步把鬼魂飘向最近的访客、贴在他身后 GHOST_BOT.behind 米
@@ -20,10 +22,10 @@ import { canHear, canSee } from '../src/sim/perception';
 import { facesToward } from '../src/sim/scares';
 import { cellCenter, cellOf, FRONT_DOOR, GRID_H, GRID_W } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
-import { BEHAVIOR, TRAITS, VISION } from '../src/config/visitors';
+import { BEHAVIOR, TRAITS, TRAP, VISION } from '../src/config/visitors';
 import { angleOf } from '../src/lib/angle';
 import { GHOST_SOURCE } from '../src/sim/types';
-import type { NpcState, Personality, ScareObjectState, Vec2, World } from '../src/sim/types';
+import type { NpcState, Personality, ScareObjectState, ScareType, Vec2, World } from '../src/sim/types';
 
 export type BotKind = 'skilled' | 'random' | 'idle';
 /** 鬼魂：none = 没有鬼魂（触屏的俯视模式），hover = 鬼魂机器人贴着最近的访客，manifest = 到他面前现身 */
@@ -95,6 +97,15 @@ const SIGHT_EVERY = 15;
 const LURE_EVERY = 60;
 /** 随机机器人每 3 秒点一次 */
 const RANDOM_EVERY = 180;
+/** skilled 每隔多少步考虑一次设机关：2 秒 */
+const TRAP_EVERY = 120;
+/** 离最近的访客多远以内（米）的物件才值得设：太远的等 TRAP.expire 秒也等不来人 */
+const TRAP_NEAR = 8;
+/**
+ * 只设背后型（摇椅、床）：迎面型的机关就是「手电照到它就附身」，这个机器人本来每 0.25 秒就盯着眼睛图标附身了，
+ * 设了也不多吓到谁，反倒让目标 6 统计的附身次数变少；背后型（在他背后发作、他回头）是它自己点不出来的
+ */
+const TRAP_TYPES: ReadonlySet<ScareType> = new Set<ScareType>(['rockingChair', 'bed']);
 /** 听见引诱声后多少秒内被吓到，算作引诱带来的惊吓 */
 const LURE_LED_WINDOW = 8;
 /** 预测路径时每隔多少米检查一次能不能看见惊吓物件 */
@@ -139,6 +150,7 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
     if (kind === 'skilled') {
       if (k % SIGHT_EVERY === 0) fireLitEyes(w, fire, inReach);
       if (k % LURE_EVERY === 0 && lures !== 'none') fireLures(w, lures, fire, inReach);
+      if (k % TRAP_EVERY === 0) armTraps(w, inReach);
     } else if (kind === 'random' && k % RANDOM_EVERY === 0) randomMove(w, rng, fire);
     for (const e of w.step(DT)) {
       if (e.type === 'spawn') {
@@ -338,6 +350,27 @@ export function lureCoverage(objects: readonly ScareObjectState[], g: Grid = gri
     }
     return { id: lure.id, hearing, leads };
   });
+}
+
+/**
+ * 设机关：设下的不到 TRAP.max 个时，在冷却好了、还没设下、此刻没人看得见（眼睛没亮）、够得着的惊吓物件里，
+ * 挑离最近的访客（不算逃跑中的）最近的那个设下，那人得在 TRAP_NEAR 米以内
+ */
+function armTraps(w: World, reach: Reach) {
+  if (w.state.objects.filter((o) => o.armed > 0).length >= TRAP.max) return;
+  const people = w.state.npcs.filter((n) => n.mode !== 'fleeing' && n.mode !== 'gone');
+  let best: ScareObjectState | null = null, bestD = TRAP_NEAR;
+  for (const o of w.state.objects) {
+    if (!TRAP_TYPES.has(o.type) || !ready(o) || o.armed > 0 || o.seenBy.length > 0 || !reach(o)) continue;
+    for (const n of people) {
+      const d = Math.hypot(n.pos.x - o.pos.x, n.pos.z - o.pos.z);
+      if (d < bestD) {
+        bestD = d;
+        best = o;
+      }
+    }
+  }
+  if (best) w.arm(best.id);
 }
 
 function randomMove(w: World, rng: Rng, fire: Fire) {
