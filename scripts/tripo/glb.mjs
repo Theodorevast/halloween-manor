@@ -85,6 +85,24 @@ function readVec3(json, bin, index) {
   return out;
 }
 
+// 3×3 小矩阵（行优先）：节点的旋转 × 缩放、相乘、乘向量
+function trsBasis(node) {
+  if (node.matrix) {
+    const e = node.matrix; // 列优先 4×4
+    return [[e[0], e[4], e[8]], [e[1], e[5], e[9]], [e[2], e[6], e[10]]];
+  }
+  const [x, y, z, w] = node.rotation ?? [0, 0, 0, 1];
+  const [sx, sy, sz] = node.scale ?? [1, 1, 1];
+  const r = [
+    [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+    [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+    [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+  ];
+  return r.map((row) => [row[0] * sx, row[1] * sy, row[2] * sz]);
+}
+const mul3 = (a, b) => a.map((row) => [0, 1, 2].map((j) => row[0] * b[0][j] + row[1] * b[1][j] + row[2] * b[2][j]));
+const apply3 = (m, v) => m.map((row) => row[0] * v[0] + row[1] * v[1] + row[2] * v[2]);
+
 const stripPrefix = (n) => String(n ?? '').replace(/^mixamorig\d*[:_]/i, '');
 const MIXAMO_CORE = ['Hips', 'Spine', 'Neck', 'Head', 'LeftArm', 'RightArm', 'LeftForeArm', 'RightForeArm', 'LeftUpLeg', 'RightUpLeg', 'LeftLeg', 'RightLeg'];
 
@@ -103,6 +121,13 @@ export function inspectGlb(buf) {
   };
   // 父链上的缩放（只取 x 分量，忽略旋转）：用来把不同层级的位移换到同一个尺度上比较
   const chainScale = (i) => ancestors(i).reduce((s, p) => s * Math.abs(nodes[p].scale?.[0] ?? 1), 1);
+  // 节点父链（静止姿势）合起来的旋转 × 缩放：把节点自己的位移换到世界方向（glTF 的 y 朝上）。
+  // Tripo 绑骨的 Root 节点带一个旋转（实测 [-0.5, 0.5, 0.5, 0.5]），Hips 的位移在它里面 z 才是竖直的（2026-10-28）
+  const parentBasis = (i) => {
+    let m = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    for (const p of ancestors(i).reverse()) m = mul3(m, trsBasis(nodes[p]));
+    return m;
+  };
 
   // 三角面：按场景里实际挂着的次数算
   const uses = new Map();
@@ -178,21 +203,23 @@ export function inspectGlb(buf) {
     let ref = null;
     if (hips != null) {
       const hipsChain = new Set([hips, ...ancestors(hips)]);
-      const restY = Math.abs(nodes[hips].translation?.[1] ?? 0) * chainScale(hips);
+      // 胯高：静止姿势下 Hips 在世界里离父链原点的竖直高度（位移换到世界方向再取 y）
+      const restY = Math.abs(apply3(parentBasis(hips), nodes[hips].translation ?? [0, 0, 0])[1]);
       let animY = 0;
       for (const ch of a.channels ?? []) {
         const n = ch.target?.node;
         if (ch.target?.path !== 'translation' || !hipsChain.has(n)) continue;
-        const out = readVec3(json, bin, a.samplers?.[ch.sampler]?.output);
-        if (!out?.length) continue;
-        const s = chainScale(n);
+        const raw = readVec3(json, bin, a.samplers?.[ch.sampler]?.output);
+        if (!raw?.length) continue;
+        const B = parentBasis(n);
+        const out = raw.map((p) => apply3(B, p)); // 世界方向：x、z 水平，y 竖直
         const first = out[0];
         const last = out[out.length - 1];
         const xs = out.map((p) => p[0]);
         const zs = out.map((p) => p[2]);
-        net = Math.max(net ?? 0, Math.hypot(last[0] - first[0], last[2] - first[2]) * s);
-        sway = Math.max(sway ?? 0, Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs)) * s);
-        if (n === hips) animY = Math.max(animY, ...out.map((p) => Math.abs(p[1]) * s));
+        net = Math.max(net ?? 0, Math.hypot(last[0] - first[0], last[2] - first[2]));
+        sway = Math.max(sway ?? 0, Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs)));
+        if (n === hips) animY = Math.max(animY, ...out.map((p) => Math.abs(p[1])));
       }
       ref = restY > 1e-6 ? restY : animY > 1e-6 ? animY : null;
     }

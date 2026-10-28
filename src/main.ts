@@ -246,7 +246,8 @@ async function boot() {
   const t0 = performance.now();
   const deferredVisible = deferred.map((o) => o.visible);
   for (const o of deferred) o.visible = true;
-  const precompiled = c.precompileAll(r.camera);
+  // ?nobgcompile：不做后台预编译（对比卡顿用）
+  const precompiled = new URLSearchParams(location.search).has('nobgcompile') ? Promise.resolve() : c.precompileAll(r.camera);
   for (const [i, o] of deferred.entries()) o.visible = deferredVisible[i];
   precompiled.then(
     () => {

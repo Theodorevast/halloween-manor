@@ -1,0 +1,67 @@
+{
+  "$comment": "由 scripts/tripo/visitors.mjs 生成，重跑 export 会覆盖对应条目。url 相对于 import.meta.env.BASE_URL；clips 的键对应 src/config/character.ts 的 clips，值是 GLB 里的片段原名（null = 没有）",
+  "updatedAt": "2026-10-28T07:49:15.523Z",
+  "visitors": [
+    {
+      "id": "vampire",
+      "label": "维多利亚吸血鬼",
+      "url": "assets/visitors/vampire.glb",
+      "clips": {
+        "idle": "idle",
+        "walk": "walk",
+        "run": "run",
+        "scared": "scared_01"
+      },
+      "clipMatch": "name",
+      "presets": {
+        "idle": "preset:biped:idle",
+        "walk": "preset:biped:walk",
+        "run": "preset:biped:run",
+        "scared": "preset:biped:scared_01"
+      },
+      "stats": {
+        "bytes": 3570160,
+        "triangles": 12247,
+        "textures": [
+          "2048x2048",
+          "2048x2048",
+          "2048x2048"
+        ],
+        "maxTexture": 2048,
+        "compression": "none",
+        "joints": 23,
+        "boneNaming": "mixamo（mixamorig 前缀）",
+        "durations": {
+          "idle": 15.367,
+          "run": 1.267,
+          "scared_01": 3.3,
+          "walk": 2.367
+        }
+      },
+      "game": {
+        "ok": true,
+        "problems": [],
+        "notes": []
+      },
+      "refine": {
+        "from": "assets-src/visitors/vampire/animated.glb",
+        "report": "assets-src/visitors/vampire/refine.json",
+        "sheet": "assets-src/visitors/vampire/refine-preview/vampire-sheet.png",
+        "warnings": []
+      },
+      "source": {
+        "from": "animate + Blender 精修",
+        "tasks": {
+          "costume": "2881387a-b407-4a0c-bad3-b9c97de9b178",
+          "views": "6179b622-af41-4963-b470-79483ba47f96",
+          "model": "86d3c13b-fd21-4d6d-9653-33e0d911e384",
+          "rigcheck": "f4bff957-35ae-4274-a304-8b1c05f5d792",
+          "rig": "973689eb-8a0e-4e4f-b578-52ccd84912cd",
+          "animate": "113a4862-514e-4260-a447-6d9816ae8aec"
+        },
+        "credits": 205,
+        "exportedAt": "2026-10-28T07:49:15.523Z"
+      }
+    }
+  ]
+}

@@ -16,6 +16,13 @@ export interface CharacterSpec {
   /** 走路动画在 1 米/秒时的播放速率，用来让步频和移动速度匹配（按归一化之后的实际大小量，见 dev/characters.html 的 calibrate()） */
   walkRateAt1ms: number;
   runRateAt1ms: number;
+  /**
+   * 量尺寸时先摆成待机片段的第一帧。Tripo 绑骨的模型静止姿势是 T 字，两臂张开把包围盒撑到 1.45 米宽：
+   * 不摆的话 maxLength 会把整个人缩小，手电也会被放到身体侧面很远的地方
+   */
+  measureIdle?: boolean;
+  /** 手电的高度（米，按 targetHeight 的身高）；不写用 FLASHLIGHT_HEIGHT */
+  flashlightHeight?: number;
 }
 
 export const CHARACTER: CharacterSpec = {
@@ -38,7 +45,22 @@ export const CHARACTER: CharacterSpec = {
  * 每个访客进门时按编号轮流分一套，相邻两个人穿得不一样。一个都加载不到时退回上面的 CHARACTER。
  * 片段名照 public/assets/visitors/manifest.json 里的 clips 填；facingOffset 和两个速率用 dev/characters.html 的 calibrate() 量
  */
-export const VISITOR_SPECS: CharacterSpec[] = [];
+export const VISITOR_SPECS: CharacterSpec[] = [
+  {
+    // 维多利亚吸血鬼（2026-10-28：P2 + 四视图 + Blender 精修，12247 三角面）
+    url: `${import.meta.env.BASE_URL}assets/visitors/vampire.glb`,
+    targetHeight: 1.1,
+    maxLength: 1.4,
+    // 下面三个由 dev/characters.html?visitor=vampire 的 __chars.calibrate() 量出（按待机姿势量尺寸、身高 1.1 米）：正面朝 +x（1.566 / 1.575）
+    facingOffset: Math.PI / 2,
+    clips: { idle: 'idle', walk: 'walk', run: 'run', scared: 'scared_01' },
+    walkRateAt1ms: 1.726,
+    runRateAt1ms: 0.552,
+    measureIdle: true,
+    // 球身的手在胯和球心之间：手电拿在球的下半截前面，不是举在胸口
+    flashlightHeight: 0.6,
+  },
+];
 
 /** 手电挂在角色身上的高度（米），按 targetHeight 的身高定；模型因 maxLength 变矮时按比例降低（占位狐狸约 0.52 米） */
 export const FLASHLIGHT_HEIGHT = 0.8;

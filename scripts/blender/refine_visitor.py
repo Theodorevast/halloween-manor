@@ -110,19 +110,30 @@ def analyse_skeleton():
     hips = min((b for b in bones if len(b.children) >= 3), key=lambda b: len(b.parent_recursive), default=None)
     if not hips:
         return None
-    cx = bone_world(hips)[0].x
-    # 脊柱：从 hips 起，每次走向「头最高、又最靠中线」的子骨头（看骨头头部的位置，不看尾巴：导入时尾巴是猜的）
+    h0 = bone_world(hips)[0]
+    # 离中轴线（过 hips、竖直）的水平距离：模型正面朝哪个方向都行（Tripo 的模型实测是侧着的，手臂沿 Blender 的 y 轴）
+    off = lambda p: math.hypot(p.x - h0.x, p.y - h0.y)
+    # 脊柱：从 hips 起，每次走向「头最高、又最靠中轴」的子骨头（看骨头头部的位置，不看尾巴：导入时尾巴是猜的）
     spine = [hips]
     cur = hips
+
+    def score(c):
+        # 按整棵子树打分：子树里最高的点要高、要在中轴上；整棵子树伸得越开扣得越多（只扣一半，脊柱的子树带着两条手臂）。
+        # 脖子和两个肩膀的头可能在同一点（Tripo 的骨架就是），这样才分得出来：脖子往上长，肩膀往两边长
+        heads = [bone_world(b)[0] for b in [c] + descendants(c)]
+        top = max(heads, key=lambda p: p.z)
+        return top.z - 2 * off(top) - 0.5 * max(off(p) for p in heads)
+
     while cur.children:
         z0 = bone_world(cur)[0].z
-        nxt = max(cur.children, key=lambda c: bone_world(c)[0].z - 2 * abs(bone_world(c)[0].x - cx))
-        if bone_world(nxt)[0].z <= z0 + 1e-4 or abs(bone_world(nxt)[0].x - cx) > 0.08 * size:
+        nxt = max(cur.children, key=score)
+        # 再往下走不动：最好的那个也不比现在高，或者偏离中轴（是条腿或肩膀）
+        if bone_world(nxt)[0].z <= z0 - 1e-4 or off(bone_world(nxt)[0]) > 0.08 * size:
             break
         spine.append(nxt)
         cur = nxt
     spine_set = set(b.name for b in spine)
-    hz = bone_world(hips)[0].z
+    hz = h0.z
     legs, arms = [], []
     for s in spine:
         for c in s.children:
@@ -131,7 +142,7 @@ def analyse_skeleton():
             chain = [c] + descendants(c)
             pts = [p for b in chain for p in bone_world(b)]
             lowest = min(p.z for p in pts)
-            side = max(abs(p.x - cx) for p in pts)
+            side = max(off(p) for p in pts)
             if lowest < hz - 0.05 * size:
                 legs.append(chain)
             elif side > 0.15 * size:
@@ -177,20 +188,37 @@ if arm and not A.no_reweight:
             'legs': [[b.name for b in ch] for ch in legs],
             'arms': [[b.name for b in ch] for _, ch in arms_],
             'effectors': sorted(set().union(*(effectors(ch, 'leg') for ch in legs), *(effectors(ch, 'arm') for _, ch in arms_))),
+            # 中轴线（过 hips、竖直）在水平面上的位置：球心应该在它附近
+            'axis': [bone_world(hips)[0].x, bone_world(hips)[0].y],
         }
+        # 正面朝向：脚掌指向脚尖的平均方向（水平），预览图按它摆镜头
+        toes = []
+        for ch in legs:
+            names = [b.name.lower() for b in ch]
+            foot = next((b for b in ch if 'foot' in b.name.lower()), None)
+            toe = next((b for b in ch if 'toe' in b.name.lower()), None)
+            if foot and toe:
+                d = bone_world(toe)[0] - bone_world(foot)[0]
+                toes.append(Vector((d.x, d.y, 0)))
+        if toes:
+            f = sum(toes, Vector()) / len(toes)
+            if f.length > 1e-6:
+                skel['facing'] = list(f.normalized())
         report['skeleton'] = skel
         log(f'骨架：hips={hips.name}，脊柱 {len(spine)} 节，身体跟着 {body_bone.name}，腿 {[len(c) for c in legs]}，手臂 {[len(c) for _, c in arms_]}')
 
 # ---------------------------------------------------------------- 球身拟合（RANSAC：随机四点定球，数贴着球面的点）
 
 
-def fit_sphere(pts, tol, iters=400):
+def fit_sphere(pts, tol, ok=lambda c, r: True, iters=800):
+    """ok(球心, 半径)：候选球合不合理（球心在中轴附近、半径在身高的一定比例内）。
+    不加约束的话，斗篷那种大块弧面的点比球身还多，会被当成「球」（实测吸血鬼：拟合出半径 0.35、球心在身后的球）"""
     best, best_n = None, -1
     rnd = random.Random(7)
     for _ in range(iters):
         s = rnd.sample(pts, 4)
         sol = sphere_from4(*s)
-        if not sol:
+        if not sol or not ok(*sol):
             continue
         c, r = sol
         n = sum(1 for p in pts if abs((p - c).length - r) < tol)
@@ -198,10 +226,11 @@ def fit_sphere(pts, tol, iters=400):
             best, best_n = (c, r), n
     if not best:
         return None
-    # 用内点做一次最小二乘精修
+    # 用内点做一次最小二乘精修（精修后不合理就用精修前的）
     c, r = best
     inl = [p for p in pts if abs((p - c).length - r) < tol]
-    return lsq_sphere(inl) or best, len(inl)
+    ref = lsq_sphere(inl)
+    return (ref if ref and ok(*ref) else best), len(inl)
 
 
 def sphere_from4(a, b, c, d):
@@ -264,20 +293,28 @@ def reweight(obj):
             limb_of[n] = ('leg', i)
     for i, ch in enumerate(skel['arms']):
         for n in ch:
+            # 锁骨（Mixamo 的 Shoulder）算身体：球身没有能耸的肩膀。不并进来的话，领子靠肩膀的两个角会跟着锁骨动
+            if any(k in n.lower() for k in ('shoulder', 'clavicle')):
+                continue
             limb_of[n] = ('arm', i)
     spine = set(skel['spine'])
 
     def dominant(w):
         return max(w.items(), key=lambda kv: kv[1])[0] if w else None
 
-    # 球：主导骨头在脊柱上的点里找
+    # 球：在全部顶点里找。不能只看「主导骨头在脊柱上」的点：Tripo 的自动绑骨把球身大块分给了 Hips、两个肩膀和大腿
+    # （实测吸血鬼球面上的点：Hips 609、肩膀 537 + 512、大腿 362，脊柱只有 84）
     height = max(p.z for p in pos) - min(p.z for p in pos)
-    sp = [pos[i] for i, w in enumerate(weights) if dominant(w) in spine]
-    if len(sp) > 4000:
-        sp = random.Random(3).sample(sp, 4000)
+    sp = random.Random(3).sample(pos, min(6000, len(pos)))
     ball = None
     if len(sp) >= 50:
-        fit = fit_sphere(sp, tol=0.015 * height)
+        ax, ay = skel['axis']
+        z_lo = bone_world(arm.data.bones[skel['hips']])[0].z - 0.15 * height
+        z_hi = max(bone_world(arm.data.bones[n])[0].z for n in skel['spine']) + 0.1 * height
+        # 合理的球身：球心离中轴线（水平）不超过身高的 15%（实测骨架的脊柱在球心前面 7 厘米）、高度在胯和脊柱顶之间，
+        # 半径是身高的 15%–42%（翠宝的球约占身高的一半）
+        ok = lambda c, r: math.hypot(c.x - ax, c.y - ay) < 0.15 * height and z_lo < c.z < z_hi and 0.15 * height < r < 0.42 * height
+        fit = fit_sphere(sp, tol=0.012 * height, ok=ok, iters=3000)
         if fit:
             (c, r), n = fit
             ball = (c, r)
@@ -286,10 +323,11 @@ def reweight(obj):
     if not ball:
         warn(f'{obj.name}：没拟合出球身，只按肢体距离分')
 
-    # 大腿、小腿、上臂、前臂的「管子半径」：主导骨头是它、又不在球里的点，到骨段距离的 30% 分位数。
-    # 用偏小的分位数：腿边挂着的配件（提灯、披风下摆）也被自动绑骨分给了大腿，它们离骨头更远，不能把半径拉大
+    # 大腿、小腿、上臂、前臂的「管子半径」：主导骨头是它、又不在球里的点，到骨段距离的 5% 分位数 × 1.15。
+    # 肢体是一根管子，它表面上的点到骨头的距离都差不多，是这些点里最近的一群；挂在腿边的配件、披风下摆也被自动绑骨
+    # 分给了大腿，而且点数可能比腿还多（实测吸血鬼的斗篷），所以只能取最近的那一小部分，取中位数或 30% 分位都会落在斗篷上
     effector = set(skel['effectors'])
-    outside = (lambda p: (p - ball[0]).length > ball[1] * 1.02) if ball else (lambda p: True)
+    outside = (lambda p: (p - ball[0]).length > ball[1] * 1.08) if ball else (lambda p: True)
     radius = {}
     for name in limb_of:
         if name in effector:
@@ -297,7 +335,16 @@ def reweight(obj):
         a, b = bone_seg[name]
         ds = sorted(seg_dist(p, a, b) for p, w in zip(pos, weights) if dominant(w) == name and outside(p))
         if len(ds) >= 12:
-            radius[name] = ds[int(len(ds) * 0.3)]
+            radius[name] = ds[int(len(ds) * 0.05)] * 1.15
+    # 同一条肢体里，一节骨头量出来比最细的那节粗 2.5 倍以上，说明它身边量到的根本不是肢体：
+    # 翠宝的大腿骨整根在球里，球外面分给大腿的点全是斗篷（实测量出 20–28 厘米，小腿只有 3.4 厘米）
+    for kind_i in set(limb_of.values()):
+        rs = [radius[n] for n, k in limb_of.items() if k == kind_i and n in radius]
+        if rs:
+            cap = 2.5 * min(rs)
+            for n, k in limb_of.items():
+                if k == kind_i and n in radius and radius[n] > cap:
+                    radius[n] = cap
     # 骨头太短、点太少量不准的，用同一条肢体的中位数补
     for kind_i in set(limb_of.values()):
         names = [n for n, k in limb_of.items() if k == kind_i and n not in effector]
@@ -326,8 +373,9 @@ def reweight(obj):
         else:
             limbness = 1.0
         if ball:
-            # 球面上、球里面的点都算身体（腿根、手臂根接在球上，交界处平滑过渡）
-            limbness *= smoothstep(ball[1] * 0.98, ball[1] * 1.06, (p - ball[0]).length)
+            # 球面上、球里面的点都算身体（腿根、手臂根接在球上，交界处平滑过渡）。球面上的点离球心在 r ± 4% 之内
+            # （拟合的容差是身高的 1.2%，约为半径的 4%），所以过渡从 1.04 r 才开始
+            limbness *= smoothstep(ball[1] * 1.04, ball[1] * 1.12, (p - ball[0]).length)
         if limbness <= 0.001:
             counts['body'] += 1
             new_weights.append({body: 1.0})
@@ -545,8 +593,10 @@ def render_previews(prefix):
     hi = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
     ctr, size = (lo + hi) / 2, max(hi - lo)
     cam.data.ortho_scale = size * 1.3
-    views = {'front': Vector((0, -1, 0.25)), 'side': Vector((1, 0, 0.25)), 'back': Vector((0, 1, 0.25))}
-    # 正面朝哪边导入后不一定（glTF 的 +Z 对应 Blender 的 −Y），所以正面、侧面、背面都渲，文件名里标视角
+    # 镜头按认出来的正面摆（脚尖方向）；认不出时按 Blender 的习惯（正面朝 −Y）
+    f = Vector(skel['facing']) if skel and skel.get('facing') else Vector((0, -1, 0))
+    s = Vector((-f.y, f.x, 0))
+    views = {'front': f + Vector((0, 0, 0.25)), 'side': s + Vector((0, 0, 0.25)), 'back': -f + Vector((0, 0, 0.25))}
     files = []
     # 导入时其余动作放在 NLA 轨道上：预览时关掉 NLA，只看当前这一个动作
     ad = arm.animation_data_create() if arm else None
@@ -554,10 +604,23 @@ def render_previews(prefix):
     if ad:
         ad.use_nla = False
 
+    def posed_bounds():
+        # 摆了姿势之后的包围盒（跑步前倾、受惊后仰时比静止姿势大），每张图按它取景
+        dg = bpy.context.evaluated_depsgraph_get()
+        ps = []
+        for o in meshes:
+            ev = o.evaluated_get(dg)
+            ps += [ev.matrix_world @ Vector(c) for c in ev.bound_box]
+        a = Vector((min(p.x for p in ps), min(p.y for p in ps), min(p.z for p in ps)))
+        b = Vector((max(p.x for p in ps), max(p.y for p in ps), max(p.z for p in ps)))
+        return (a + b) / 2, max(b - a)
+
     def shoot(tag):
+        c, sz = posed_bounds()
+        cam.data.ortho_scale = max(size, sz) * 1.25
         for vname, d in views.items():
-            cam.location = ctr + d.normalized() * size * 3
-            cam.rotation_euler = (ctr - cam.location).to_track_quat('-Z', 'Y').to_euler()
+            cam.location = c + d.normalized() * size * 3
+            cam.rotation_euler = (c - cam.location).to_track_quat('-Z', 'Y').to_euler()
             sc.render.filepath = f'{prefix}-{tag}-{vname}.png'
             bpy.ops.render.render(write_still=True)
             files.append(sc.render.filepath)

@@ -19,7 +19,7 @@
 //   .screenOf(序号)  访客在画布上的像素位置（focus 跟拍时不准）
 import * as THREE from 'three/webgpu';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { CHARACTER } from '../src/config/character';
+import { CHARACTER, VISITOR_SPECS } from '../src/config/character';
 import { FEAR } from '../src/config/visitors';
 import { CELL, GRID_H, GRID_W, HOUSE_D, HOUSE_W, Tile, WALL_CUT_H, WALL_H, buildTiles, cellCenter, idx } from '../src/config/house';
 import type { Module, RenderCore, CameraRig } from '../src/engine/types';
@@ -32,6 +32,11 @@ import { createHarness } from './harness';
 
 const q = new URLSearchParams(location.search);
 if (q.has('missing')) CHARACTER.url = `${import.meta.env.BASE_URL}assets/mascot/__missing__.glb`;
+// 这一页只看一套造型：默认是 CHARACTER（占位狐狸）；?visitor=<id> 用 VISITOR_SPECS 里那一套（连同它的朝向、速率），
+// ?url= 换成任意 GLB（其余参数照 CHARACTER）。游戏里 VISITOR_SPECS 有几套就轮流出场，这里不轮
+const picked = q.get('visitor') ? VISITOR_SPECS.find((v) => v.url.includes(`/${q.get('visitor')}.glb`)) : undefined;
+if (picked) Object.assign(CHARACTER, picked);
+VISITOR_SPECS.length = 0;
 if (q.get('url')) CHARACTER.url = q.get('url')!;
 if (q.get('facing')) CHARACTER.facingOffset = Number(q.get('facing'));
 // clips=待机,走,跑,受惊（片段名照 GLB 里的原样写，空着的写 -）：试新模型时不用先改 config/character.ts

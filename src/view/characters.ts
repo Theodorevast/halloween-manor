@@ -121,9 +121,10 @@ export interface CharacterAsset {
  * 把任意模型摆正：缩放到 height（身长超过 maxLength 时按身长缩）、x / z 居中、脚底贴地、正面转到 +z。
  * 返回包了两层的新节点
  */
-export function normalizeModel(model: THREE.Object3D, height: number, facingOffset: number, maxLength = Infinity) {
+export function normalizeModel(model: THREE.Object3D, height: number, facingOffset: number, maxLength = Infinity, precise = false) {
   model.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(model);
+  // precise：逐个顶点量（蒙皮网格按骨骼此刻的姿势算），摆了待机姿势之后用
+  const box = new THREE.Box3().setFromObject(model, precise);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const long = Math.max(size.x, size.z);
@@ -140,7 +141,7 @@ export function normalizeModel(model: THREE.Object3D, height: number, facingOffs
   face.rotation.y = -facingOffset;
   face.add(norm);
   face.updateMatrixWorld(true);
-  const after = new THREE.Box3().setFromObject(face);
+  const after = new THREE.Box3().setFromObject(face, precise);
   const front = Math.max(0.05, after.max.z, -after.min.z);
   const halfWidth = Math.max(0.05, after.max.x, -after.min.x);
   return { template: face, front, halfWidth, height: size.y * scale, rawSize: size, scale };
@@ -164,7 +165,19 @@ export async function loadCharacterAsset(spec: CharacterSpec = CHARACTER): Promi
     const g = m.geometry;
     triangles += (g.index ? g.index.count : g.attributes.position.count) / 3;
   });
-  const n = normalizeModel(gltf.scene, spec.targetHeight, spec.facingOffset, spec.maxLength);
+  // measureIdle：先摆成待机片段的第一帧再量（T 字绑定姿势的两臂会把包围盒撑宽，见 CharacterSpec）。
+  // 量完骨骼就停在这个姿势上，克隆出来的每个访客有自己的 mixer，第一帧就会接管
+  const idleClip = spec.measureIdle && spec.clips.idle ? THREE.AnimationClip.findByName(clips, spec.clips.idle) : null;
+  const poser = idleClip ? new THREE.AnimationMixer(gltf.scene) : null;
+  if (poser && idleClip) {
+    poser.clipAction(idleClip).play();
+    poser.update(0);
+  }
+  const n = normalizeModel(gltf.scene, spec.targetHeight, spec.facingOffset, spec.maxLength, !!poser);
+  if (poser) {
+    poser.stopAllAction();
+    poser.uncacheRoot(gltf.scene);
+  }
   console.log(`[characters] 原始尺寸 ${n.rawSize.toArray().map((v) => v.toFixed(2)).join(' × ')}，缩放 ${n.scale.toPrecision(3)}，身高 ${n.height.toFixed(2)} 米，${triangles} 个三角形`);
   return { template: n.template, clips, front: n.front, halfWidth: n.halfWidth, height: n.height, rawSize: n.rawSize, scale: n.scale, triangles };
 }
@@ -366,7 +379,9 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
       return [];
     });
   };
-  let outfits = VISITOR_SPECS.length ? await load(VISITOR_SPECS) : [];
+  // ?fox：不加载换装吉祥物，只用占位狐狸（对比性能、排查模型问题时用）
+  const specs = typeof location !== 'undefined' && new URLSearchParams(location.search).has('fox') ? [] : VISITOR_SPECS;
+  let outfits = specs.length ? await load(specs) : [];
   if (!outfits.length) outfits = await load([CHARACTER]);
   if (!outfits.length) {
     console.warn('[characters] 没有可用的角色模型，改用备用小人。');
@@ -638,7 +653,7 @@ export async function createCharactersView(core: RenderCore): Promise<Characters
       const k = sxz * shrinkXZ;
       const reach = (Math.abs(Math.cos(rel)) * v.front + Math.abs(Math.sin(rel)) * v.halfWidth) * k + HAND.ahead;
       const lx = Math.cos(look), lz = Math.sin(look);
-      const hand = FLASHLIGHT_HEIGHT * Math.min(1, v.height / v.outfit.spec.targetHeight) * shrinkY;
+      const hand = (v.outfit.spec.flashlightHeight ?? FLASHLIGHT_HEIGHT) * Math.min(1, v.height / v.outfit.spec.targetHeight) * shrinkY;
       const lean = hand * Math.sin(v.lean), hunch = hand * shear; // 逃跑前倾沿 heading，前探 / 后缩沿身体朝向
       v.torch.update({
         x: v.x + lx * reach - lz * HAND.side + Math.cos(heading) * lean + Math.cos(facing) * hunch,
