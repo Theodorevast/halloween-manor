@@ -46,8 +46,23 @@
 //     锯齿波（各两根 ±5 音分，4.4 Hz 的拍，二次谐波 D3 / E♭3 再打 8.7 Hz 的拍）+ 一点 D1 正弦，过低通 160 → 520 Hz
 //     （跟着音量开、跟着音量收）；指数渐强 0.7 秒（越到后面涨得越快，像反向的音头）、撑 0.25 秒、0.55 秒时间常数退掉。
 //     倒吸一口气（voices.ts 的 neckGasp）同时从那个访客身上出来；2.5 秒内不重复涌起
+//   现身落下 manifestHit（manifest 事件 drop；不定位；ghost.ts 的 createManifestSound 调它）：吓跑 braam 的最低一层，不用「铜管」，不用音乐的 stinger
+//     （调研 A3）：D1 / D2 / E♭2 锯齿波（每个音两根 ±7 音分）→ tanh 失真 → 低通 1200 → 420 → 200 Hz 收拢 + 噪声爆发 + 52→30 Hz 下沉，0.9 秒、
+//     比吓跑的 braam 轻（LEVEL.manifestHit −8 dB、包络 0.6 倍）、短 0.6 秒，实测整声 RMS 约低 9 dB、峰值不碰限幅器。和 braam 是同一份代码（braamFn），只是配方不同
+//   灯暗一下的咔哒 lightClick（现身蓄力里灯每暗一下、收回时灯再暗一下；3D 放在现身的位置）：两个相隔 7–13 毫秒的低通噪声颗粒
+//     （「咔——哒」，第二下轻 40%），低通截止 1.1–2.0 kHz（每次随机）、Q 0.5，没有共鸣，所以不会有音高、不会像「叮」；干净、短、很轻（调研 A4、A7）
+//   床 bed（trigger 事件；时间线读 config/scares.ts 的 SCARES.bed.hitAt = 2.6 秒，和物件那一路 bed.ts 的鼓包动画对齐，设计文档 4.1）：
+//     0.04–1.3 布料摩擦三段（膝 / 躯干 / 头依次鼓起，每段 0.5 秒左右一阵「沙」，宽带噪声过 1.1 / 1.5 / 1.9 kHz 的宽带通，中心和音量被两个慢速正弦推着起伏，
+//       加稀疏的纤维颗粒）；1.25–1.95 一口被布闷住的吸气（和 shiver 同一套呼吸合成 breathPass，过 600 Hz 低通，从枕头那里出来），然后屏住：
+//       1.95 到落下之间（0.65 秒）什么声音都没有（调研原则 11：先抽空再落下）；2.6 塌下：一声「噗」（低通噪声 0.15 秒，截止 900 → 180 Hz 往下扫）
+//       + 最低一层的低频冲击（braamFn，比现身的再小一点）+ 一丝灰尘的「嘶」；2.66 起被子底下挤出来一口长气（闷住的呼气 1.15 秒，共振峰往下走）
+//   机关设下 trapArm（trap 事件 armed；不定位，只有玩家听得见）：极轻的冰裂声 —— 一小簇主裂声（3–5 个 0.5–3 毫秒的噪声颗粒，25 毫秒内）+ 后面 0.28 秒里
+//     疏疏落落的 3–5 下小裂声（越来越轻）；每颗随机走 3.2 / 4.8 / 6.6 kHz 三条宽带通之一（冰裂不会每一下都一样亮），Q 0.9，没有共鸣、没有音高（调研 A7）；
+//     再垫一丝 6 kHz 以上的「嘶」（结晶，0.3 秒起落，很轻）。sprung 走物件本来的声音，expired 无声
+import { CELL, FURNITURE } from '../config/house';
+import { SCARES } from '../config/scares';
 import type { ScareType } from '../sim/types';
-import { isPort, type Place, type Port, type Space } from './space';
+import { isPort, type Place, type Port, type Space, type Vec3 } from './space';
 import { DOOR_T_LINE } from '../view/props/door';
 import { LAMP_FLICKER, LAMP_RELIGHT } from '../view/props/lamp';
 import { MIRROR_FLASH } from '../view/props/mirror';
@@ -69,6 +84,12 @@ export const LEVEL = {
   exit: -11,
   spawn: -10,
   chill: 0,
+  /** 现身落下的低频冲击（比吓跑的 braam 轻）、灯暗一下的咔哒、床、床塌下的低频冲击、机关设下的冰裂声 */
+  manifestHit: -8,
+  lightClick: -12,
+  bed: 0,
+  bedHit: -9,
+  trapArm: -12,
 };
 
 // ── 共用：总线、随机数、节点工厂、包络 ─────────────────────────────────────────────
@@ -82,6 +103,11 @@ export interface Bus {
   voice: AudioNode;
   /** 环境层 */
   amb: AudioNode;
+  /**
+   * 环境层的「让路」增益（现身时压低 12 dB，ghost.ts）。和吓跑静音用的 ambDuck 分开：两件事同时发生时各管各的、乘在一起。
+   * 没有也行（离线测量用的简化总线），环境声就不让路
+   */
+  ambHush?: GainNode;
   /** 混响的送入口 */
   reverb: AudioNode;
   /** 4 秒单声道白噪声（循环播放，随机起点） */
@@ -244,6 +270,46 @@ export function bandNoise(
   s.noise(t0, t1).connect(flt).connect(g);
   onFilter?.(flt);
   return g;
+}
+
+/** 一口气的「抖」和气声：shake = 随机部分（低通噪声）的深度，pulse / pulseHz = 规则部分（正弦）的深度和频率，hiss = 4.2 kHz 以上的齿间气声 */
+export interface BreathShape {
+  shake: number;
+  pulse: number;
+  pulseHz: number;
+  hiss: number;
+}
+
+/**
+ * 一口气的合成（发毛的吸气 / 呼气、喘气、床底下被布闷住的呼吸共用）：两路带通噪声（f1 / f2 乘 k，共振峰在 d 秒里慢慢移到 rise 倍）
+ * + 一丝 4.2 kHz 以上的气声，音量被「一顿一顿」的抖调制（随机的低通噪声 + 一点正弦）。接到 dest；返回包络的增益参数，形状由调用方写
+ */
+export function breathPass(
+  s: Snd,
+  dest: AudioNode,
+  sh: BreathShape,
+  k: number,
+  t0: number,
+  d: number,
+  f1: number,
+  f2: number,
+  rise: number,
+): AudioParam {
+  const t1 = t0 + d + 0.05;
+  const shake = s.gain(1 - sh.pulse);
+  // 一顿一顿：随机的低通噪声 + 一点正弦
+  bandNoise(s, t0, t1, 'lowpass', 14).connect(s.gain(sh.shake)).connect(shake.gain);
+  s.osc('sine', sh.pulseHz * rand(0.9, 1.1), t0, t1).connect(s.gain(sh.pulse)).connect(shake.gain);
+  const env = s.gain(0);
+  const lift = (b: BiquadFilterNode, f: number) => {
+    b.frequency.setValueAtTime(f, t0);
+    b.frequency.linearRampToValueAtTime(f * rise, t0 + d);
+  };
+  bandNoise(s, t0, t1, 'bandpass', f1 * k, 1.4, (b) => lift(b, f1 * k)).connect(shake);
+  bandNoise(s, t0, t1, 'bandpass', f2 * k, 2.2, (b) => lift(b, f2 * k)).connect(s.gain(0.45)).connect(shake);
+  bandNoise(s, t0, t1, 'highpass', 4200).connect(s.gain(sh.hiss)).connect(shake);
+  shake.connect(env).connect(dest);
+  return env.gain;
 }
 
 /** 一个很短的噪声颗粒：t 时刻、长 len 秒、幅度 amp；block = 采样保持（数字感的「块」） */
@@ -969,15 +1035,34 @@ export const musicBox: SfxFn = (bus, t, at) => {
 
 // ── 吓跑：braam 冲击 ────────────────────────────────────────────────────────────
 
-export const BRAAM = {
-  /** [赫兹, 音量]：D1 D2 E♭2 D3 E♭3，每个音两根锯齿波 ±detune 音分 */
-  voices: [[36.71, 1], [73.42, 0.9], [77.78, 0.8], [146.83, 0.35], [155.56, 0.3]] as [number, number][],
+/** braam 的配方：吓跑的整套（BRAAM）和现身落下 / 床塌下的低频版（MANIFEST_HIT、BED_HIT）共用同一份合成代码 */
+export interface BraamSpec {
+  /** [赫兹, 音量]，每个音两根锯齿波 ±detune 音分 */
+  voices: [number, number][];
+  detune: number;
+  osc: number;
+  /** tanh 失真的驱动 */
+  drive: number;
+  /** 低通收拢：起点、lpAt[0] 秒、lpAt[1] 秒（赫兹），共振 Q。时刻、包络、下沉的时间常数都按 dur / 1.5 缩放 */
+  lp: readonly [number, number, number];
+  lpAt: readonly [number, number];
+  q: number;
+  amp: number;
+  dur: number;
+  noise: number;
+  rumble: number;
+  sub: number;
+  wet: number;
+}
+
+export const BRAAM: BraamSpec = {
+  /** D1 D2 E♭2 D3 E♭3，每个音两根锯齿波 ±detune 音分 */
+  voices: [[36.71, 1], [73.42, 0.9], [77.78, 0.8], [146.83, 0.35], [155.56, 0.3]],
   detune: 7,
   osc: 0.13,
-  /** tanh 失真的驱动 */
   drive: 2.5,
-  /** 低通收拢：起点、0.35 秒、1.4 秒（赫兹），共振 Q */
-  lp: [3500, 700, 280] as const,
+  lp: [3500, 700, 280],
+  lpAt: [0.35, 1.4],
   q: 2.2,
   amp: 0.85,
   dur: 1.5,
@@ -987,11 +1072,32 @@ export const BRAAM = {
   wet: 0.4,
 };
 
-/** t = 冲击时刻（engine.ts 已经在它前面静音了 hit-stop 那 0.15 秒） */
-export const braam: SfxFn = (bus, t, at) => {
-  const B = BRAAM;
-  const s = new Snd(bus, { at, level: LEVEL.braam, wet: B.wet });
+/** 现身落下的低频冲击：只留最低一层（D1 D2 E♭2），去掉「铜管」那层（D3 E♭3），更轻、更短、低通收得更暗（调研 A3） */
+export const MANIFEST_HIT: BraamSpec = {
+  voices: [[36.71, 1], [73.42, 0.7], [77.78, 0.6]],
+  detune: 7,
+  osc: 0.13,
+  drive: 2.2,
+  lp: [1200, 420, 200],
+  lpAt: [0.35, 1.4],
+  q: 1.6,
+  amp: 0.6,
+  dur: 0.9,
+  noise: 0.2,
+  rumble: 0.3,
+  sub: 0.7,
+  wet: 0.35,
+};
+
+/** 床塌下去时的低频冲击：比现身的再小一点、再短一点（床是软的） */
+export const BED_HIT: BraamSpec = { ...MANIFEST_HIT, voices: [[36.71, 1], [73.42, 0.6]], amp: 0.42, dur: 0.8, noise: 0.12, rumble: 0.22, sub: 0.55, lp: [900, 360, 190] };
+
+/** 按配方合成一个 braam（key 是 LEVEL 里的哪一项）。t = 冲击时刻（吓跑时 engine.ts 已经在它前面静音了 hit-stop 那 0.15 秒） */
+const braamFn = (B: BraamSpec, key: keyof typeof LEVEL): SfxFn => (bus, t, at) => {
+  const s = new Snd(bus, { at, level: LEVEL[key], wet: B.wet });
   const end = t + B.dur;
+  /** 时间尺度：整套 braam（1.5 秒）是 1 */
+  const r = B.dur / 1.5;
   const sum = s.gain(1);
   for (const [f, a] of B.voices) for (const d of [-B.detune, B.detune]) s.osc('sawtooth', f, t, end + 0.1, d).connect(s.gain(B.osc * a)).connect(sum);
   const curve = new Float32Array(1025);
@@ -1001,21 +1107,25 @@ export const braam: SfxFn = (bus, t, at) => {
   }
   const lp = s.bq('lowpass', B.lp[0], B.q);
   lp.frequency.setValueAtTime(B.lp[0], t);
-  lp.frequency.exponentialRampToValueAtTime(B.lp[1], t + 0.35);
-  lp.frequency.exponentialRampToValueAtTime(B.lp[2], t + 1.4);
+  lp.frequency.exponentialRampToValueAtTime(B.lp[1], t + B.lpAt[0] * r);
+  lp.frequency.exponentialRampToValueAtTime(B.lp[2], t + B.lpAt[1] * r);
   const env = s.gain(0);
   sum.connect(s.add(new WaveShaperNode(s.ac, { curve, oversample: '2x' }))).connect(lp).connect(env).connect(s.out);
-  line(env.gain, t, [[0, 0], [0.006, B.amp], [0.25, B.amp * 0.7], [0.8, B.amp * 0.5], [B.dur, 0]]);
+  line(env.gain, t, [[0, 0], [0.006, B.amp], [0.25 * r, B.amp * 0.7], [0.8 * r, B.amp * 0.5], [B.dur, 0]]);
 
   const ng = s.gain(0);
   perc(ng.gain, t, B.noise, 0.001, 0.15);
   bandNoise(s, t, t + 1.2, 'lowpass', 2500).connect(ng).connect(s.out);
   const rg = s.gain(0);
-  perc(rg.gain, t, B.rumble, 0.01, 0.5);
+  perc(rg.gain, t, B.rumble, 0.01, 0.5 * r);
   bandNoise(s, t, end, 'lowpass', 350).connect(rg).connect(s.out);
-  thud(s, s.out, t, B.sub, 52, 30, 0.35, 700, 0);
+  thud(s, s.out, t, B.sub, 52, 30, 0.35 * r, 700, 0);
   return s.end(end + 2.4);
 };
+
+export const braam: SfxFn = braamFn(BRAAM, 'braam');
+export const manifestHit: SfxFn = braamFn(MANIFEST_HIT, 'manifestHit');
+const bedHit: SfxFn = braamFn(BED_HIT, 'bedHit');
 
 // ── 前门：离开、进门 ─────────────────────────────────────────────────────────────
 
@@ -1053,8 +1163,192 @@ export const spawnDoor: SfxFn = (bus, t, at) => {
   return s.end(t + 1.6 + 2.4);
 };
 
-/** 附身物件 → 声音（床的声音还没做，所以是 Partial；声音那一路补上） */
-export const TRIGGER: Partial<Record<ScareType, SfxFn>> = { musicBox, door, lamp, rockingChair, portrait, mirror };
+// ── 现身：灯暗一下的咔哒 ─────────────────────────────────────────────────────────
+
+export const CLICK = {
+  /** 第一下颗粒的幅度（噪声颗粒的峰值）；第二下相对 */
+  amp: 0.5,
+  second: 0.6,
+  /** 两下之间的间隔（秒） */
+  gap: [0.007, 0.013] as [number, number],
+  /** 低通截止的范围（赫兹，每次随机）和 Q：没有共鸣，所以不会有音高，不会像「叮」 */
+  lp: [1100, 2000] as [number, number],
+  q: 0.5,
+  wet: 0.15,
+};
+
+/** 灯暗一下的咔哒（ghost.ts 的 createManifestSound 调它）。k = 强度倍数（收回时灯再暗一下用得轻一点） */
+export function lightClick(bus: Bus, t: number, at: Place, k = 1): number {
+  const C = CLICK;
+  const s = new Snd(bus, { at, level: LEVEL.lightClick, wet: C.wet });
+  const gr: Grain[] = [
+    { t: 0.0005, len: rand(0.002, 0.004), amp: C.amp * k * rand(0.85, 1) },
+    { t: rand(C.gap[0], C.gap[1]), len: rand(0.002, 0.005), amp: C.amp * k * C.second * rand(0.7, 1) },
+  ];
+  playGrains(s, t, gr, s.out, 1, s.bq('lowpass', rand(C.lp[0], C.lp[1]), C.q));
+  return s.end(t + 0.4);
+}
+
+// ── 床：被子下面有人 ───────────────────────────────────────────────────────────────
+
+export const BED = {
+  /**
+   * 布料摩擦三段：膝、躯干、头依次鼓起，[起, 最响, 止]（秒，相对触发）。和物件那一路 bed.ts 的鼓包时间轴对齐
+   * （设计文档 4.1：膝 0–0.5、躯干 0.3–0.9、头 0.7–1.2，这里各往后多一点收尾）
+   */
+  rise: [[0.04, 0.26, 0.6], [0.3, 0.56, 0.95], [0.7, 0.96, 1.3]] as readonly (readonly [number, number, number])[],
+  /** 摩擦的峰值（相对 bandNoise 的 RMS 0.5）、三段的中心频率（赫兹）、纤维颗粒的幅度、整体低通（赫兹：厚被子是闷的） */
+  rustle: 0.008,
+  rustleHz: [1000, 1300, 1600] as readonly number[],
+  fiber: 0.03,
+  rustleLp: 4500,
+  /** 被布闷住的一口吸气：从多久开始、多长（秒）、峰值，过 muffle 赫兹的低通；吸完就屏住，一直到落下都没有声音（要比落下早 0.6 秒以上：调研原则 11 的前脉冲抑制） */
+  breathAt: 1.25,
+  breathDur: 0.7,
+  breath: 0.035,
+  muffle: 600,
+  /** 「抖」：睡着的人，比发毛和喘气都慢、都规则 */
+  shape: { shake: 0.25, pulse: 0.08, pulseHz: 5, hiss: 0.04 } as BreathShape,
+  /** 塌下的「噗」：峰值、长度（秒）、低通从 puffLp[0] 扫到 puffLp[1]（赫兹）；灰尘的「嘶」峰值 */
+  puff: 0.16,
+  puffLen: 0.15,
+  puffLp: [900, 180] as const,
+  dust: 0.012,
+  /** 被子底下挤出来的一口长气：落下后多久开始、多长（秒）、峰值 */
+  sigh: [0.06, 1.15] as const,
+  sighAmp: 0.05,
+  /** 枕头离床头那一头多远（米）；3D 时呼吸从那里出来 */
+  pillow: 0.45,
+  wet: 0.3,
+};
+
+/** 枕头的位置（房屋米坐标）：床的矩形里靠床头（facing 的反方向）的那一头 */
+export function pillowSpot(): Vec3 | null {
+  const bed = FURNITURE.find((f) => f.id === 'bedroom-bed');
+  if (!bed) return null;
+  const { x0, z0, x1, z1 } = bed.rect;
+  const cx = ((x0 + x1) / 2) * CELL;
+  const cz = ((z0 + z1) / 2) * CELL;
+  const d = { x: Math.cos(bed.facing), z: Math.sin(bed.facing) };
+  // 床沿 facing 方向的半长（朝东 / 西沿 x，朝南 / 北沿 z）
+  const half = (Math.abs(d.x) > Math.abs(d.z) ? (x1 - x0) * CELL : (z1 - z0) * CELL) / 2;
+  const back = half - BED.pillow;
+  return { x: cx - d.x * back, y: 0.62, z: cz - d.z * back };
+}
+
+/** 布料摩擦：宽带噪声（中心 hz）+ 慢慢起伏的音量和中心频率 + 稀疏的纤维颗粒。返回包络的增益节点（形状由调用方写） */
+function cloth(s: Snd, dest: AudioNode, t0: number, t1: number, hz: number, fiber: number): GainNode {
+  const wob = s.gain(0.75);
+  s.osc('sine', rand(1.1, 1.7), t0, t1).connect(s.gain(0.25)).connect(wob.gain);
+  const env = s.gain(0);
+  bandNoise(s, t0, t1, 'bandpass', hz, 0.6, (b) => {
+    s.osc('sine', rand(0.6, 0.9), t0, t1).connect(s.gain(hz * 0.25)).connect(b.frequency);
+  })
+    .connect(wob)
+    .connect(env);
+  // 纤维：稀疏的细碎颗粒，跟着同一个包络
+  const gr: Grain[] = [];
+  for (let i = 0, n = Math.round((t1 - t0) * 28); i < n; i++) gr.push({ t: rand(0, t1 - t0), len: rand(0.0008, 0.003), amp: fiber * rand(0.3, 1) });
+  playGrains(s, t0, gr, env, 1, s.bq('bandpass', hz * 1.8, 0.8));
+  // 厚被子是闷的：整体再过一道低通
+  env.connect(s.bq('lowpass', BED.rustleLp, 0.5)).connect(dest);
+  return env;
+}
+
+export const bed: SfxFn = (bus, t, at) => {
+  const B = BED;
+  const hit = SCARES.bed.hitAt;
+  const s = new Snd(bus, { at, level: LEVEL.bed, wet: B.wet });
+  // 呼吸从枕头那里出来（3D 时）；俯视模式、常驻声道就和被子放在一起
+  const pillow = typeof at === 'object' && !isPort(at) ? pillowSpot() : null;
+  const sb = pillow ? new Snd(bus, { at: pillow, level: LEVEL.bed, wet: B.wet }) : s;
+
+  // 布料摩擦：膝、躯干、头依次鼓起
+  B.rise.forEach(([a, peak, b], i) => {
+    const env = cloth(s, s.out, t + a, t + b, B.rustleHz[i], B.fiber);
+    line(env.gain, t, [[a, 0], [peak, B.rustle], [b, 0]]);
+  });
+
+  // 被布闷住的一口吸气，吸完就屏住：1.95 到落下之间（0.65 秒）什么声音都没有（先抽空再落下）
+  const muffled = sb.bq('lowpass', B.muffle, 0.7);
+  muffled.connect(sb.out);
+  const inG = breathPass(sb, muffled, B.shape, 0.85, t + B.breathAt, B.breathDur, 700, 1500, 1.1);
+  inG.setValueAtTime(0.0003, t + B.breathAt);
+  inG.exponentialRampToValueAtTime(B.breath, t + B.breathAt + B.breathDur * 0.8);
+  inG.linearRampToValueAtTime(0, t + B.breathAt + B.breathDur);
+
+  // 塌下：「噗」（低通噪声，往下扫）+ 灰尘的「嘶」 + 最低一层的低频冲击
+  const th = t + hit;
+  const pg = s.gain(0);
+  perc(pg.gain, th, B.puff, 0.004, 0.045);
+  bandNoise(s, th, th + B.puffLen + 0.3, 'lowpass', B.puffLp[0], 0.7, (b) => {
+    b.frequency.setValueAtTime(B.puffLp[0], th);
+    b.frequency.exponentialRampToValueAtTime(B.puffLp[1], th + B.puffLen);
+  })
+    .connect(pg)
+    .connect(s.out);
+  const dg = s.gain(0);
+  perc(dg.gain, th + 0.02, B.dust, 0.03, 0.12);
+  bandNoise(s, th, th + 0.8, 'highpass', 3000).connect(dg).connect(s.out);
+  bedHit(bus, th, at);
+
+  // 被子底下挤出来的一口长气：闷住的呼气，共振峰往下走
+  const t2 = th + B.sigh[0];
+  const exG = breathPass(sb, muffled, B.shape, 0.85, t2, B.sigh[1], 650, 1400, 0.85);
+  exG.setValueAtTime(0, t2);
+  exG.linearRampToValueAtTime(B.sighAmp, t2 + 0.12);
+  exG.setTargetAtTime(0, t2 + 0.12, B.sigh[1] * 0.3);
+  exG.setValueAtTime(0, t2 + B.sigh[1]);
+  const end = t2 + B.sigh[1] + 0.5;
+  if (sb !== s) sb.end(end);
+  return s.end(end);
+};
+
+// ── 机关：设下时的冰裂声 ─────────────────────────────────────────────────────────────
+
+export const TRAP_ARM = {
+  /** 第一簇（主裂声）：颗粒个数范围、散布的时间（秒）；颗粒的峰值 */
+  crack: [3, 5] as [number, number],
+  crackSpan: 0.025,
+  amp: 0.5,
+  /** 后面疏疏落落的小裂声：个数范围、散布的时间（秒）、相对峰值 */
+  ticks: [3, 5] as [number, number],
+  tickSpan: 0.28,
+  tickAmp: 0.4,
+  /** 颗粒走三条带通（赫兹）之一，每颗随机挑：冰裂不会每一下都一样亮 */
+  bands: [3200, 4800, 6600] as readonly number[],
+  q: 0.9,
+  /** 结晶一样的一丝「嘶」（6 kHz 以上）：峰值、起落的时长（秒） */
+  shimmer: 0.012,
+  shimmerLen: 0.3,
+  wet: 0.12,
+};
+
+/** 机关设下：一声极轻的冰裂声。只有玩家听得见，所以调用方不要给它 3D 位置 */
+export const trapArm: SfxFn = (bus, t, at) => {
+  const A = TRAP_ARM;
+  const s = new Snd(bus, { at, level: LEVEL.trapArm, wet: A.wet });
+  // 每条带通一个颗粒轨：主裂声（一小簇，前密）+ 后面疏疏落落的小裂声（越来越轻）
+  const tracks = A.bands.map(() => [] as Grain[]);
+  const put = (at: number, amp: number) => {
+    tracks[Math.floor(rng.next() * tracks.length)].push({ t: at, len: rand(0.0005, 0.003), amp, block: rng.next() < 0.4 });
+  };
+  const nc = Math.round(rand(A.crack[0], A.crack[1]));
+  for (let i = 0; i < nc; i++) put(rand(0, A.crackSpan), A.amp * rand(0.5, 1));
+  const nt = Math.round(rand(A.ticks[0], A.ticks[1]));
+  for (let i = 0; i < nt; i++) {
+    const u = (i + 1) / (nt + 1);
+    put(A.crackSpan + A.tickSpan * u ** 1.5 + rand(0, 0.01), A.tickAmp * A.amp * rand(0.4, 1) * (1 - 0.6 * u));
+  }
+  tracks.forEach((gr, i) => playGrains(s, t, gr, s.out, 1, s.bq('bandpass', A.bands[i], A.q)));
+  const sg = s.gain(0);
+  bandNoise(s, t, t + A.shimmerLen + 0.1, 'highpass', 6000).connect(sg).connect(s.out);
+  line(sg.gain, t, [[0, 0], [A.shimmerLen * 0.3, A.shimmer], [A.shimmerLen, 0]]);
+  return s.end(t + A.crackSpan + A.tickSpan + 0.9);
+};
+
+/** 附身物件 → 声音（编译期检查：每种物件都得有声音） */
+export const TRIGGER: Record<ScareType, SfxFn> = { musicBox, door, lamp, rockingChair, portrait, mirror, bed };
 /** 物件复原 → 声音（只有台灯和肖像有「被破坏」状态） */
 export const RESET: Partial<Record<ScareType, SfxFn>> = { lamp: lampReset, portrait: portraitReset };
 

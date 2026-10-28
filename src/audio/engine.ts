@@ -5,10 +5,11 @@
 // 总线
 //   物件 / 冲击 → 声像 → sfx ┐
 //   尖叫 / 吸气 → 声像 → voice ┼→ duck（吓跑前静音 hit-stop 那 0.15 秒）→ master（静音开关，0.1 秒渐变）→ 限幅器 → 软削波 → 输出
-//   环境层 → amb → ambDuck ──┤
+//   环境层 → amb → ambHush → ambDuck ──┤
 //   混响送入口 → 高通 90 Hz → Convolver（代码生成的 2.2 秒衰减噪声）→ 回送 ┘
 //   声像：俯视（娃娃屋）模式是 StereoPanner，按物体在屏幕上的横坐标（createAudio 的 pan）；第三人称调过 setListener 之后
 //     是 HRTF 的 PannerNode，听者在镜头处（space.ts）。braam、后颈一凉的涌起、环境层的持续音和风、鬼魂的冷风不定位
+//   ambHush 是现身时环境声的「让路」（压低 12 dB，ghost.ts），ambDuck 是吓跑前的静音（silence），两个各管各的、乘在一起
 // 限幅器是 DynamicsCompressorNode，阈值贴近天花板，平时几乎不动作，只在几个声音叠在一起时压一下；
 // 它后面再接一个 WaveShaper 软削波：-4 dBFS 以下是直线，以上用 tanh 弯到 -1.2 dBFS，峰值保证不会超过 -1 dBFS。
 // 注意：Web Audio 规范里压缩器自带 makeup 增益（这组参数实测 +1.9 dB），dev/audio.html 测的指标都是走完整条总线之后的。
@@ -25,6 +26,12 @@
 //     neck 为真是「后颈一凉」：倒吸一口气（从他身上出来）+ 低沉的不协和涌起（不定位，2.5 秒内不重复涌起），同一个人 1.5 秒内不重复。
 //     模拟在同一步紧跟着给这个人一个 startle（object = 'ghost'）：不再放 gasp（已经倒吸过了），尖叫照放，但挪到这口气之后；
 //     紧张度也只由那个 startle 加（不重复加）。同一帧里他被吓跑了：只留 braam 和逃跑的尖叫（这口气会被 hit-stop 的静音吞掉）
+//   - 现身（2026-10-28，manifest 事件，配方在 ghost.ts 开头）：windup / drop / end 三个节拍转给 createManifestSound；drop 同一批里有人被吓跑时
+//     冲击让给吓跑的 braam，冷气挪到静音之后（现身的冲击不算 braamAt：否则现身后 0.8 秒内吓跑的人就没有 braam 了）
+//   - 被手电照到（reveal 事件）：lit 集合里有人就淡入压力声（ghost.ts 的 createRevealLayer），空了就淡出；离开的人 / 删掉的人由 sync 清掉（不靠 off 事件一定到）
+//   - 察觉（notice 事件）：只有手电照到鬼魂（kind = ghost）时那个人倒吸一口很轻的气（调研 3.1），同一个人 NOTICE_GAP 秒内最多一次；其余种类没有声音
+//   - 机关（trap 事件）：armed 一声极轻的冰裂声（不定位，只有玩家听得见）；sprung 走物件本来的 trigger 声；expired 无声
+//   - 喘气、呜咽：不是事件，是恐惧值的函数，每帧由 breath.ts 排程（凑近才听得见，耳朵是鬼魂）
 //   - 声音里出任何异常只警告一次、绝不往外抛：主循环里一个异常就会让 three 的动画循环停掉；建总线失败（极老的浏览器）就安静地没有声音
 //   - unlock 之前 update 什么都不做；unlock 之后再调只在 AudioContext 被挂起时 resume，几乎零开销
 import { FRONT_DOOR } from '../config/house';
@@ -32,9 +39,10 @@ import { FEAR, HIT_STOP } from '../config/visitors';
 import type { FrameCtx, GhostState, Module } from '../engine/types';
 import type { NpcState, ScareType, SimEvent, Vec2, WorldState } from '../sim/types';
 import { AMB, DREAD, createAmbience, dreadTarget, type Ambience } from './ambience';
+import { createBreath, type Breath } from './breath';
 import { createCrowd, type Crowd } from './footsteps';
-import { createGhostSound, type GhostSound } from './ghost';
-import { RESET, TRIGGER, braam, chillSwell, exitDoor, rand, spawnDoor, type Bus } from './sfx';
+import { createGhostSound, createManifestSound, createRevealLayer, type GhostSound } from './ghost';
+import { RESET, TRIGGER, braam, chillSwell, exitDoor, rand, spawnDoor, trapArm, type Bus } from './sfx';
 import { createSpace, type Place, type Space, type Vec3 } from './space';
 import { NECK, SCREAM, gasp, neckGasp, scream, shiver } from './voices';
 
@@ -74,6 +82,10 @@ export const SOURCE_Y: Record<ScareType, number> = { musicBox: 0.62, door: 1.0, 
 /** 3D 时访客没有常驻声道（超过 footsteps.ts 的 FOOT.voices 个人）时，他的声音从多高出来；前门的声音多高 */
 const VOICE_Y = 0.9;
 const DOOR_Y = 1.0;
+/** 现身时鬼魂身上的声音（冷气、灯暗一下的咔哒）从多高出来（米） */
+const GHOST_Y = 1.4;
+/** 手电照到鬼魂时那个人倒吸一口气：同一个人多久之内最多一次（秒）；0 = 不要这口气 */
+export const NOTICE_GAP = 4;
 /**
  * chill：发毛的间隔范围（秒，每人）、同时最多几声、这一下至少涨多少恐惧值才出声、涨多少算满（发毛的音量按它在 0.55–1 之间）；
  * 后颈一凉每人多久不重复、涌起多久不重复、startle 多久之内算同一下
@@ -83,6 +95,7 @@ export const CHILL_GAP = { shiver: [2.8, 5] as [number, number], maxShivers: 2, 
 export interface MixBus extends Bus {
   duck: GainNode;
   ambDuck: GainNode;
+  ambHush: GainNode;
   master: GainNode;
   space: Space;
 }
@@ -161,8 +174,10 @@ export function createBus(ac: BaseAudioContext): MixBus {
   duck.connect(master);
   const ambDuck = new GainNode(ac, { gain: 1 });
   ambDuck.connect(duck);
+  const ambHush = new GainNode(ac, { gain: 1 });
+  ambHush.connect(ambDuck);
   const amb = new GainNode(ac);
-  amb.connect(ambDuck);
+  amb.connect(ambHush);
   const sfx = new GainNode(ac);
   sfx.connect(duck);
   const voice = new GainNode(ac);
@@ -175,7 +190,7 @@ export function createBus(ac: BaseAudioContext): MixBus {
     .connect(new GainNode(ac, { gain: REVERB.ret }))
     .connect(duck);
   const space = createSpace(ac, reverb);
-  return { ac, sfx, voice, amb, reverb, noise: noiseBuffer(ac), pulse: pulseWave(ac), duck, ambDuck, master, space };
+  return { ac, sfx, voice, amb, reverb, noise: noiseBuffer(ac), pulse: pulseWave(ac), duck, ambDuck, ambHush, master, space };
 }
 
 /** 吓跑前的静音：t 起 8 毫秒内拉到 0，hold 秒后回到 1；环境层多空一会儿再慢慢回来 */
@@ -195,6 +210,11 @@ export function silence(bus: MixBus, t: number, hold: number) {
 /** 把一批模拟事件变成声音（实时和离线测量共用） */
 export interface Router {
   play(batch: readonly SimEvent[], state: WorldState, t: number): void;
+  /**
+   * 每帧：把事件攒不出来的状态对齐到模拟 —— 手电不再照着鬼魂的人（已经离开、被删掉）从 lit 里清掉，压力声跟着淡出。
+   * 离线测量里没有「每帧」，不用调
+   */
+  sync(state: WorldState, t: number): void;
   /** 最近被吓的紧张度（环境层用；由调用方按 DREAD.tensionTau 衰减） */
   tension: number;
 }
@@ -212,6 +232,11 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
   const neckEnd = new Map<number, number>();
   let shiverEnds: number[] = [];
   let swellAt = -1e9;
+  /** 现身的声音、被照到的压力声、此刻手电照着鬼魂的人、每个人上一次「照到鬼魂时倒吸气」的时刻 */
+  const manifest = createManifestSound(bus);
+  const reveal = createRevealLayer(bus);
+  const lit = new Set<number>();
+  const noticeAt = new Map<number, number>();
   const P = (p: Vec2 | undefined) => {
     if (!p) return 0;
     try {
@@ -235,6 +260,15 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
 
   const r: Router = {
     tension: 0,
+    sync(state, t) {
+      let changed = false;
+      for (const id of lit) {
+        if (state.npcs.some((n) => n.id === id && n.mode !== 'gone')) continue;
+        lit.delete(id);
+        changed = true;
+      }
+      if (changed) reveal.set(lit.size > 0, t);
+    },
     play(batch, state, t) {
       const fleeing = new Set<number>();
       const necks = new Set<number>();
@@ -264,7 +298,7 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
         switch (e.type) {
           case 'trigger': {
             const o = obj(e.object);
-            TRIGGER[e.scareType]?.(bus, t, placeAt(o?.pos, SOURCE_Y[e.scareType]));
+            TRIGGER[e.scareType](bus, t, placeAt(o?.pos, SOURCE_Y[e.scareType]));
             break;
           }
           case 'reset': {
@@ -325,10 +359,39 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
             shiverNext.delete(e.npc);
             neckAt.delete(e.npc);
             neckEnd.delete(e.npc);
+            noticeAt.delete(e.npc);
+            if (lit.delete(e.npc)) reveal.set(lit.size > 0, t);
             exitDoor(bus, t, placeAt(FRONT_DOOR.outside, DOOR_Y));
             break;
           case 'spawn':
             spawnDoor(bus, t, placeAt(FRONT_DOOR.outside, DOOR_Y));
+            break;
+          case 'manifest': {
+            const at = placeAt(e.pos, GHOST_Y);
+            if (e.phase === 'windup') manifest.windup(t, at);
+            else if (e.phase === 'drop') {
+              // 同一批里有人被吓跑：吓跑自己有 braam 和静音，冲击让给它，冷气挪到静音之后
+              manifest.drop(t, at, fleeing.size ? { hit: false, breathDelay: HIT_STOP + 0.05 } : {});
+            } else manifest.end(t, at);
+            break;
+          }
+          case 'reveal':
+            if (e.on) lit.add(e.npc);
+            else lit.delete(e.npc);
+            reveal.set(lit.size > 0, t);
+            break;
+          case 'notice': {
+            // 手电照到鬼魂：那个人倒吸一口很轻的气。其余的察觉（声音、发毛、现身蓄力）没有声音：声源自己已经响过了
+            if (e.kind !== 'ghost' || !(NOTICE_GAP > 0)) break;
+            const n = npc(e.npc);
+            if (!n || t - (noticeAt.get(n.id) ?? -1e9) < NOTICE_GAP) break;
+            noticeAt.set(n.id, t);
+            gasp(bus, t + 0.05, { id: n.id, personality: n.personality, at: placeNpc(n), strong: false });
+            break;
+          }
+          case 'trap':
+            // 设下：一声极轻的冰裂声，只有玩家听得见（不定位）。sprung 走物件的 trigger 声，expired 无声
+            if (e.phase === 'armed') trapArm(bus, t, 0);
             break;
         }
       }
@@ -346,6 +409,7 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
   let amb: Ambience | null = null;
   let router: Router | null = null;
   let crowd: Crowd | null = null;
+  let breath: Breath | null = null;
   let ghostSnd: GhostSound | null = null;
   let muted = false;
   let queue: SimEvent[] = [];
@@ -404,6 +468,7 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
           amb = createAmbience(b);
           amb.start(c.currentTime + 0.05);
           crowd = createCrowd(b);
+          breath = createBreath(b, crowd);
           ghostSnd = createGhostSound(b);
           router = createRouter(b, pan, crowd);
           if (listener) b.space.setListener(listener.pos, listener.fwd);
@@ -411,7 +476,7 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
           console.warn('audio unavailable', err);
           failed = true;
           void ac?.close().catch(() => {});
-          ac = bus = amb = router = crowd = ghostSnd = null;
+          ac = bus = amb = router = crowd = breath = ghostSnd = null;
           return Promise.resolve();
         }
       }
@@ -487,11 +552,12 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
       amb = null;
       router = null;
       crowd = null;
+      breath = null;
       ghostSnd = null;
     },
   };
 
-  /** 每帧：紧张度衰减、按平均恐惧值推 dread（每 0.25 秒写一次参数）、安排环境层的嘎吱；3D 时挪声道、落脚步、重算遮挡 */
+  /** 每帧：紧张度衰减、按平均恐惧值推 dread（每 0.25 秒写一次参数）、安排环境层的嘎吱、对齐被照到的名单；3D 时挪声道、落脚步、排喘气、重算遮挡 */
   function tick(ctx: FrameCtx) {
     if (!ac || !amb || !router || !bus) return;
     router.tension *= Math.exp(-ctx.dt / DREAD.tensionTau);
@@ -512,6 +578,7 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
       amb.setDread(dread, now);
     }
     amb.update(now);
+    router.sync(ctx.state, now + LOOKAHEAD);
     const space = bus.space;
     if (!space.active) return;
     if (!presence) {
@@ -521,6 +588,8 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
     // 鬼魂不在了（开场前、主会话没再调 setGhost）也要从听者算遮挡
     if (!ghost) space.setEar(null);
     crowd?.update(ctx.state.npcs, now + LOOKAHEAD, ctx.dt);
+    // 喘气、呜咽：耳朵是鬼魂（玩家就是它），不是镜头
+    breath?.update(ctx.state.npcs, now + LOOKAHEAD, ctx.dt, ghost);
     space.update(now);
   }
 

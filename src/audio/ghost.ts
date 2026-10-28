@@ -12,9 +12,28 @@
 //   冷风 air：鬼魂动起来才有，水平速度 0.3 → 2.2 米/秒从无到满（0.4 秒平滑）；满的时候每个声道也只有 RMS 约 -56 dBFS，
 //     比环境层的风还低 6 dB（几乎听不见：耳机里只听得出「一动起来身边多了一点风」，停下就没了）。左右两路不相关的带通噪声（650 Hz，Q 0.6，中心频率慢慢漂），
 //     不定位：风是包在身边的，定位到鬼魂身上反而像前面有个东西在嘶嘶响。决定保留它，但压得很低；嫌多余就把 GHOST.air 设 0
+//
+// 现身（2026-10-28，manifest 事件；时刻和模拟、画面是同一套：windup 0 → drop 0.6 → end 2.1 秒，MANIFEST.windup / hold）
+//   createManifestSound 管三个节拍，engine.ts 的路由把事件转给它：
+//   windup：环境声让路 —— bus.ambHush 在 0.5 秒里压低 12 dB（A1；吓跑静音用的 ambDuck 另算，两个乘在一起）；一个小二度的低持续音淡入（A2）：
+//     55 Hz 和 58.27 Hz 两个正弦（拍频 3.3 Hz），各带一点 Q 4 的带通噪声，再叠它们的二次、三次谐波（110 / 116.5、165 / 175 Hz，两对也都是小二度；
+//     小喇叭放不出 55 Hz，靠它们听得出有东西在嗡），过 tanh 轻微失真（多出一点互调，粗糙感）、低通 450 Hz；
+//     下面那个音在蓄力这 0.6 秒里往下滑 1.7 Hz（拍频变快：越来越近，音高不往上走）；0.5 秒淡入。
+//     灯每暗一下一声很轻的咔哒（lightClick，3D 放在现身的位置）：默认 0.2、0.4 秒各一下 —— 对着 lightfx 蓄力节奏表
+//     （"mmamam…"，每秒 10 个字母，a = 暗）里字母 a 的位置；画面那边的暗点改了，这两个数跟着改（MANIFEST_SFX.clicks）
+//   drop：低频冲击（sfx.ts 的 manifestHit，吓跑 braam 最低一层）+ 很近的一口冷气（voices.ts 的 coldBreath，3D 放在现身的位置）。
+//     同一帧有人被吓跑时（吓跑自己有 braam 和静音），冲击让给它，冷气挪到静音之后
+//   end：持续音 0.8 秒淡出（指数，时间常数 0.27 秒）；灯再暗一下的咔哒（轻 30%）；环境声要等 1.5 秒才开始回来，回来用 1.2 秒（C4：多停两拍）
+//   保险：没收到 end（暂停、事件丢了）的话，持续音和让路在 windup + hold + 3 秒后自己收（都预排在 AudioParam 时间线上，end 来得及时会把它们取消）
+//
+// 被手电照到（reveal 事件）：一层很低、很轻的压力声，给玩家的提示（调研 3.1）：约 −30 dB 的低通噪声（截止 220 Hz，噪声幅度被一个 0.21 Hz 的慢正弦推着
+//   起伏 ±20%）+ 40 Hz 正弦（+ 一个 80 Hz 的二次谐波，小喇叭放不出 40 Hz 时靠它）；任何一支手电照着就淡入（0.4 秒），全部离开就淡出（0.8 秒），
+//   中途又照到就从当前音量折回去（setTargetAtTime，没有跳变）；不定位，不是提示音，不「叮」。第一次用到才建节点，建好以后一直在（音量 0 时几乎不占 CPU）
+import { MANIFEST } from '../config/visitors';
 import type { GhostState } from '../engine/types';
-import { Snd, bandNoise, creak, playGrains, rand, type Bus, type CreakSpec, type Grain } from './sfx';
+import { Snd, bandNoise, creak, db, lightClick, manifestHit, playGrains, rand, type Bus, type CreakSpec, type Grain } from './sfx';
 import type { Place, Port } from './space';
+import { coldBreath } from './voices';
 
 export const WHOOSH = {
   /** 总音量（dB） */
@@ -151,6 +170,165 @@ export function createGhostSound(bus: Bus): GhostSound {
         const moved = Math.abs(target - airTarget) > 0.05 * (GHOST.air / 0.5) || (target === 0 && airTarget !== 0);
         if (moved) air.gain.setTargetAtTime((airTarget = target), now, GHOST.airTau);
       }
+    },
+  };
+}
+
+// ── 现身 ─────────────────────────────────────────────────────────────────────────
+
+export const MANIFEST_SFX = {
+  /** A1 环境声让路：压低多少 dB、多快压下去（秒）；收回（end）以后过多久环境声才开始回来、回来用多久（秒） */
+  hush: { db: -12, down: 0.5, back: 1.5, up: 1.2 },
+  /** A2 小二度低持续音 */
+  drone: {
+    /** 两个正弦的频率（赫兹）：小二度，拍频 3.3 Hz */
+    hz: [55, 58.27] as const,
+    /** 下面那个音在蓄力这段时间里往下滑多少赫兹（拍频变快：越来越近，音高不往上走）；0 = 不滑 */
+    slide: -1.7,
+    /**
+     * 基音、二次谐波（八度）、三次谐波的相对音量。55 / 58.27 Hz 在笔记本小喇叭上放不出来，所以把一部分能量放到 110 / 116.5 和 165 / 175 Hz
+     * （两对也都是小二度），小喇叭上也听得出有东西在嗡；基音压低一点，免得整体 RMS 全压在 55 Hz 一带
+     */
+    partials: [0.2, 0.45, 0.25] as readonly number[],
+    /** 每根正弦带的带通噪声（Q 4）相对 */
+    noise: 0.3,
+    /** tanh 失真的驱动、低通截止（赫兹） */
+    drive: 1.2,
+    lp: 450,
+    /** 包络峰值（线性）、淡入秒数、淡出的时间常数 = out / 3（0.8 秒后只剩 5%） */
+    amp: 0.06,
+    in: 0.5,
+    out: 0.8,
+  },
+  /** 蓄力里灯每暗一下的咔哒：相对蓄力开始的时刻（秒）；收回时灯再暗一下的咔哒强度（0 = 不要） */
+  clicks: [0.2, 0.4] as readonly number[],
+  endClick: 0.7,
+  /** 保险：这么久（秒）还没收到 end 就自己收 */
+  maxLife: MANIFEST.windup + MANIFEST.hold + 3,
+};
+
+export interface ManifestSound {
+  /** 蓄力开始：环境声让路、持续音淡入、灯的咔哒。at = 现身的位置（3D 或声像） */
+  windup(t: number, at: Place): void;
+  /** 落下：低频冲击 + 冷气。hit = false 时不放冲击（同一帧有人被吓跑，braam 已经在了）；breathDelay = 冷气晚多少秒（避开吓跑的静音） */
+  drop(t: number, at: Place, o?: { hit?: boolean; breathDelay?: number }): void;
+  /** 收回：持续音淡出、灯再暗一下的咔哒，环境声过 MANIFEST_SFX.hush.back 秒才回来 */
+  end(t: number, at: Place): void;
+}
+
+export function createManifestSound(bus: Bus): ManifestSound {
+  const M = MANIFEST_SFX;
+  const D = M.drone;
+  const hush = bus.ambHush?.gain;
+  /** 正在响的持续音的包络（没有 = 没有在现身） */
+  let env: GainNode | null = null;
+
+  const buildDrone = (t0: number): GainNode => {
+    const stop = t0 + M.maxLife;
+    const s = new Snd(bus, { at: 0, wet: 0.2 });
+    // 所有正弦的幅度加起来 ≤ 1：进失真之前不会被 WaveShaper 硬削
+    const sum = s.gain(1 / (2 * D.partials.reduce((a, b) => a + b, 0)));
+    const tone = (hz: number, amp: number, slide: number) => {
+      const o = s.osc('sine', hz, t0, stop);
+      if (slide) {
+        o.frequency.setValueAtTime(hz, t0);
+        o.frequency.linearRampToValueAtTime(hz + slide, t0 + MANIFEST.windup);
+      }
+      o.connect(s.gain(amp)).connect(sum);
+    };
+    const [lo, hi] = D.hz;
+    D.partials.forEach((a, i) => {
+      tone(lo * (i + 1), a, D.slide * (i + 1));
+      tone(hi * (i + 1), a, 0);
+    });
+    // 各带一点带通噪声（窄，像低频的毛边）
+    for (const f of D.hz) bandNoise(s, t0, stop, 'bandpass', f, 4).connect(s.gain(D.noise * D.partials[0])).connect(sum);
+    // 轻微失真：多出一点谐波和互调（粗糙感），小喇叭上更听得出
+    const curve = new Float32Array(1025);
+    for (let i = 0; i < curve.length; i++) curve[i] = Math.tanh(D.drive * ((i / (curve.length - 1)) * 2 - 1)) / Math.tanh(D.drive);
+    const e = s.gain(0);
+    sum.connect(s.add(new WaveShaperNode(s.ac, { curve, oversample: '2x' }))).connect(s.bq('lowpass', D.lp, 0.7)).connect(e).connect(s.out);
+    e.gain.setValueAtTime(0.0003, t0);
+    e.gain.exponentialRampToValueAtTime(D.amp, t0 + D.in);
+    // 保险：end 来得及时，它会把后面这两个点取消
+    e.gain.setValueAtTime(D.amp, stop - 1);
+    e.gain.linearRampToValueAtTime(0, stop);
+    s.end(stop + 0.5);
+    return e;
+  };
+
+  return {
+    windup(t, at) {
+      env = buildDrone(t);
+      for (const c of M.clicks) lightClick(bus, t + c, at);
+      if (hush) {
+        hush.cancelScheduledValues(t);
+        hush.setTargetAtTime(db(M.hush.db), t, M.hush.down / 3);
+        hush.setTargetAtTime(1, t + M.maxLife + M.hush.back, M.hush.up / 3);
+      }
+    },
+    drop(t, at, o = {}) {
+      if (o.hit !== false) manifestHit(bus, t, 0);
+      coldBreath(bus, t + (o.breathDelay ?? 0), at);
+    },
+    end(t, at) {
+      if (env) {
+        env.gain.cancelScheduledValues(t);
+        env.gain.setTargetAtTime(0, t, D.out / 3);
+        env = null;
+      }
+      if (hush) {
+        hush.cancelScheduledValues(t + M.hush.back);
+        hush.setTargetAtTime(1, t + M.hush.back, M.hush.up / 3);
+      }
+      if (M.endClick > 0) lightClick(bus, t + 0.02, at, M.endClick);
+    },
+  };
+}
+
+// ── 被手电照到 ──────────────────────────────────────────────────────────────────────
+
+export const REVEAL = {
+  /** 低通噪声（线性 0.03 = −30 dB）、截止（赫兹）；40 Hz 正弦、它的二次谐波（80 Hz）相对 */
+  noise: 0.03,
+  lp: 220,
+  hz: 40,
+  sine: 0.02,
+  octave: 0.35,
+  /** 噪声音量被一个很慢的正弦推着起伏（赫兹、深度），免得一直照着时像一块死的墙 */
+  swell: [0.21, 0.2] as [number, number],
+  /** 淡入、淡出秒数 */
+  in: 0.4,
+  out: 0.8,
+};
+
+export interface RevealLayer {
+  /** 有没有人的手电照着鬼魂：true 淡入、false 淡出。t = AudioContext 时间 */
+  set(on: boolean, t: number): void;
+}
+
+export function createRevealLayer(bus: Bus): RevealLayer {
+  const R = REVEAL;
+  let env: GainNode | null = null;
+  let on = false;
+  const build = (): GainNode => {
+    const s = new Snd(bus, { at: 0 });
+    const g = s.gain(0);
+    const noise = s.gain(R.noise);
+    bandNoise(s, 0, undefined, 'lowpass', R.lp, 0.7).connect(noise).connect(g);
+    s.osc('sine', R.swell[0], 0).connect(s.gain(R.noise * R.swell[1])).connect(noise.gain);
+    s.osc('sine', R.hz, 0).connect(s.gain(R.sine)).connect(g);
+    s.osc('sine', R.hz * 2, 0).connect(s.gain(R.sine * R.octave)).connect(g);
+    g.connect(s.out);
+    return g;
+  };
+  return {
+    set(next, t) {
+      if (next === on) return;
+      on = next;
+      env ??= build();
+      env.gain.cancelScheduledValues(t);
+      env.gain.setTargetAtTime(on ? 1 : 0, t, (on ? R.in : R.out) / 3);
     },
   };
 }
