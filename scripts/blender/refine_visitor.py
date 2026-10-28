@@ -39,6 +39,7 @@ def parse_args():
     p.add_argument('--blend', type=float, default=0.6, help='肢体到身体的过渡宽度（相对管子半径）')
     p.add_argument('--spine-damp', type=float, default=1.0, help='脊柱各节转动保留多少（1 = 不改，0.5 = 减半）')
     p.add_argument('--no-reweight', action='store_true')
+    p.add_argument('--trust', default='', help='逗号分隔的 arms / legs：这些肢体不做「管子」判断，照自动绑骨的权重跟着肢体走（骨头放偏了的模型用）')
     p.add_argument('--min-island', type=float, default=0.002, help='面数少于总数这个比例的孤立碎片删掉')
     return p.parse_args(argv)
 
@@ -376,6 +377,19 @@ def reweight(obj):
         if known:
             for n in names:
                 radius.setdefault(n, known[len(known) // 2])
+    # --trust 点名的肢体（骨头放偏了的模型）：管子判断不可信，名下的点照自动绑骨的权重跟着肢体走。
+    # 实测骷髅：自动绑骨把肩关节放在球的上部（离地 0.64），手臂网格却是从球中间（约 0.5）伸出来的，
+    # 按管子判断会把上臂整段分给身体，手一垂下来上臂就被拉成两片「翅膀」（2026-10-28）。
+    # 试过按「名下的点有多少落在管子里」自动判断：四套里大多数骨头都不到一半（骨头本来就不在管子正中），分不出来
+    trust_kinds = {k.strip() for k in A.trust.split(',') if k.strip()}
+    trusted = {n for n, (kind, _) in limb_of.items() if f'{kind}s' in trust_kinds}
+    for name in radius:
+        a, b = bone_seg[name]
+        us = [seg_dist(p, a, b) / max(1e-6, radius[name]) for p, w in zip(pos, weights) if dominant(w) == name and outside(p)]
+        if us:
+            report.setdefault('tube_frac', {})[name] = round(sum(1 for u in us if u <= A.limb_scale) / len(us), 3)
+    if trusted:
+        log(f'{obj.name}：{sorted(trust_kinds)} 照原权重跟着肢体')
 
     body = skel['body']
     if body not in vg_by_name:
@@ -389,6 +403,8 @@ def reweight(obj):
             limbness = 0.0  # 主导骨头在脊柱上（球身、帽子、领子、背后的披风）：身体
         elif dom in effector:
             limbness = 1.0  # 手、脚（含鞋）整块跟着肢体
+        elif dom in trusted:
+            limbness = 1.0
         elif dom in radius:
             # 大腿、上臂这些「管子」：贴着管子的是肢体，离得远的（挂在旁边的配件）算身体，中间平滑过渡
             a, b = bone_seg[dom]

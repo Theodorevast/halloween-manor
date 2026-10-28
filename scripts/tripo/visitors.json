@@ -143,7 +143,15 @@
       "label": "手绘骷髅连身衣",
       "costume": "a homemade skeleton costume: the black ball body hand-painted with a slightly faded off-white ribcage and spine pattern around the logo without covering it, and painted bones along the arms and legs",
       "touchup": "2) Remove the top hat with its roses and brooches, the brooch above the logo, and the tattered lace cape with its lace trim, so that the round matte-black ball body is bare apart from the painted off-white bones; where those items were, show the same smooth matte-black ball surface and the same plain light grey background. Keep the painted ribcage, spine and the bones on the arms and legs exactly as they are.",
-      "notes": "轮廓完全不变、只加花纹：绑骨和动作最不容易出问题。2026-10-28：换装图自己加了礼帽、玫瑰和破蕾丝披风（没要），touchup 里去掉。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。"
+      "notes": "轮廓完全不变、只加花纹：绑骨和动作最不容易出问题。2026-10-28：换装图自己加了礼帽、玫瑰和破蕾丝披风（没要），touchup 里去掉。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。 2026-10-28：自动绑骨把肩关节放在球的上部，手臂网格离骨头远，精修时手臂照原权重（refine --trust arms），否则上臂被拉成「翅膀」。",
+      "overrides": {
+        "refine": {
+          "args": [
+            "--trust",
+            "arms"
+          ]
+        }
+      }
     }
   ]
 }
