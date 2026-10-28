@@ -4,6 +4,7 @@
 // 第三人称（透视镜头）下：在镜头背后的不显示（toScreen 给 NaN），隔着墙（鬼魂看不见）的不显示——
 // 墙全高以后，名牌、眼睛不该隔着墙露出来，找人靠声音（设计文档第 9 节）——离鬼魂远的淡出；
 // 镜头差不多平视，标记改挂在每种物件的顶上（俯视时统一 1.2 米就够了）
+// 机关（2026-10-28）：设下了的物件（armed > 0），眼睛换成空心的，不管有没有人看着它都亮着（只有玩家看得到的提示）
 import { CHARACTER } from '../config/character';
 import { SCARES } from '../config/scares';
 import { STRINGS } from '../config/strings';
@@ -51,10 +52,16 @@ function fearColor(f: number): string {
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
-const EYE =
-  '<svg class="ov-eye" viewBox="0 0 24 14" aria-hidden="true" focusable="false">' +
+/** 眼睛的内容：实心的（有人看得见它）和空心的（机关设下了：眼睑只有一道描边、里面透明，瞳孔是一个空圈） */
+const EYE_SOLID =
   '<path d="M1.2 7C5 1.6 19 1.6 22.8 7 19 12.4 5 12.4 1.2 7Z" fill="rgba(5,6,8,.72)" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>' +
-  '<circle cx="12" cy="7" r="3.4" fill="currentColor"/><circle cx="12" cy="7" r="1.4" fill="#050608"/></svg>';
+  '<circle cx="12" cy="7" r="3.4" fill="currentColor"/><circle cx="12" cy="7" r="1.4" fill="#050608"/>';
+const EYE_HOLLOW =
+  '<path d="M1.2 7C5 1.6 19 1.6 22.8 7 19 12.4 5 12.4 1.2 7Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>' +
+  '<circle cx="12" cy="7" r="3.2" fill="none" stroke="currentColor" stroke-width="1.2"/>';
+const EYE = `<svg class="ov-eye" viewBox="0 0 24 14" aria-hidden="true" focusable="false">${EYE_SOLID}</svg>`;
+/** 空心眼睛的行内样式（styles.css 里 .ov-eye 的规则管不到它）：霜的冷白，不用幽绿；只留一圈黑边压住背景，不发绿光 */
+const HOLLOW_STYLE = { color: 'rgb(190,205,224)', filter: 'drop-shadow(0 0 2px rgba(0, 0, 0, 0.95))', transform: 'scaleY(1)' };
 const RING =
   '<svg class="ov-ring" viewBox="0 0 32 32" aria-hidden="true" focusable="false">' +
   `<circle class="ov-ring-track" cx="16" cy="16" r="${RING_R}"/>` +
@@ -104,9 +111,13 @@ interface Mark {
   inner: HTMLDivElement;
   fade: number;
   arc: SVGCircleElement;
+  /** 眼睛的 svg：机关设下时换内容、写行内样式 */
+  eye: SVGSVGElement;
   cooling: boolean;
   seen: boolean;
   ready: boolean;
+  /** 机关设下了（眼睛是空心的） */
+  armed: boolean;
   dash: number;
 }
 
@@ -175,7 +186,8 @@ export function createOverlays(
     const inner = div('ov-mark-in', el);
     inner.innerHTML = RING + EYE;
     const arc = inner.querySelector<SVGCircleElement>('.ov-ring-arc')!;
-    const m: Mark = { el, inner, fade: 1, arc, cooling: false, seen: false, ready: true, dash: -1 };
+    const eye = inner.querySelector<SVGSVGElement>('.ov-eye')!;
+    const m: Mark = { el, inner, fade: 1, arc, eye, cooling: false, seen: false, ready: true, armed: false, dash: -1 };
     el.classList.add('is-ready', SCARES[o.type].kind === 'lure' ? 'is-lure' : 'is-sight');
     marks.set(o.id, m);
     return m;
@@ -296,6 +308,16 @@ export function createOverlays(
       if (!cooling !== m.ready) {
         m.ready = !cooling;
         m.el.classList.toggle('is-ready', !cooling);
+      }
+      // 机关设下了：眼睛换成空心的，一直亮着（不管有没有人看着它）；解除 / 触发了换回去。只在变化时写
+      const armed = o.armed > 0;
+      if (armed !== m.armed) {
+        m.armed = armed;
+        m.el.classList.toggle('is-armed', armed);
+        m.eye.innerHTML = armed ? EYE_HOLLOW : EYE_SOLID;
+        m.eye.style.color = armed ? HOLLOW_STYLE.color : '';
+        m.eye.style.filter = armed ? HOLLOW_STYLE.filter : '';
+        m.eye.style.transform = armed ? HOLLOW_STYLE.transform : '';
       }
       if (cooling) {
         // 剩下的弧长 = 剩余冷却的比例

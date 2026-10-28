@@ -7,13 +7,16 @@
 //   ?q=low             low 画质档
 //   ?torch             一只手电（外圈 + 亮芯两盏聚光，参数同 flashlight.ts）从卧室门口照向床：看鼓包的明暗和影子
 //   ?torch=x,z,tx,tz   手电的位置和照向的点（房屋米坐标）
+//   ?overlay           加上物件上方的标记层（眼睛、冷却圆环、悬停标签；用游戏的 styles.css），看机关设下后的空心眼睛
 // 按键：1–8 附身（harness 提供；床是 8）；鼠标悬停 = setHover，点击 = 附身
-// Playwright：window.__props = { ids(), targets(), hover(id), pause(), play(), advance(s), focus(id, size), drawCalls(), pick(x, y) }
+// Playwright：window.__props = { ids(), targets(), hover(id), pause(), play(), advance(s), focus(id, size), drawCalls(), pick(x, y),
+//   arm(id, 秒) 假装设下机关（armed = 秒数，0 = 解除；sandbox 里不倒数）, shells(id) 这个物件的幽光 / 霜外壳此刻显不显示 }
 import * as THREE from 'three/webgpu';
 import { buildTiles, CELL, FURNITURE, GRID_H, GRID_W, HOUSE_D, HOUSE_W, idx, PROPS, propCenter, Tile, WALL_CUT_H } from '../src/config/house';
 import type { FrameCtx, RenderCore, CameraRig, Module } from '../src/engine/types';
 import { VISION } from '../src/config/visitors';
 import { PALETTE } from '../src/view/palette';
+import { createOverlays } from '../src/view/overlays';
 import { createPropsView } from '../src/view/props';
 import { createHarness } from './harness';
 
@@ -127,6 +130,17 @@ h.add({
   },
 });
 
+// ── 标记层：?overlay ─────────────────────────────────────────────────────
+let overlays: ReturnType<typeof createOverlays> | null = null;
+if (qs.has('overlay')) {
+  await import('../src/styles.css');
+  const root = document.createElement('div');
+  root.id = 'overlay';
+  document.body.appendChild(root);
+  overlays = createOverlays(root, rig);
+  h.add(overlays);
+}
+
 // ── 悬停 / 点击（简化版拾取，和任务 2 的 picker 用同一个约定：沿 parent 找 userData.propId） ──
 const ray = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
@@ -145,6 +159,7 @@ const pickAt = (x: number, y: number): string | null => {
 canvas.addEventListener('pointermove', (e) => {
   const id = pickAt(e.clientX, e.clientY);
   props.setHover(id);
+  overlays?.setHover(id);
   canvas.style.cursor = id ? 'pointer' : '';
 });
 canvas.addEventListener('click', (e) => {
@@ -202,6 +217,22 @@ const advance = (s: number) => {
   drawCalls: () => core.renderer.info.render.drawCalls,
   /** 屏幕坐标（像素）→ 拾取到的物件 id */
   pick: pickAt,
+  /** 假装设下机关：armed = 秒数（0 = 解除）；sandbox 里不会自己倒数 */
+  arm: (id: string, secs = 60) => {
+    const o = h.state.objects.find((x) => x.id === id);
+    if (o) o.armed = secs;
+    return !!o;
+  },
+  /** 这个物件的幽光外壳、霜外壳此刻显不显示（每个外壳一项） */
+  shells: (id: string) => {
+    const root = core.scene.getObjectByName(`prop:${id}`);
+    const out = { glow: [] as boolean[], frost: [] as boolean[] };
+    root?.traverse((o) => {
+      if (o.name === 'glow-shell') out.glow.push(o.visible);
+      if (o.name === 'frost-shell') out.frost.push(o.visible);
+    });
+    return out;
+  },
   /** 房屋坐标 → 屏幕坐标（像素） */
   toScreen: (x: number, z: number, y = 0) => rig.toScreen({ x, z }, y),
 };

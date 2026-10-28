@@ -2,9 +2,11 @@
 // 点击的判定：按下和抬起间隔 < 400 ms、位移 < 6 px，这样拖一下、按住不放都不会误触发附身。
 // 触屏没有悬停：按下时先按落点更新一次悬停（叠层能显示物件名），抬起时再判定点击。
 // 第三人称（ghostRig）换一套：准星（画面正中）对着的、离鬼魂 4 米以内、鬼魂看得见的物件是悬停，
-// 指针锁定时按下左键附身；没锁定时那一下是「点一下继续」（ghostRig 重新锁定），不附身
+// 指针锁定时点一下（按下后不到 TRAP.holdToArm 秒松开）附身，在松开那一刻；按住满 TRAP.holdToArm 秒设机关（onArm）；
+// 按住期间准星对着的物件变了就作废。没锁定时那一下是「点一下继续」（ghostRig 重新锁定），不附身
 import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W } from '../config/house';
+import { TRAP } from '../config/visitors';
 import { ghostSees, setGhostUi, watchGhostUi } from './ghostRig';
 import { isGhostRig, type CameraRig, type GhostRig } from './types';
 
@@ -18,7 +20,61 @@ const AIM_RANGE = 4;
 export interface Picker {
   onHover(cb: (id: string | null) => void): void;
   onPick(cb: (id: string) => void): void;
+  /**
+   * 第三人称：对着物件按住左键满 TRAP.holdToArm 秒（期间准星一直对着它）→ 设下机关，在按满的那一刻（不用等松手）。
+   * 点一下（不到这么久就松手）仍然是 onPick，只是改到松手那一刻才发。触屏 / 娃娃屋没有这一手，永远不会调
+   */
+  onArm(cb: (id: string) => void): void;
   dispose(): void;
+}
+
+/** 按住手势的结果：点一下（附身）、按满（设机关）；id 是物件 */
+export type HoldAction = { type: 'pick' | 'arm'; id: string };
+
+/**
+ * 按住手势（第三人称的准星用）：按下时记下对准的物件和时间；
+ * 按满 holdMs 还对着同一个物件 → 'arm'（tick 里发，只发一次，不用等松手）；不到就松手 → 'pick'（松手那一刻）；
+ * 按住期间对准的物件变了（包括准星移开了）→ 作废，之后怎么样都不发。
+ * 纯状态机，时间（毫秒）由调用方传进来，所以好测；picking.ts 之外没人用
+ */
+export function createHoldGesture(holdMs: number) {
+  let held: { id: string; t0: number; armed: boolean } | null = null;
+  return {
+    /** 按下：准星对着物件才开始记；没对着就什么都不发 */
+    down(aimed: string | null, now: number) {
+      held = aimed ? { id: aimed, t0: now, armed: false } : null;
+    },
+    /** 每帧调：准星此刻对着谁。变了就作废；刚好按满了就返回 'arm'（只返回这一次） */
+    tick(aimed: string | null, now: number): HoldAction | null {
+      if (!held) return null;
+      if (aimed !== held.id) {
+        held = null;
+        return null;
+      }
+      if (!held.armed && now - held.t0 >= holdMs) {
+        held.armed = true;
+        return { type: 'arm', id: held.id };
+      }
+      return null;
+    },
+    /**
+     * 松手：准星此刻对着谁。对着原来那个：不到 holdMs 是 'pick'；到了但 tick 还没来得及发（两帧之间松的手）补发 'arm'；
+     * 已经在 tick 里设下了、作废了、本来就没对准，都是 null
+     */
+    up(aimed: string | null, now: number): HoldAction | null {
+      const h = held;
+      held = null;
+      if (!h || h.armed || aimed !== h.id) return null;
+      return { type: now - h.t0 >= holdMs ? 'arm' : 'pick', id: h.id };
+    },
+    /** 作废（丢了指针锁定、窗口失焦、pointercancel） */
+    cancel() {
+      held = null;
+    },
+    get holding() {
+      return held !== null;
+    },
+  };
 }
 
 const propIdOf = (obj: THREE.Object3D): string | null => {
@@ -150,6 +206,7 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
   return {
     onHover(cb) { hoverCbs.push(cb); },
     onPick(cb) { pickCbs.push(cb); },
+    onArm() {}, // 触屏 / 娃娃屋没有「按住设机关」：点一下只会附身
     dispose() {
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerdown', onDown);
@@ -178,6 +235,8 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
   const c = new THREE.Vector3();
   const hoverCbs: ((id: string | null) => void)[] = [];
   const pickCbs: ((id: string) => void)[] = [];
+  const armCbs: ((id: string) => void)[] = [];
+  const hold = createHoldGesture(TRAP.holdToArm * 1000);
   let hover: string | null = null;
   let locked = false;
   let disposed = false;
@@ -211,34 +270,58 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
     for (const cb of hoverCbs) cb(id);
   };
 
-  // 镜头每帧都在动（跟随、转向），悬停每帧重算一次：7 个盒子的一条射线，很便宜
+  const fire = (act: HoldAction | null) => {
+    if (act) for (const cb of act.type === 'pick' ? pickCbs : armCbs) cb(act.id);
+  };
+
+  // 镜头每帧都在动（跟随、转向），悬停每帧重算一次：8 个盒子的一条射线，很便宜。按住时也在这里看有没有按满、准星有没有移开
   const tick = () => {
     if (disposed) return;
-    setHover(aimed());
+    const id = aimed();
+    setHover(id);
+    fire(hold.tick(id, performance.now()));
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
-  // 丢了锁定：下一帧 aimed() 返回 null，悬停自己收起
-  const unwatch = watchGhostUi((s) => { locked = s.locked; });
+  // 丢了锁定：下一帧 aimed() 返回 null，悬停自己收起；按着的手势也作废（Esc 之后松手，松手事件到不了这里）
+  const unwatch = watchGhostUi((s) => {
+    locked = s.locked;
+    if (!s.locked) hold.cancel();
+  });
 
+  // 按下不立刻附身：要等松手（不到 holdToArm 秒）才算「点一下」，按满了就是设机关
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0 || !locked) return;
     const id = aimed();
     setHover(id);
-    if (id) for (const cb of pickCbs) cb(id);
+    hold.down(id, performance.now());
   };
+  const onUp = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    fire(hold.up(aimed(), performance.now()));
+  };
+  const onCancel = () => hold.cancel();
   canvas.addEventListener('pointerdown', onDown);
+  canvas.addEventListener('pointerup', onUp);
+  canvas.addEventListener('pointercancel', onCancel);
+  addEventListener('blur', onCancel);
 
   return {
     onHover(cb) { hoverCbs.push(cb); },
     onPick(cb) { pickCbs.push(cb); },
+    onArm(cb) { armCbs.push(cb); },
     dispose() {
       canvas.removeEventListener('pointerdown', onDown);
+      canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('pointercancel', onCancel);
+      removeEventListener('blur', onCancel);
       unwatch();
       disposed = true;
+      hold.cancel();
       setHover(null);
       hoverCbs.length = 0;
       pickCbs.length = 0;
+      armCbs.length = 0;
     },
   };
 }
