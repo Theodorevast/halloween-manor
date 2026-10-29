@@ -33,6 +33,7 @@
   /* 和标题页一样不透明：半透明时 HUD 的计数、按钮会从纸底下透出来，像没盖住 */
   background: var(--grain) var(--night);
   color: var(--bone);
+  /* 整个画面都是这一层（翻开、淡入淡出时都是）：点纸外面也落在它上面，点不到画布——不然点一下就把指针锁回去，俯视时还会附身物件 */
   pointer-events: auto;
   user-select: text;
   -webkit-user-select: text;

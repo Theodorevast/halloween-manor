@@ -23,7 +23,10 @@ export interface RegisterView extends Module {
   onKeepHaunting(cb: () => void): void;
   /** 收夜后玩家点 Another night（main.ts 重新载入） */
   onAnotherNight(cb: () => void): void;
-  /** 翻开、合上时（main.ts 用来放开 / 重新请求指针锁定、暂停输入） */
+  /**
+   * 翻开、合上时（main.ts 用来放开 / 重新请求指针锁定、暂停输入）。每次 open() 都发 true（已经翻开着再 open，比如中途翻开着到了收夜，也发）；
+   * 每次真的合上发 false（本来就合着时再 close() 什么都不做、不发）
+   */
   onToggle(cb: (open: boolean) => void): void;
   /** 墙上多一个影子出现过（页脚多一句 "And one more, who did not sign."） */
   noteOtherOne(): void;
@@ -199,7 +202,8 @@ export function createRegisterView(root: HTMLElement, opts: RegisterViewOptions 
   }
 
   /**
-   * 翻开时这一页独占键盘：焦点只在这一页里转（Tab 到最后一个按钮再往后回到第一个），Esc 合上（只在中途翻开时，收夜那一页要选一个按钮）。
+   * 翻开时这一页独占键盘：焦点只在这一页里转（Tab 到最后一个按钮再往后回到第一个），Esc 合上——只在中途翻开时；
+   * 收夜那一页 Esc 不合上，只能点那两个按钮（main.ts 把收夜那一页的任何合上都当 Keep haunting）。
    * 在 window 的捕获阶段拦下 keydown、不再往下传：鬼魂镜头按住的方向键、WASD 只看「开过场」不看指针锁定，用方向键滚这一页时鬼魂会跟着飘；
    * HUD 的 M、Q / E，现身的 F 也一样。浏览器自己的动作（滚动、按钮的回车 / 空格）照常；keyup 不拦，之前按住的键松开时照样放掉
    */
@@ -245,16 +249,21 @@ export function createRegisterView(root: HTMLElement, opts: RegisterViewOptions 
       closing = o.closing;
       render();
       scroll.scrollTop = 0;
-      if (open) return; // 已经翻开（中途翻开时到了收夜）：只换内容和按钮
-      open = true;
-      returnFocus = document.activeElement;
-      clearTimeout(hideTimer);
-      page.classList.remove('is-leaving');
-      page.hidden = false;
-      // 先让它以透明的样子排一次版，再加 is-on：淡入和翻页才会从头播
-      void page.offsetWidth;
-      page.classList.add('is-on');
-      scroll.focus({ preventScroll: true });
+      if (open) {
+        // 已经翻开（中途翻开着到了收夜）：只换内容和按钮，不再转一次页。焦点原来在被换掉的 Back to the manor 上，就回到这一页
+        if (!page.contains(document.activeElement)) scroll.focus({ preventScroll: true });
+      } else {
+        open = true;
+        returnFocus = document.activeElement;
+        clearTimeout(hideTimer);
+        page.classList.remove('is-leaving');
+        page.hidden = false;
+        // 先让它以透明的样子排一次版，再加 is-on：淡入和翻页才会从头播
+        void page.offsetWidth;
+        page.classList.add('is-on');
+        scroll.focus({ preventScroll: true });
+      }
+      // 每次 open 都发（已经翻开着也发）：main.ts 在这里放开指针锁定
       for (const cb of toggleCbs) cb(true);
     },
     close() {
