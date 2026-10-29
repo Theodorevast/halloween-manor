@@ -31,6 +31,7 @@ import { createOtherShadow } from './view/otherShadow';
 import { createOverlays } from './view/overlays';
 import { createParticlesView } from './view/particles';
 import { createPropsView } from './view/props';
+import { createRangeFrost } from './view/rangeFrost';
 
 const stage = document.getElementById('stage')!;
 const canvas = document.createElement('canvas');
@@ -219,6 +220,9 @@ async function boot() {
   const hints = createHints(uiRoot);
   const registerView = createRegisterView(uiRoot);
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  // 地上的范围霜线（手感 FEEL-2、FEEL-11）：准星 / 手指对上物件时画出它的范围，现身蓄力时跑到 5 米，冷却好了往外呼一次。
+  // 网格标了 deferCompile，要在下面开场的预编译收集之前建好
+  const rangeFrost = createRangeFrost(c, r, { reduced: () => reducedMotion.matches });
   // 一夜的收尾（src/night.ts）：到点收夜、天亮，屋里没人、前门关上以后静一会儿、光收回前门、翻开登记簿；?night=<分钟> 改夜长
   const night = createNight({
     world,
@@ -235,7 +239,7 @@ async function boot() {
     reduced: () => reducedMotion.matches,
   }, nightTiming());
   modules.push(
-    house, createFogView(c, r), props, characters, frontDoor, otherShadow, createParticlesView(c),
+    house, createFogView(c, r), props, rangeFrost, characters, frontDoor, otherShadow, createParticlesView(c),
     ...(ghostFx && isGhostRig(r) ? [createGhostView(c, r, ghostFx), ghostFx.lights, ghostFx.frost] : []),
     createJuice(r, c), cine, audio, overlays, hud, hints, registerView,
     // 一夜只在开场之后走（开场前模拟没动；图形设备丢了以后也不再往下走，免得登记簿翻在错误界面上）
@@ -258,6 +262,7 @@ async function boot() {
   picker.onHover((id) => {
     props.setHover(id);
     overlays.setHover(id);
+    rangeFrost.show(id);
     if (id) hints.aimed(id);
   });
   // 登记簿翻开着时不附身、不设机关：它自己的底子盖着画面，这里再保险一下（俯视模式点到底下的物件）
