@@ -4,7 +4,7 @@
     "status: draft = 草稿，--run 只做到换装图（每个约 10 积分）。看过 assets-src/visitors/<id>/costume.png 满意后改成 approved，才会做 3D、绑骨、动作（每个约 95 积分）。",
     "reference: 吉祥物参考图，可以是文件，也可以是目录（目录里只能有一张 PNG / JPEG / WebP）。",
     "每个访客可以用 overrides 覆盖 defaults 里的任何字段；值写 null 表示删掉这个字段。改了已经做过的步骤会停下来提示 --reroll，不会悄悄重做。",
-    "价格表在 scripts/tripo/catalog.mjs（developers.tripo3d.ai/en/pricing，2026-10-27 读取）。下面四套服装都是草稿，等用户确认。",
+    "价格表在 scripts/tripo/catalog.mjs（developers.tripo3d.ai/en/pricing，2026-10-27 读取）。下面六套服装（最早的四套 + 2026-10-29 加的两套联名）都已经批准做完了；新加的访客先写成 draft，看过换装图再改 approved。",
     "2026-10-28：按翠宝的造型改写（黑色球形身体、正面 logo、半透明灰色手臂、黄色球鞋，没有脸）：服装是玩具配件式的帽子、披肩、领子和手绘花纹。",
     "2026-10-29：加联名皮肤 jotaro、dio（JOJO，草稿）。授权确认之前只在地址带 ?collab 时出现，不进公开的访客轮换；服装只用文字写，用户给的同人图不喂给任何生成模型。换装提示词在各自的 overrides 里覆盖（照原作配色、搪胶玩具配件的做工），defaults 不动，前四套已经做完的步骤不受影响。出草稿用 --run jotaro,dio --yes --until costume（只出换装图；不加 --until 会接着去传还不存在的 touchup.png）。"
   ],
@@ -12,7 +12,7 @@
   "defaults": {
     "route": "multiview",
     "prep": {
-      "$comment": "共用的预处理：先把参考图里的吉祥物摆成 T 姿势（image-to-image 的 t_pose 模板），四套服装都从这张图出发，比例一致，也更好绑骨。参考图如果只有头像或扁平 logo，在前面加 \"figure\"（生成全身）；已经是端正的全身站姿可以把 templates 写成 []。",
+      "$comment": "共用的预处理：先把参考图里的吉祥物摆成 T 姿势（image-to-image 的 t_pose 模板），所有服装（现在六套）都从这张图出发，比例一致，也更好绑骨。参考图如果只有头像或扁平 logo，在前面加 \"figure\"（生成全身）；已经是端正的全身站姿可以把 templates 写成 []。",
       "templates": [
         "t_pose"
       ],
@@ -172,12 +172,13 @@
       "notes": "帽檐不宽：宽帽檐容易和球身粘成一块。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。",
       "overrides": {
         "refine": {
-          "$comment": "2026-10-29（用户批准）：腿照自动绑骨的权重跟着腿走，但只信离骨段 0.10 米以内的点（0.10–0.20 米过渡，再远的算身体），和吸血鬼一样。原来（默认参数）腿后侧、袜口被判成身体，迈步时拉出细长的面。量的拉伸（每个动作最坏一帧拉长超过 2 倍的边数）：walk 613 → 511、run 779 → 566、flee 857 → 560、scared_02 954 → 676、afraid 974 → 655，其余也少；最坏一帧的 p99.9 拉伸只有 afraid 13.44 → 13.74 略高，其余不变。手套不用改：金属度 0.31，只有环境光时看着也是浅灰（不像吸血鬼、探险家原来那样发黑）",
+          "$comment": "2026-10-29（用户批准）：腿照自动绑骨的权重跟着腿走，但只信离骨段 0.10 米以内的点（0.10–0.20 米过渡，再远的算身体），和吸血鬼一样。原来（默认参数）腿后侧、袜口被判成身体，迈步时拉出细长的面。量的拉伸（每个动作最坏一帧拉长超过 2 倍的边数）：walk 613 → 511、run 779 → 566、flee 857 → 560、scared_02 954 → 676、afraid 974 → 655，其余也少；最坏一帧的 p99.9 拉伸只有 afraid 13.44 → 13.74 略高，其余不变。手套不用改：金属度 0.31，只有环境光时看着也是浅灰（不像吸血鬼、探险家原来那样发黑）。2026-10-29（复审 2）：加 --split-feet：两只鞋底之间有 24 个面（28 条边）连着左右两只脚，鞋、脚骨是整块跟着脚的，迈步时这片面被拉成一条长板（最大拉伸 walk 63 倍、run 87 倍、flee 104 倍）；精修时删掉这 24 个面（权重、贴图、动作都不变），不补洞：开口在鞋底内侧（主要在左鞋，右鞋只有一个小口），游戏里侧面看走路、侧面和背后（含低机位）看逃跑都看不出来。六套里只有女巫有这片连接面",
           "args": [
             "--trust",
             "legs",
             "--trust-dist",
-            "0.10"
+            "0.10",
+            "--split-feet"
           ]
         }
       }
@@ -268,7 +269,7 @@
           "promptTemplate": "Dress this character in a Halloween costume: {costume}. It must stay clearly the same mascot: a round matte-black ball body with its gold-and-white logo on the front still visible, short black legs, translucent grey arms and yellow sneakers; do not give it a face or a human torso. Colours faithful to the source costume, not muted; every piece fits the ball like a vinyl toy accessory; no glow, no added text, nothing held in the hands. Keep exactly the same T-pose, camera angle and framing, full body visible from top to sneakers, facing the viewer. Both legs stay visible and separate. Plain light grey seamless background, soft even lighting."
         },
         "refine": {
-          "$comment": "2026-10-29：默认参数下外套的短袖比手臂的「管子」粗，被分给身体，手一垂下来两只袖子还横在肩膀上像翅膀（afraid、scared_02、walk 都看得见）。--trust arms 让手臂名下的点照自动绑骨的权重跟着手臂：袖子跟着手垂下来，头发整块还是蓝的（跟着身体，没被分给手臂）。Blender 量的拉伸（每个动作最坏一帧拉长超过 2 倍的边数）：idle 598 → 420、walk 815 → 615、run 1097 → 910，其余动作也少 15%–25%。jotaro 试过 --trust arms（大衣后背被手臂扯成一大片斜三角，run、scared_02 更糟）和 --limb-scale 2.0 / 2.5（各有得失），都不比默认好，当时留默认（2026-10-29 第 4 轮起 jotaro 用 --trust arms,legs --trust-dist 0.10）。2026-10-29（用户批准）：加上腿、只信离骨段 0.10 米以内的点（--trust arms,legs --trust-dist 0.10）：头发离手臂骨远，照旧跟着身体；腿后侧、绑带不再被拉长。量的拉伸（拉长超过 2 倍的边数）：idle 420 → 262、walk 615 → 383、run 910 → 507、flee 968 → 524、afraid 1041 → 562，八个动作都少 40%–50%；最坏一帧的 p99.9 拉伸 walk、flee 小了，run 13.58 → 14.31、scared_02 15.23 → 15.49 略高",
+          "$comment": "2026-10-29：默认参数下外套的短袖比手臂的「管子」粗，被分给身体，手一垂下来两只袖子还横在肩膀上像翅膀（afraid、scared_02、walk 都看得见）。--trust arms 让手臂名下的点照自动绑骨的权重跟着手臂：袖子跟着手垂下来，头发整块还是蓝的（跟着身体，没被分给手臂）。Blender 量的拉伸（每个动作最坏一帧拉长超过 2 倍的边数）：idle 598 → 420、walk 815 → 615、run 1097 → 910，其余动作也少 15%–25%。jotaro 试过 --trust arms（大衣后背被手臂扯成一大片斜三角，run、scared_02 更糟）和 --limb-scale 2.0 / 2.5（各有得失），都不比默认好，当时留默认（2026-10-29 第 4 轮起 jotaro 用 --trust arms,legs --trust-dist 0.10）。2026-10-29（用户批准）：加上腿、只信离骨段 0.10 米以内的点（--trust arms,legs --trust-dist 0.10）：头发离手臂骨远，照旧跟着身体；腿后侧、绑带不再被拉长。量的拉伸（拉长超过 2 倍的边数）：idle 420 → 262、walk 615 → 383、run 910 → 507、flee 968 → 524、afraid 1041 → 562，八个动作都少约 38%–46%；最坏一帧的 p99.9 拉伸 walk、flee、afraid 小了，idle 不变，run 13.58 → 14.31、scared_01 12.40 → 12.48、scared_02 15.23 → 15.49、look_around 8.54 → 8.57 略高",
           "args": [
             "--trust",
             "arms,legs",

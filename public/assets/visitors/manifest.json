@@ -1,6 +1,6 @@
 {
   "$comment": "由 scripts/tripo/visitors.mjs 生成，重跑 export 会覆盖对应条目。url 相对于 import.meta.env.BASE_URL；clips 的键对应 src/config/character.ts 的 clips，值是 GLB 里的片段原名（null = 没有）",
-  "updatedAt": "2026-10-29T14:04:14.173Z",
+  "updatedAt": "2026-10-29T15:16:30.536Z",
   "visitors": [
     {
       "id": "lantern-explorer",
@@ -196,8 +196,8 @@
         "scared2": "preset:biped:scared_02"
       },
       "stats": {
-        "bytes": 2016996,
-        "triangles": 11417,
+        "bytes": 2016228,
+        "triangles": 11393,
         "textures": [
           "1024x1024",
           "2048x2048",
@@ -244,7 +244,7 @@
           "animate2": "179c6bbe-17e2-42e5-9198-b0548776b7d9"
         },
         "credits": 245,
-        "exportedAt": "2026-10-29T14:03:53.144Z"
+        "exportedAt": "2026-10-29T15:16:30.536Z"
       }
     },
     {
