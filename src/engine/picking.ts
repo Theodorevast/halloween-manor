@@ -5,7 +5,9 @@
 // 第三人称（ghostRig）换一套：准星（画面正中）对着的、离鬼魂 4 米以内、鬼魂看得见的物件是悬停，
 // 指针锁定时点一下（按下后不到 TRAP.holdToArm 秒松开）附身，在松开那一刻；按住满 TRAP.holdToArm 秒设机关（onArm）；
 // 按住期间准星对着的物件变了就作废；叠加按键（按住左键再按右键）时，左键一松开手势就结束，右键不开始也不打断（见 createHoldInput）。
-// 没锁定时那一下是「点一下继续」（ghostRig 重新锁定），不附身
+// 没锁定时那一下是「点一下继续」（ghostRig 重新锁定），不附身。
+// 开场遮罩还挂着（ghostRig 的 hold，界面状态 held）：指针虽然锁上了，也不悬停、不附身。
+// 够不着（2026-10-30 试玩报告 P2-3，上手那一路的 refused('tooFar')）：准星对着一个看得见的物件、但离鬼魂超过 4 米，按下左键时回调 onTooFar
 import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W } from '../config/house';
 import { TRAP } from '../config/visitors';
@@ -30,6 +32,11 @@ export function eventTime(stamp: number, now: number): number {
 const TOUCH_HOVER_MS = 1500;
 /** 第三人称：准星对着的物件离鬼魂（水平距离，米）这么近才够得着 */
 const AIM_RANGE = 4;
+/**
+ * 第三人称：够不着、但还算「对着它」的最远距离（米）。和叠层的物件标记完全淡出的距离一样（view/overlays.ts 的 FADE_FAR）：
+ * 再远，眼睛、圆环都不显示了，点一下不回应
+ */
+const FAR_RANGE = 10;
 
 export interface Picker {
   onHover(cb: (id: string | null) => void): void;
@@ -39,6 +46,11 @@ export interface Picker {
    * 点一下（不到这么久就松手）仍然是 onPick，只是改到松手那一刻才发。触屏 / 娃娃屋没有这一手，永远不会调
    */
   onArm(cb: (id: string) => void): void;
+  /**
+   * 第三人称：准星对着一个看得见的物件，但离鬼魂太远（AIM_RANGE 到 FAR_RANGE 米）够不着，按下左键的那一刻回调（每按一下一次）。
+   * main.ts 接到 hints.refused('tooFar')。触屏 / 娃娃屋没有准星，永远不会调
+   */
+  onTooFar(cb: (id: string) => void): void;
   dispose(): void;
 }
 
@@ -293,6 +305,7 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
     onHover(cb) { hoverCbs.push(cb); },
     onPick(cb) { pickCbs.push(cb); },
     onArm() {}, // 触屏 / 娃娃屋没有「按住设机关」：点一下只会附身
+    onTooFar() {}, // 没有准星：点到的就是够得着的
     dispose() {
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerdown', onDown);
@@ -312,7 +325,8 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
 /**
  * 第三人称的拾取：每帧从镜头沿准星（画面正中）打一条射线。穿过的拾取盒里，挑盒子中心离射线最近的那个
  * （和俯视一样：相邻物件的盒子会一起被穿过，比如卧室的台灯和八音盒），但只算离鬼魂 AIM_RANGE 米以内、
- * 鬼魂看得见（中间没有墙，见 ghostRig.ts 的 ghostSees）的：墙全高以后，隔着墙的物件看不见，标签也不该凭空冒出来
+ * 鬼魂看得见（中间没有墙，见 ghostRig.ts 的 ghostSees）的：墙全高以后，隔着墙的物件看不见，标签也不该凭空冒出来。
+ * 看得见、但在 AIM_RANGE 到 FAR_RANGE 米之间的，另记一个「够不着的」：按下左键时没有够得着的、只有它，就回调 onTooFar
  */
 function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: () => THREE.Object3D[]): Picker {
   const ray = new THREE.Raycaster();
@@ -322,31 +336,40 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
   const hoverCbs: ((id: string | null) => void)[] = [];
   const pickCbs: ((id: string) => void)[] = [];
   const armCbs: ((id: string) => void)[] = [];
+  const farCbs: ((id: string) => void)[] = [];
   let hover: string | null = null;
   let locked = false;
   let disposed = false;
 
-  const aimed = (): string | null => {
-    if (!locked) return null;
+  /** 准星对着的：够得着的（near）、看得见但够不着的（far），各挑盒子中心离射线最近的那个。没锁定（或开场遮罩还挂着）时都是 null */
+  const scan = (): { near: string | null; far: string | null } => {
+    if (!locked) return { near: null, far: null };
     ray.setFromCamera(centre, rig.camera);
     const g = rig.ghost;
-    let best: string | null = null;
-    let bestD = Infinity;
+    let near: string | null = null, far: string | null = null;
+    let nearD = Infinity, farD = Infinity;
     for (const hit of ray.intersectObjects(getTargets(), true)) {
       const id = propIdOf(hit.object);
-      if (!id || id === best) continue;
+      if (!id || id === near) continue;
       box.setFromObject(hit.object).getCenter(c);
       // 世界坐标 → 房屋米坐标
       const p = { x: c.x + HOUSE_W / 2, z: c.z + HOUSE_D / 2 };
-      if (Math.hypot(p.x - g.x, p.z - g.z) > AIM_RANGE || !ghostSees(g, p)) continue;
+      const dist = Math.hypot(p.x - g.x, p.z - g.z);
+      if (dist > FAR_RANGE || !ghostSees(g, p)) continue;
       const d = ray.ray.distanceSqToPoint(c);
-      if (d < bestD) {
-        bestD = d;
-        best = id;
+      if (dist <= AIM_RANGE) {
+        if (d < nearD) {
+          nearD = d;
+          near = id;
+        }
+      } else if (d < farD) {
+        farD = d;
+        far = id;
       }
     }
-    return best;
+    return { near, far };
   };
+  const aimed = (): string | null => scan().near;
 
   const setHover = (id: string | null) => {
     if (id === hover) return;
@@ -374,17 +397,23 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
     input.frame(id);
   };
   requestAnimationFrame(tick);
-  // 丢了锁定：下一帧 aimed() 返回 null，悬停自己收起；按着的手势也作废（Esc 之后松手，松手事件到不了这里）
+  // 丢了锁定：下一帧 aimed() 返回 null，悬停自己收起；按着的手势也作废（Esc 之后松手，松手事件到不了这里）。
+  // 开场遮罩还挂着（held）当作没锁定：不悬停、按下不开始手势
   const unwatch = watchGhostUi((s) => {
-    locked = s.locked;
-    input.setLocked(s.locked);
+    locked = s.locked && !s.held;
+    input.setLocked(locked);
   });
 
   // 按下不立刻附身：要等松手（不到 holdToArm 秒）才算「点一下」，按满了就是设机关。
   // 松手要听 pointermove 和 pointerup：叠加按键时（按住左键再按右键）先松的左键只出现在 pointermove 里（buttons 变了），
   // pointerup 要等最后一个键松开才发，button 还是右键
   const onDown = (e: PointerEvent) => {
-    if (e.button === 0 && locked) setHover(aimed());
+    if (e.button === 0 && locked) {
+      const { near, far } = scan();
+      setHover(near);
+      // 够不着：这一下做不到，回应一句（hints.refused）；够得着的照常开始手势
+      if (!near && far) for (const cb of farCbs) cb(far);
+    }
     input.down(e.button, eventTime(e.timeStamp, performance.now()));
   };
   const onButtons = (e: PointerEvent) => input.buttons(e.buttons, eventTime(e.timeStamp, performance.now()));
@@ -399,6 +428,7 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
     onHover(cb) { hoverCbs.push(cb); },
     onPick(cb) { pickCbs.push(cb); },
     onArm(cb) { armCbs.push(cb); },
+    onTooFar(cb) { farCbs.push(cb); },
     dispose() {
       canvas.removeEventListener('pointerdown', onDown);
       canvas.removeEventListener('pointermove', onButtons);
@@ -412,6 +442,7 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
       hoverCbs.length = 0;
       pickCbs.length = 0;
       armCbs.length = 0;
+      farCbs.length = 0;
     },
   };
 }

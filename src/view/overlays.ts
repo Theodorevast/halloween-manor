@@ -5,6 +5,7 @@
 // 墙全高以后，名牌、眼睛不该隔着墙露出来，找人靠声音（设计文档第 9 节）——离鬼魂远的淡出；
 // 镜头差不多平视，标记改挂在每种物件的顶上（俯视时统一 1.2 米就够了）
 // 机关（2026-10-28）：设下了的物件（armed > 0），眼睛换成空心的，不管有没有人看着它都亮着（只有玩家看得到的提示）
+// 悬停标签的第二行说实话（2026-10-30 试玩报告 P1-2 a，见 tipState）：惊吓类写谁在看着它 / 没人看着，和眼睛说的是同一件事
 import { CHARACTER } from '../config/character';
 import { SCARES } from '../config/scares';
 import { STRINGS } from '../config/strings';
@@ -73,6 +74,34 @@ const div = (cls: string, parent: HTMLElement) => {
   return d;
 };
 const at = (x: number, y: number) => `translate3d(${Math.round(x)}px,${Math.round(y)}px,0)`;
+
+/** 悬停标签第二行的口气：ready 幽绿小型大写（现在出手正好）、unseen 灰烬色小型大写（没人看着）、cooling 秒数、armed 机关 */
+export type TipTone = 'ready' | 'unseen' | 'cooling' | 'armed';
+
+/**
+ * 悬停标签的第二行（2026-10-30「标签说实话」）。原来惊吓类物件只要不在冷却就写幽绿的 Ready，没人看着时点下去白白落空，
+ * Ready 还和「有人看着」的那只绿眼睛同一个颜色。现在：
+ * - 设了机关：Trap set（这时点一下附身会把机关用掉）；冷却中：剩几秒。这两种和原来一样，有没有人看着都这么写
+ * - 引诱类：Ready（引诱靠声音，模拟不给它算谁看得见）
+ * - 惊吓类：有人看着写「Theo is watching」，几个人写「Theo and one other / others are watching」（名字取 seenBy 里的第一个，
+ *   也就是先进门的那位，人走动时名字不来回换）；没人看着写 No one is watching。
+ *   只认名单上还在的人（seenBy 是模拟这一步算的，名字从 npcs 里找）；天亮自己往外走（leaving）的人看着它也照常写，他只是在看
+ */
+export function tipState(o: ScareObjectState, npcs: readonly NpcState[]): { text: string; tone: TipTone } {
+  if (o.armed > 0) return { text: STRINGS.trapSet, tone: 'armed' };
+  if (o.cooldown > 0) return { text: STRINGS.cooldown(o.cooldown), tone: 'cooling' };
+  if (SCARES[o.type].kind === 'lure') return { text: STRINGS.ready, tone: 'ready' };
+  let first: string | null = null;
+  let count = 0;
+  for (const id of o.seenBy) {
+    const name = npcs.find((n) => n.id === id)?.name;
+    if (name === undefined) continue;
+    first ??= name;
+    count++;
+  }
+  if (first === null) return { text: STRINGS.onboarding.noOneWatching, tone: 'unseen' };
+  return { text: count === 1 ? STRINGS.onboarding.watching(first) : STRINGS.onboarding.watchingMany(first, count - 1), tone: 'ready' };
+}
 
 /**
  * 远近、遮挡淡出写在内层元素上（外层的 is-on 管池子里的显隐和淡入淡出，互不干扰；内层的 opacity 过渡在 styles.css）。
@@ -198,9 +227,9 @@ export function createOverlays(
   const card = div('ov-tip-card', tipIn);
   const tipName = document.createElement('span');
   tipName.className = 'ov-tip-name';
-  const tipState = document.createElement('span');
-  tipState.className = 'ov-tip-state';
-  card.append(tipName, tipState);
+  const tipStateEl = document.createElement('span');
+  tipStateEl.className = 'ov-tip-state';
+  card.append(tipName, tipStateEl);
   div('ov-tip-string', tipIn);
   let hoverId: string | null = null;
   // classList.add / remove 即使类名没变也会改写属性，所以显隐状态自己记着，只在变化时写
@@ -212,6 +241,7 @@ export function createOverlays(
   };
   let tipNameText = '';
   let tipStateText = '';
+  let tipTone: TipTone | null = null;
   let cardHalf = 0;
   let cardShift = 0;
 
@@ -330,28 +360,30 @@ export function createOverlays(
     }
   };
 
-  const updateTip = (objects: ScareObjectState[]) => {
+  const updateTip = (objects: ScareObjectState[], npcs: NpcState[]) => {
     const o = hoverId ? objects.find((x) => x.id === hoverId) : undefined;
     const s = o ? rig.toScreen(o.pos, markY(o)) : null;
     if (!o || !s || !Number.isFinite(s.x) || !Number.isFinite(s.y)) {
       showTip(false);
       return;
     }
-    // 设了机关的写「Trap set」（这时点一下附身会把机关用掉），不写 Ready
-    const armed = o.armed > 0;
-    const ready = o.cooldown <= 0 && !armed;
     const name = STRINGS.propName[o.type];
-    const state = armed ? STRINGS.trapSet : ready ? STRINGS.ready : STRINGS.cooldown(o.cooldown);
+    const st = tipState(o, npcs);
     let measure = false;
     if (name !== tipNameText) {
       tipNameText = name;
       tipName.textContent = name;
       measure = true;
     }
-    if (state !== tipStateText) {
-      tipStateText = state;
-      tipState.textContent = state;
-      tip.classList.toggle('is-ready', ready);
+    if (st.text !== tipStateText) {
+      tipStateText = st.text;
+      tipStateEl.textContent = st.text;
+      measure = true;
+    }
+    if (st.tone !== tipTone) {
+      tipTone = st.tone;
+      tip.classList.toggle('is-ready', st.tone === 'ready');
+      tip.classList.toggle('is-unseen', st.tone === 'unseen');
       measure = true;
     }
     showTip(true);
@@ -372,7 +404,7 @@ export function createOverlays(
       frame++;
       updatePlates(state.npcs, dt);
       updateMarks(state.objects);
-      updateTip(state.objects);
+      updateTip(state.objects, state.npcs);
     },
     setHover(id) {
       hoverId = id;
