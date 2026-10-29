@@ -1,7 +1,7 @@
-// createAudio 这一层（src/audio/engine.ts）的接线：AudioContext 不在 running 时事件怎么记账。
+// createAudio 这一层（src/audio/engine.ts）的接线：AudioContext 不在 running 时事件怎么记账、每帧的几步各用各的 guard。
 // node 里没有 WebAudio：这里搭一个刚好够 createAudio 跑起来的假 AudioContext（建节点的构造函数全换成同一个替身；
 // 环境层、脚步、喘气、3D 声像、鬼魂的声音各换成只记账的替身），真的 createBus、createRouter、createRevealLayer 照跑。
-// 声音本身的合成靠 dev/audio.html 的离线测量；这里守的是「接线」：事件进来时 AudioContext 是什么状态
+// 声音本身的合成靠 dev/audio.html 的离线测量；这里守的是「接线」：事件进来时 AudioContext 是什么状态、一步抛了异常之后别的步骤还活着没有
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAudio } from '../src/audio/engine';
 import { REVEAL } from '../src/audio/ghost';
@@ -169,6 +169,13 @@ async function boot() {
   expect(ac.state).toBe('running');
   return audio;
 }
+/** 再让 3D 启用（调过 setListener）：每帧才会走脚步、喘气、space.update 那几步 */
+async function boot3d() {
+  const audio = await boot();
+  audio.setListener({ x: 8, y: 1.5, z: 6 }, { x: 0, y: 0, z: -1 });
+  return audio;
+}
+
 beforeEach(() => {
   fades.length = 0;
   h.calls.crowd = h.calls.breath = h.calls.space = h.calls.braam = 0;
@@ -255,5 +262,38 @@ describe('AudioContext 不在 running 时：「谁在照鬼魂」照样记账，
       step(audio, world(npc(1)));
     }).not.toThrow();
     expect(fades).toEqual([]);
+  });
+});
+
+describe('每帧 3D 的几步（脚步、喘气、space.update）各用各的 guard：一步抛了异常，别的步骤照样跑', () => {
+  it('没有异常：脚步、喘气、space.update 每帧各一次（基线）', async () => {
+    const audio = await boot3d();
+    step(audio);
+    step(audio);
+    expect(h.calls).toMatchObject({ crowd: 2, breath: 2, space: 2 });
+  });
+
+  it('喘气每帧都抛异常：space.update 照样每帧重算遮挡（以前喘气一抛，遮挡就再也不更新），只警告一次', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const audio = await boot3d();
+    h.fail.breath = true;
+    step(audio);
+    step(audio);
+    step(audio);
+    expect(h.calls.breath).toBe(3);
+    expect(h.calls.space).toBe(3);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('脚步每帧都抛异常：喘气和 space.update 照样每帧跑', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const audio = await boot3d();
+    h.fail.crowd = true;
+    step(audio);
+    step(audio);
+    expect(h.calls.crowd).toBe(2);
+    expect(h.calls.breath).toBe(2);
+    expect(h.calls.space).toBe(2);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

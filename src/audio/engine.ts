@@ -37,7 +37,8 @@
 //   - 察觉（notice 事件）：只有手电照到鬼魂（kind = ghost）时那个人倒吸一口很轻的气（调研 3.1），同一个人 NOTICE_GAP 秒内最多一次；其余种类没有声音
 //   - 机关（trap 事件）：armed 一声极轻的冰裂声（不定位，只有玩家听得见）；sprung 走物件本来的 trigger 声；expired 无声
 //   - 喘气、呜咽：不是事件，是恐惧值的函数，每帧由 breath.ts 排程（凑近才听得见，耳朵是鬼魂）
-//   - 声音里出任何异常只警告一次、绝不往外抛：主循环里一个异常就会让 three 的动画循环停掉；建总线失败（极老的浏览器）就安静地没有声音
+//   - 声音里出任何异常只警告一次、绝不往外抛：主循环里一个异常就会让 three 的动画循环停掉；建总线失败（极老的浏览器）就安静地没有声音。
+//     每帧 3D 的几步（脚步、喘气、space.update）各用各的 guard：一步坏了别的步骤照样跑（喘气坏了，隔墙遮挡也不该跟着停）
 //   - unlock 之前 update 什么都不做；unlock 之后再调只在 AudioContext 被挂起时 resume，几乎零开销
 import { FRONT_DOOR } from '../config/house';
 import { FEAR, HIT_STOP } from '../config/visitors';
@@ -624,10 +625,11 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
     }
     // 鬼魂不在了（开场前、主会话没再调 setGhost）也要从听者算遮挡
     if (!ghost) space.setEar(null);
-    crowd?.update(ctx.state.npcs, now + LOOKAHEAD, ctx.dt);
+    // 下面三步各用各的 guard：一步抛了异常（照样只警告一次）不拖累后面的——喘气坏了，space.update（重算隔墙遮挡）也不该跟着停
+    guard(() => crowd?.update(ctx.state.npcs, now + LOOKAHEAD, ctx.dt));
     // 喘气、呜咽：耳朵是鬼魂（玩家就是它），不是镜头
-    breath?.update(ctx.state.npcs, now + LOOKAHEAD, ctx.dt, ghost);
-    space.update(now);
+    guard(() => breath?.update(ctx.state.npcs, now + LOOKAHEAD, ctx.dt, ghost));
+    guard(() => space.update(now));
   }
 
   return sys;
