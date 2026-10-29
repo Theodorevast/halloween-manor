@@ -1,16 +1,17 @@
 // 「一夜」的模拟（2026-10-30，路 NS）：开局间隔（WorldOptions.openingGaps）、收夜（World.close / reopen）、最后一位（spawn 事件的 last）、
-// 一夜里不重名（pickName 避开最近进来的 RECENT_NAMES 个）。
-// 这些开关默认关着：不给 openingGaps、不调 close 时，模拟和原来逐步相同——Spawner 对着原来算法的一份拷贝逐步对比，
+// 天亮（World.dawn：屋里的人变 leaving，自己走出前门，exit 带 calm）、一夜里不重名（pickName 避开最近进来的 RECENT_NAMES 个）。
+// 这些开关默认关着：不给 openingGaps、不调 close / dawn 时，模拟和原来逐步相同——Spawner 对着原来算法的一份拷贝逐步对比，
 // 整个世界对着等价的另一种写法逐步对比；平衡数字由 tests/balance.test.ts 管（它不给这些开关，数字一个都不能变）
 import { describe, expect, test } from 'vitest';
 import { createWorld } from '../src/sim/world';
 import { createRng } from '../src/sim/rng';
 import type { Rng } from '../src/sim/rng';
 import { pickName, pickPersonality, RECENT_NAMES, Spawner } from '../src/sim/spawner';
-import { FRONT_DOOR } from '../src/config/house';
+import { Grid } from '../src/sim/grid';
+import { cellCenter, FRONT_DOOR, PROPS, propCenter, ROOMS } from '../src/config/house';
 import { NIGHT } from '../src/config/night';
-import { FEAR, NAMES, SPAWN } from '../src/config/visitors';
-import type { NpcState, SimEvent, World, WorldOptions } from '../src/sim/types';
+import { FEAR, NAMES, SPAWN, SPEED } from '../src/config/visitors';
+import type { NpcState, SimEvent, Vec2, World, WorldOptions } from '../src/sim/types';
 
 const DT = 1 / 60;
 /** 一夜里「最近进来过的」要避开的名字数（计划定的 24）。测试里用这个字面数，不用导出的常量，常量被改了测试才会发现 */
@@ -43,6 +44,15 @@ function runUntilEmpty(w: World, maxSeconds = 90): Stamped[] {
 /** 把 n 吓到涨满恐惧值：下一步起逃跑（状态机里「涨满就逃」的兜底，测试里常这么用） */
 const scareAway = (n: NpcState) => void (n.fear = FEAR.max);
 const spawnTimes = (xs: Stamped[]) => xs.filter((x) => x.e.type === 'spawn').map((x) => x.t);
+
+const prop = (id: string) => propCenter(PROPS.find((p) => p.id === id)!);
+const bearing = (from: Vec2, to: Vec2) => Math.atan2(to.z - from.z, to.x - from.x);
+/** 研究室里正对肖像的位置（和 tests/world.test.ts 一样） */
+const STUDY = { x: 2.75, z: 3.75 };
+/** 卧室里离前门最远的角落附近能站的格子（走出去要先出卧室门、穿过走廊、再下到门厅，十几米） */
+const BEDROOM_FAR = cellCenter(ROOMS.bedroom.x0 + 6, ROOMS.bedroom.z1 - 2);
+/** 门厅里挨着前门里面的位置 */
+const NEAR_DOOR = { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z - 1.5 };
 
 // ——————————————————————————————————————————————————————————————————
 // 开局间隔
@@ -182,7 +192,7 @@ function scripted(opts: WorldOptions, seconds: number, poke?: (w: World, k: numb
   return { events: JSON.stringify(all), state: JSON.stringify(w.state), raw: all };
 }
 
-describe('不给 openingGaps、不调 close 时和原来一模一样', () => {
+describe('不给 openingGaps、不调 close / dawn 时和原来一模一样', () => {
   test('Spawner 对着原来算法的拷贝：逐步给出一样的结果，抽随机数的次数、顺序也一样', () => {
     for (const seed of [1, 2, 3, 4, 5]) {
       const rngA = createRng(seed), rngB = createRng(seed);
@@ -482,6 +492,372 @@ describe('reopen()：收夜以后接着闹', () => {
 });
 
 // ——————————————————————————————————————————————————————————————————
+// 天亮
+// ——————————————————————————————————————————————————————————————————
+
+/** 一个人，在 pos 出现，天亮时 mode 是下面各种之一；返回他和世界。每个都跑到「这个状态」才结束 */
+const DAWN_SCENES: [string, () => { w: World; n: NpcState }][] = [
+  ['刚进门（还在门外）', () => {
+    const w = createWorld({ seed: 31, autoSpawn: false });
+    const n = w.spawn({ personality: 'average' });
+    runFor(w, 0.5);
+    return { w, n };
+  }],
+  ['在走', () => {
+    const w = createWorld({ seed: 32, autoSpawn: false });
+    const n = w.spawn({ pos: BEDROOM_FAR, personality: 'average', goal: { x: 12, z: 3 } });
+    runFor(w, 2);
+    return { w, n };
+  }],
+  ['站着左右照', () => {
+    const w = createWorld({ seed: 33, autoSpawn: false });
+    const n = w.spawn({ pos: { x: 8, z: 6 }, personality: 'brave' });
+    runFor(w, 0.5);
+    return { w, n };
+  }],
+  ['听到声音在察觉（停下盯着声源）', () => {
+    const w = createWorld({ seed: 34, autoSpawn: false });
+    const n = w.spawn({ pos: { x: 3, z: 9 }, personality: 'average', lookDir: bearing({ x: 3, z: 9 }, prop('music-box')) });
+    w.trigger('music-box');
+    for (let k = 0; k < 120 && !n.notice; k++) w.step(DT);
+    expect(n.notice).not.toBeNull();
+    return { w, n };
+  }],
+  ['听到声音在走过去查看（警觉）', () => {
+    const w = createWorld({ seed: 35, autoSpawn: false });
+    const n = w.spawn({ pos: { x: 3, z: 9 }, personality: 'average', lookDir: bearing({ x: 3, z: 9 }, prop('music-box')) });
+    w.trigger('music-box');
+    for (let k = 0; k < 60 * 6 && n.mode !== 'alert'; k++) w.step(DT);
+    expect(n.mode).toBe('alert');
+    return { w, n };
+  }],
+  ['被惊吓物件定住盯着（蓄势中）', () => {
+    const w = createWorld({ seed: 36, autoSpawn: false });
+    const n = w.spawn({ pos: STUDY, personality: 'average', lookDir: bearing(STUDY, prop('portrait')) });
+    w.trigger('portrait');
+    runFor(w, 0.3); // 肖像要 0.94 秒才落下，这时他停着盯着它
+    expect(n.speed).toBe(0);
+    return { w, n };
+  }],
+  ['刚被吓到、正僵住', () => {
+    const w = createWorld({ seed: 37, autoSpawn: false });
+    const n = w.spawn({ pos: STUDY, personality: 'average', lookDir: bearing(STUDY, prop('portrait')) });
+    w.trigger('portrait');
+    for (let k = 0; k < 60 * 3 && n.mode !== 'startled'; k++) w.step(DT);
+    expect(n.mode).toBe('startled');
+    return { w, n };
+  }],
+];
+
+describe('dawn()：天亮', () => {
+  test.each(DAWN_SCENES)('天亮时%s的人也改成 leaving，放下手上的事，走出前门，出门时 exit 带 calm、不算吓跑', (_name, scene) => {
+    const { w, n } = scene();
+    w.dawn();
+    expect(n.mode).toBe('leaving');
+    expect(n.notice ?? null).toBeNull();
+    expect(n.path.length).toBeGreaterThan(0);
+    const ev = events(runUntilEmpty(w));
+    expect(w.state.npcs.length).toBe(0);
+    expect(ofType(ev, 'exit')).toEqual([{ type: 'exit', npc: n.id, name: n.name, total: 0, calm: true }]);
+    expect(w.state.scaredOff).toBe(0);
+    expect(ofType(ev, 'flee')).toEqual([]);
+  });
+
+  test('天亮后没人再进来：已经排上的那一次取消，屋里空了也不补最后一位', () => {
+    const w = createWorld({ seed: 40, openingGaps: [25, 25] });
+    runTo(w, 5);
+    expect(w.state.npcs.length).toBe(1);
+    w.dawn(); // 第二个排在 27 秒，被取消
+    const ev = events(runTo(w, 120));
+    expect(ofType(ev, 'spawn')).toEqual([]);
+    expect(w.state.npcs.length).toBe(0); // 唯一的一位走出去了
+    expect(ofType(ev, 'exit')).toEqual([{ type: 'exit', npc: 1, name: expect.any(String), total: 0, calm: true }]);
+    // 空屋子里 close()：已经收夜了（天亮就是先收夜），不会补最后一位
+    w.close();
+    expect(ofType(events(runFor(w, 60)), 'spawn')).toEqual([]);
+  });
+
+  test('走路的速度和闲逛一样（SPEED.wander），一路走到门外；从卧室出来穿过走廊走到前门，路上一直是 leaving', () => {
+    const w = createWorld({ seed: 41, autoSpawn: false });
+    const n = w.spawn({ pos: BEDROOM_FAR, personality: 'brave', goal: { x: 3, z: 9 } });
+    runFor(w, 3);
+    w.dawn();
+    let maxSpeed = 0, steps = 0;
+    const seen = new Set<string>();
+    const ev: SimEvent[] = [];
+    let lastPos = { ...n.pos };
+    while (w.state.npcs.length > 0 && steps++ < 60 * 90) {
+      seen.add(n.mode);
+      if (n.mode === 'leaving') maxSpeed = Math.max(maxSpeed, n.speed);
+      lastPos = { ...n.pos };
+      ev.push(...w.step(DT));
+    }
+    expect(maxSpeed).toBeCloseTo(SPEED.wander, 5);
+    // 是走到了门外才算离开（离门外那一点不到半米），不是半路被谁放走的
+    expect(Math.hypot(lastPos.x - FRONT_DOOR.outside.x, lastPos.z - FRONT_DOOR.outside.z)).toBeLessThan(0.5);
+    // 一路只有 leaving（没有闲逛、警觉），走完才算离开；用时差不多是路程 / 速度
+    expect([...seen]).toEqual(['leaving']);
+    expect(steps / 60).toBeGreaterThan(5);
+    expect(steps / 60).toBeLessThan(25);
+    expect(ofType(ev, 'exit').map((e) => e.calm)).toEqual([true]);
+  });
+
+  test('路上被吓满：照常逃跑（fleeing），出门的 exit 不带 calm，total 加一；另一位照旧安静地走，total 不动', () => {
+    const w = createWorld({ seed: 42, autoSpawn: false });
+    const scared = w.spawn({ pos: NEAR_DOOR, personality: 'timid' });
+    const calm = w.spawn({ pos: BEDROOM_FAR, personality: 'brave', goal: { x: 3, z: 9 } });
+    runFor(w, 1);
+    w.dawn();
+    runFor(w, 1);
+    expect(scared.mode).toBe('leaving');
+    scareAway(scared);
+    const ev = events(runUntilEmpty(w));
+    expect(ofType(ev, 'flee').map((e) => e.npc)).toEqual([scared.id]);
+    const exits = ofType(ev, 'exit');
+    expect(exits).toEqual([
+      { type: 'exit', npc: scared.id, name: scared.name, total: 1 }, // 吓跑的先出门，不带 calm
+      { type: 'exit', npc: calm.id, name: calm.name, total: 1, calm: true }, // 安静走的后出，total 还是 1（不加）
+    ]);
+    expect(w.state.scaredOff).toBe(1);
+  });
+
+  test('受惊僵住（startled）完回到 leaving，不回闲逛；声音和引诱不再让他改道、不察觉、不调查，只是涨恐惧值', () => {
+    // 肖像把他吓一跳
+    const w = createWorld({ seed: 43, autoSpawn: false });
+    const n = w.spawn({ pos: STUDY, personality: 'average', lookDir: bearing(STUDY, prop('portrait')) });
+    w.dawn();
+    w.trigger('portrait');
+    const modes: string[] = [];
+    const ev: SimEvent[] = [];
+    for (let steps = 0; w.state.npcs.length > 0 && steps < 60 * 90; steps++) {
+      ev.push(...w.step(DT));
+      if (modes[modes.length - 1] !== n.mode) modes.push(n.mode);
+    }
+    expect(ofType(ev, 'startle').filter((e) => e.object === 'portrait').length).toBe(1);
+    expect(modes).toEqual(['leaving', 'startled', 'leaving', 'gone'].slice(0, modes.length)); // 只有这几种，没有 wander / alert
+    expect(modes.slice(0, 3)).toEqual(['leaving', 'startled', 'leaving']);
+    expect(ofType(ev, 'exit').map((e) => e.calm)).toEqual([true]);
+
+    // 近处响起八音盒：他听见了（涨恐惧值），但接着走，不停下盯着、不改道去查看
+    const v = createWorld({ seed: 44, autoSpawn: false });
+    const at = { x: 3, z: 9 };
+    const m = v.spawn({ pos: at, personality: 'average', lookDir: bearing(at, prop('music-box')) });
+    v.dawn();
+    v.trigger('music-box');
+    const evs = events(runFor(v, 1));
+    expect(ofType(evs, 'heard').map((e) => e.npc)).toEqual([m.id]);
+    expect(m.fear).toBeGreaterThan(0); // 只是会被吓：恐惧值涨了
+    expect(m.mode).toBe('leaving'); // 但没有停下盯着，也没有改道去查看
+    expect(m.speed).toBeGreaterThan(0);
+    evs.push(...events(runUntilEmpty(v)));
+    expect(ofType(evs, 'notice')).toEqual([]);
+    expect(ofType(evs, 'exit').map((e) => e.calm)).toEqual([true]);
+  });
+
+  test('天亮时正在逃跑的人照旧逃跑；已经在 leaving 的人再调 dawn 不重来', () => {
+    const w = createWorld({ seed: 45, autoSpawn: false });
+    const runner = w.spawn({ pos: { x: 8, z: 6 }, personality: 'timid' });
+    const walker = w.spawn({ pos: BEDROOM_FAR, personality: 'brave', goal: { x: 3, z: 9 } });
+    scareAway(runner);
+    runFor(w, 0.5);
+    expect(runner.mode).toBe('fleeing');
+    w.dawn();
+    expect(runner.mode).toBe('fleeing');
+    expect(walker.mode).toBe('leaving');
+    runFor(w, 1);
+    const path = walker.path;
+    w.dawn();
+    expect(walker.path).toBe(path);
+    const ev = events(runUntilEmpty(w));
+    expect(ofType(ev, 'exit')).toEqual([
+      { type: 'exit', npc: runner.id, name: runner.name, total: 1 },
+      { type: 'exit', npc: walker.id, name: walker.name, total: 1, calm: true },
+    ]);
+  });
+
+  test('天亮以后 reopen：照常补人，新进来的人闲逛（不是 leaving）；close() 在天亮之后是空操作', () => {
+    const w = createWorld({ seed: 46 });
+    runTo(w, 15);
+    expect(w.state.npcs.length).toBe(3);
+    const old = w.state.npcs.map((n) => n.id);
+    w.dawn();
+    // 还在往外走的时候 reopen：他们照旧走，新来的补上
+    const ev = runFor(w, 1); // 刚进门、还在门外的那位这一秒里就掉头出去了
+    w.reopen();
+    w.close(); // 又开门以后的一次新收夜（屋里还有人，不放最后一位）
+    w.reopen();
+    const t0 = w.state.time;
+    const modes = new Map<number, Set<string>>();
+    ev.push(...runTo(w, t0 + 90, () => {
+      for (const n of w.state.npcs) {
+        if (!modes.has(n.id)) modes.set(n.id, new Set());
+        modes.get(n.id)!.add(n.mode);
+      }
+    }));
+    const exits = ofType(events(ev), 'exit');
+    // 原来的三位自己走出去了（calm），不算吓跑
+    expect(exits.filter((e) => old.includes(e.npc)).map((e) => e.calm)).toEqual([true, true, true]);
+    // 新来的从 entering 到 wander，没有谁变成 leaving，也没人走
+    const fresh = [...modes.keys()].filter((id) => !old.includes(id));
+    expect(fresh.length).toBeGreaterThanOrEqual(2);
+    for (const id of fresh) {
+      expect(modes.get(id)!.has('leaving')).toBe(false);
+      expect(modes.get(id)!.has('wander')).toBe(true);
+    }
+    expect(exits.filter((e) => fresh.includes(e.npc))).toEqual([]);
+    const gaps = spawnTimes(ev).map((t, k, a) => t - (k === 0 ? t0 : a[k - 1]));
+    expect(gaps.length).toBeGreaterThanOrEqual(2);
+    for (const g of gaps) {
+      expect(g).toBeGreaterThanOrEqual(SPAWN.delay[0] - 0.05);
+      expect(g).toBeLessThanOrEqual(SPAWN.delay[1] + 0.1);
+    }
+  });
+
+  test('几个人同时往门口走：在门洞里一个接一个出去，不会互相卡住（离出口近的先走），几秒就出完，都算安静地走', () => {
+    // 这几种站法，离出口近的先走的规则去掉以后，大多数种子都会在门口卡死（两个人也会）
+    const groups: [string, Vec2[]][] = [
+      ['两个贴着', [{ x: 7.7, z: 10.6 }, { x: 8.3, z: 10.6 }]],
+      ['三个并排', [{ x: 7.2, z: 10 }, { x: 8, z: 10 }, { x: 8.8, z: 10 }]],
+      ['三个乱站', [{ x: 8.37, z: 10.85 }, { x: 7.52, z: 10.97 }, { x: 8.09, z: 10.46 }]],
+      ['四个围着', [{ x: 7.5, z: 10.2 }, { x: 8.5, z: 10.2 }, { x: 7.5, z: 10.9 }, { x: 8.5, z: 10.9 }]],
+    ];
+    for (const [name, spots] of groups) {
+      for (const seed of [1, 2, 3, 4]) {
+        const w = createWorld({ seed, autoSpawn: false });
+        for (const at of spots) w.spawn({ pos: at, personality: 'average' });
+        runFor(w, 0.5);
+        w.dawn();
+        const t0 = w.state.time;
+        const ev = events(runUntilEmpty(w, 30));
+        const exits = ofType(ev, 'exit');
+        const lastAt = w.state.time - t0;
+        expect({ name, seed, left: w.state.npcs.length }).toEqual({ name, seed, left: 0 });
+        expect(exits.map((e) => e.calm)).toEqual(spots.map(() => true));
+        // 靠自己走出去的几秒就够；兜底（8 秒）是给卡死的人用的，这里一个也不该用上它
+        expect(lastAt).toBeLessThan(6);
+        expect(w.state.scaredOff).toBe(0);
+      }
+    }
+  });
+
+  test('天亮以后的兜底：要出门的人 8 秒里挪不到半米就放他出去（leaving 带 calm，逃跑的算吓跑）；天亮之前不管', () => {
+    // 摆一个要出门却动不了的人：每一步把他放回原处，等于被什么卡住了
+    const hold = (n: NpcState) => {
+      const at = { x: n.pos.x, z: n.pos.z };
+      return () => {
+        n.pos.x = at.x;
+        n.pos.z = at.z;
+      };
+    };
+    const setup = (seed: number) => {
+      const w = createWorld({ seed, autoSpawn: false });
+      const walker = w.spawn({ pos: BEDROOM_FAR, personality: 'brave' });
+      const runner = w.spawn({ pos: { x: 8, z: 6 }, personality: 'timid' });
+      scareAway(runner);
+      runFor(w, 0.3);
+      expect(runner.mode).toBe('fleeing');
+      const holds = [hold(walker), hold(runner)];
+      return { w, walker, runner, each: () => holds.forEach((h) => h()) };
+    };
+
+    // 天亮之前：卡多久都不管（兜底不是平常的夜里用的），一个逃跑的、一个闲逛的都还在
+    const quiet = setup(52);
+    runFor(quiet.w, 30, quiet.each);
+    expect(quiet.w.state.npcs.map((n) => n.mode)).toEqual(['wander', 'fleeing']);
+
+    // 天亮以后：8 秒左右放出去，各自按自己的身份算
+    const { w, walker, runner, each } = setup(51);
+    w.dawn();
+    const t0 = w.state.time;
+    const stamped = runFor(w, 12, each);
+    const exits = stamped.filter((x) => x.e.type === 'exit');
+    expect(exits.map((x) => x.e)).toEqual([
+      { type: 'exit', npc: walker.id, name: walker.name, total: 0, calm: true },
+      { type: 'exit', npc: runner.id, name: runner.name, total: 1 },
+    ]);
+    for (const x of exits) {
+      expect(x.t - t0).toBeGreaterThan(7.9);
+      expect(x.t - t0).toBeLessThan(8.3);
+    }
+    expect(w.state.scaredOff).toBe(1);
+    expect(w.state.npcs.length).toBe(0);
+  });
+
+  test('现有的毛病：两个逃跑的人在前门门洞里迎面对上会互相卡死（这一路没改它）；天亮以后 8 秒左右放他们出去，都算吓跑', () => {
+    const w = createWorld({ seed: 53, autoSpawn: false });
+    // 两个人都朝南站在门洞北边一点（给了朝向，和种子无关）：同时吓跑，在门洞里一个往南一个往回走，正好迎面
+    const a = w.spawn({ pos: { x: 8.05, z: 11.3 }, personality: 'timid', lookDir: Math.PI / 2 });
+    const b = w.spawn({ pos: { x: 7.95, z: 11.9 }, personality: 'timid', lookDir: Math.PI / 2 });
+    scareAway(a);
+    scareAway(b);
+    // 前提：不到天亮，他们就卡在门洞里，一个钟头也出不去（以后要是把这个卡死修了，这一条前提会先失败：把这条测试改成别的卡法或者删掉）
+    runFor(w, 40);
+    expect(w.state.npcs.map((n) => n.mode)).toEqual(['fleeing', 'fleeing']);
+    expect(Math.hypot(a.pos.x - FRONT_DOOR.inside.x, a.pos.z - FRONT_DOOR.inside.z)).toBeLessThan(2);
+    w.dawn();
+    const t0 = w.state.time;
+    const ev = events(runUntilEmpty(w, 20));
+    expect(w.state.npcs.length).toBe(0);
+    expect(w.state.time - t0).toBeGreaterThan(7.5); // 8 秒里没动才放
+    expect(w.state.time - t0).toBeLessThan(10);
+    expect(ofType(ev, 'exit').map((e) => [e.total, e.calm])).toEqual([[1, undefined], [2, undefined]]);
+    expect(w.state.scaredOff).toBe(2);
+  });
+
+  test('各个种子、各种折腾（附身、引诱、现身、鬼魂贴着）里天亮：之后没人回到闲逛 / 警觉 / 进门，没人进来，都出了门，吓跑的计数只算被吓跑的', () => {
+    // 几个种子加起来要真的碰到这几种情形，不然上面的检查是空转
+    let calmExits = 0, scaredExits = 0, startledWhileLeaving = 0;
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+      const w = createWorld({ seed });
+      const bot = createRng(seed * 977 + 5);
+      const ids = w.state.objects.map((o) => o.id);
+      const bad: string[] = [];
+      let dawned = false;
+      const each = () => {
+        const k = Math.round(w.state.time * 60);
+        if (k % 90 === 0) {
+          const r = bot.next();
+          if (r < 0.6) w.trigger(bot.pick(ids));
+          else if (r < 0.75) w.manifest();
+        }
+        // 鬼魂贴着一个人：发毛、后颈一凉（天亮以后也照样吓，leaving 的人会被吓得僵住）
+        const near = w.state.npcs[Math.floor(w.state.time / 7) % Math.max(1, w.state.npcs.length)];
+        w.setGhost(near ? { x: near.pos.x - 0.4, z: near.pos.z, inWall: false } : null);
+        if (!dawned) return;
+        for (const n of w.state.npcs) {
+          if (!['leaving', 'startled', 'fleeing'].includes(n.mode) && bad.length < 8) bad.push(`seed ${seed} t=${w.state.time.toFixed(2)} #${n.id} ${n.mode}`);
+          if (n.mode === 'startled') startledWhileLeaving++;
+        }
+      };
+      runTo(w, 150, each);
+      dawned = true;
+      const before = w.state.scaredOff;
+      w.dawn();
+      const evs: SimEvent[] = [];
+      const end = w.state.time + 240;
+      while (w.state.npcs.length > 0 && w.state.time < end) evs.push(...events(runFor(w, DT, each)));
+      expect(bad).toEqual([]);
+      expect(ofType(evs, 'spawn')).toEqual([]);
+      expect(w.state.npcs.length).toBe(0);
+      // 计数只算被吓跑的：每个不带 calm 的 exit 让 total 加一，带 calm 的不动
+      let total = before;
+      for (const e of ofType(evs, 'exit')) {
+        if (e.calm) calmExits++;
+        else {
+          total++;
+          scaredExits++;
+        }
+        expect(e.total).toBe(total);
+      }
+      expect(w.state.scaredOff).toBe(total);
+    }
+    expect(calmExits).toBeGreaterThan(10);
+    expect(scaredExits).toBeGreaterThan(0);
+    expect(startledWhileLeaving).toBeGreaterThan(0);
+  });
+});
+
+// ——————————————————————————————————————————————————————————————————
 // 一夜里不重名
 // ——————————————————————————————————————————————————————————————————
 
@@ -569,5 +945,15 @@ describe('一夜里不重名', () => {
       }
     }
     expect(again).toBe(20);
+  });
+});
+
+// 上面各个场景用的出生点都要真的能走：布局改了（家具挪了）、点落到墙里，人会原地走不动，测试会莫名其妙地超时
+describe('测试用的位置', () => {
+  test('各个出生点都是能走的格子', () => {
+    const grid = new Grid();
+    for (const p of [STUDY, BEDROOM_FAR, NEAR_DOOR, { x: 8, z: 6 }, { x: 3, z: 9 }, { x: 12, z: 3 }]) {
+      expect(grid.walkableAt(p)).toBe(true);
+    }
   });
 });

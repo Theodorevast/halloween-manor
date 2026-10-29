@@ -4,14 +4,15 @@
 // 鬼魂穿墙声 → 鬼魂贴近（发毛、察觉、后退、后颈一凉）→ 尖叫传染 →
 // 访客状态机（移动、互相避让）→ 兜底推开挤在一起的人 → 物件计时 → 时间前进 → 生成 → 移除离开的 → 手电照到鬼魂 → seenBy。
 // 先结算惊吓再移动：玩家点下去的那一刻，看着物件的人就会被吓到，不会因为同一步里转开了而落空。
-// 「一夜」（2026-10-30）两个开关，都是两次 step 之间调的，默认不调，不调就和原来逐步相同：
-// close() 收夜（不再进人，屋里没人就最后再放一位）、reopen() 又开门（照常补人）。开局的间隔另给在 WorldOptions.openingGaps。
+// 「一夜」（2026-10-30）三个开关，都是两次 step 之间调的，默认不调，不调就和原来逐步相同：
+// close() 收夜（不再进人，屋里没人就最后再放一位）、reopen() 又开门（照常补人）、dawn() 天亮（先收夜但不补那一位，屋里的人自己走出去）。
+// 开局的间隔另给在 WorldOptions.openingGaps。
 import { cellOf, FRONT_DOOR } from '../config/house';
 import { FEAR, GHOST, HIT_STOP, MANIFEST, TRAP, VISION } from '../config/visitors';
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
 import { createManifest, idleManifest, manifestFear } from './manifest';
-import { canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhostWall, notice, retreat, separate, startle, startleWith, updateNpc, walkTo } from './npc';
+import { beginLeave, canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhostWall, notice, retreat, separate, startle, startleWith, updateNpc, walkTo } from './npc';
 import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
@@ -26,6 +27,9 @@ import type { GhostInput, NpcState, SimEvent, SpawnOptions, Vec2, World, WorldOp
 export const SIM_DT = 1 / 60;
 /** 步长累积和 hit-stop 扣减的浮点容差 */
 const EPS = 1e-9;
+/** 天亮以后的兜底（releaseWedged）：要出门的人这么多秒里挪不到这么远（米），就放他出去 */
+const WEDGE_SECONDS = 8;
+const WEDGE_MOVE = 0.5;
 
 export function createWorld(opts: WorldOptions): World {
   const rng = createRng(opts.seed);
@@ -53,6 +57,9 @@ export function createWorld(opts: WorldOptions): World {
   let nextId = 1;
   /** 收夜了（close 或 dawn 调过、还没 reopen）：close 靠它不重复放「最后一位」 */
   let closed = false;
+  /** 天亮了（dawn 调过、还没 reopen）：开着 releaseWedged 的兜底；wedged 记每个要出门的人上一次挪动的位置和时刻 */
+  let dawned = false;
+  let wedged = new WeakMap<Npc, { x: number; z: number; since: number }>();
   /** 最近进来过的名字（最多 RECENT_NAMES 个，新的在后；走了的也算）：抽名字时和屋里的人一起避开，一夜里尽量不重名 */
   const recentNames: string[] = [];
   /** 两次 step 之间产生的事件（trigger、手动 spawn），下一次 step 一起返回 */
@@ -157,6 +164,33 @@ export function createWorld(opts: WorldOptions): World {
       }
     }
     screamQueue.length = 0;
+  }
+
+  /**
+   * 天亮以后的兜底（只在 dawn() 之后管，平常的夜里一点不动）：要出门的人（leaving、逃跑的）WEDGE_SECONDS 秒里挪不到 WEDGE_MOVE 米，
+   * 就放他出去，不然这一夜永远收不了。现有的毛病：两个逃跑的人在前门的门洞里迎面对上会互相卡死（tests/night.test.ts 里有摆法），
+   * 平常的夜里只是门口卡着两个人，到天亮就得放他们走。被定住盯着的（蓄势、现身停留）不算。
+   * 放走的 leaving 带 calm（不算吓跑），逃跑的照常算吓跑；在这一步末尾的 exit 里一起发
+   */
+  function releaseWedged() {
+    for (const n of npcs) {
+      const s = n.s;
+      if ((s.mode !== 'leaving' && s.mode !== 'fleeing') || n.transfixOn || n.transfixPos) {
+        wedged.delete(n);
+        continue;
+      }
+      const w = wedged.get(n);
+      if (!w || Math.hypot(s.pos.x - w.x, s.pos.z - w.z) >= WEDGE_MOVE) {
+        wedged.set(n, { x: s.pos.x, z: s.pos.z, since: state.time });
+        continue;
+      }
+      if (state.time - w.since < WEDGE_SECONDS) continue;
+      n.calm = s.mode === 'leaving';
+      s.mode = 'gone';
+      s.modeTime = 0;
+      s.speed = 0;
+      wedged.delete(n);
+    }
   }
 
   /**
@@ -272,8 +306,14 @@ export function createWorld(opts: WorldOptions): World {
     for (const n of npcs) updateNpc(n, ctx);
     separate(npcs, grid, SIM_DT);
     flushScreams(); // 状态机兜底触发的逃跑也会尖叫
+    if (dawned) releaseWedged();
     for (const n of npcs) {
       if (n.s.mode !== 'gone') continue;
+      if (n.calm) {
+        // 天亮自己走出去的（leaving）：不算吓跑，total 不加
+        events.push({ type: 'exit', npc: n.s.id, name: n.s.name, total: state.scaredOff, calm: true });
+        continue;
+      }
       state.scaredOff += 1;
       events.push({ type: 'exit', npc: n.s.id, name: n.s.name, total: state.scaredOff });
     }
@@ -349,11 +389,19 @@ export function createWorld(opts: WorldOptions): World {
     reopen() {
       // 没收夜时什么都不做（Spawner.reopen 也不会打乱已经排好的）；收夜后照常补人，和开局之后一样按 SPAWN.delay 一个一个来
       closed = false;
+      dawned = false; // 又开门了：新来的人想停就停，兜底不再管
       spawner?.reopen();
     },
 
     dawn() {
-      // 接口先占位（2026-10-30），模拟那一路实现
+      // 天亮 = 先收夜（不再进人、已排上的取消），但屋里没人也不补最后一位；之后 reopen() 照常补人，新进来的人照常闲逛
+      closed = true;
+      dawned = true;
+      wedged = new WeakMap();
+      spawner?.close();
+      // 屋里不在逃跑的人（进门的、闲逛的、警觉的、受惊的）都放下手上的事，自己走出前门。逃跑的照旧；已经在走的不重来
+      ctx.now = state.time; // 两次 step 之间调：寻路认的是现在，不是上一步开始时
+      for (const n of npcs) beginLeave(n, ctx);
     },
 
     manifest(): boolean {
