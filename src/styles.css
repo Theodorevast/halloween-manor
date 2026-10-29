@@ -470,12 +470,37 @@ body {
   color: #e2584d;
 }
 
+/* 名字前面的小眼睛（2026-10-30 手感分析 FEEL-1）：这个人会被你下一个动作影响（惊吓、现身：会被吓到；引诱：会听见、会过来）。
+ * 和物件上的眼睛同一个图形、同一种语言；用 scaleY 收起，占位不变（名牌宽度只在进门时量一次，之后不会跳）。
+ * 不加物件眼睛的那圈绿光（.ov-mark.is-ready .ov-eye），只留一圈黑边压住背景；走出范围时闭上，没有声音 */
+.ov-plate-mark {
+  display: inline-block;
+  width: 12px;
+  height: 7px;
+  margin-right: 4px;
+  vertical-align: 0.04em;
+  color: var(--ghost);
+  transform: scaleY(0);
+  transition: transform 0.16s ease-out;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.95));
+}
+
+.ov-plate.is-reach .ov-plate-mark {
+  transform: scaleY(1);
+}
+
+/* 那个动作是附身一个还在冷却的物件：人在范围里，但还不能出手 */
+.ov-plate.is-reach.is-cool .ov-plate-mark {
+  color: var(--ash);
+}
+
+/* 恐惧条（2026-10-30 手感分析 FEEL-10）：原来 48 × 3，发毛一次 +0.5 在条上只有 0.24 像素；宽一点、厚一点，外框亮一点。不加数字 */
 .ov-bar {
   position: relative;
-  width: 48px;
-  height: 3px;
+  width: 56px;
+  height: 4px;
   background: rgba(5, 6, 8, 0.8);
-  box-shadow: 0 0 0 1px rgba(220, 210, 189, 0.16), 0 0 6px rgba(0, 0, 0, 0.9);
+  box-shadow: 0 0 0 1px rgba(220, 210, 189, 0.22), 0 0 6px rgba(0, 0, 0, 0.9);
 }
 
 .ov-bar-fill {
@@ -491,7 +516,7 @@ body {
   top: -2px;
   bottom: -2px;
   width: 1px;
-  background: rgba(220, 210, 189, 0.4);
+  background: rgba(220, 210, 189, 0.55);
 }
 
 /* 物件标记：冷却圆环 + 眼睛（有人能看见它） */
@@ -600,10 +625,24 @@ body {
   color: var(--ghost);
 }
 
-/* 惊吓类物件没人看着（2026-10-30「标签说实话」）：和「谁在看着」同样的小型大写，只是灰烬色——现在点下去会落空 */
+/* 惊吓类物件没人看着（2026-10-30「标签说实话」）：和「谁在看着」同样的小型大写，只是灰烬色——现在点下去会落空。
+ * 附身以后生效窗口结束都没人（No one saw it / No one heard it，手感分析 FEEL-3）也是这一种 */
 .ov-tip.is-unseen .ov-tip-state {
   font-variant-caps: all-small-caps;
   letter-spacing: 0.14em;
+  color: var(--ash);
+}
+
+/* 结果（FEEL-3）：附身以后准星还对着它，先报谁跳了 / 谁听见了：骨白的小型大写，没有感叹号，停 1.6 秒（overlays.ts 的 OUTCOME） */
+.ov-tip.is-outcome .ov-tip-state {
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.14em;
+  color: var(--bone);
+}
+
+/* 够不着（FEEL-7）：Too far away.，灰烬色斜体，和点下去时准星下面那一句（.hud-refusal）一个口气 */
+.ov-tip.is-far .ov-tip-state {
+  font-style: italic;
   color: var(--ash);
 }
 
@@ -672,7 +711,8 @@ body {
   }
 
   .ov-eye,
-  .ov-ring {
+  .ov-ring,
+  .ov-plate-mark {
     transition: none;
   }
 
@@ -738,6 +778,13 @@ body {
 
 .hud-aim.is-aiming::after {
   opacity: 1;
+  transform: none;
+}
+
+/* 够不着（2026-10-30 手感分析 FEEL-7）：准星对着 4–10 米外看得见的物件，外圈浮出来但是虚线、半透明，不放大 */
+.hud-aim.is-far::after {
+  opacity: 0.5;
+  border-style: dashed;
   transform: none;
 }
 

@@ -222,6 +222,11 @@ export interface GhostUi {
   pending: boolean;
   /** 准星此刻对着哪个够得着的物件（picking.ts 写） */
   aim: string | null;
+  /**
+   * 准星此刻对着哪个看得见、但够不着（离鬼魂 4–10 米）的物件（picking.ts 每帧写；对着够得着的时为 null）：
+   * 标签写 Too far away.、准星外圈变虚线（2026-10-30 手感分析 FEEL-7）
+   */
+  aimFar: string | null;
   /** 现身的冷却还剩多少（0..1，1 = 刚用、0 = 可以再用；main.ts 每帧按模拟写）：准星外面那圈很淡的环 */
   manifestCooldown: number;
   /**
@@ -231,7 +236,7 @@ export interface GhostUi {
   held: boolean;
 }
 
-const ui: GhostUi = { active: false, engaged: false, locked: false, pending: false, aim: null, manifestCooldown: 0, held: false };
+const ui: GhostUi = { active: false, engaged: false, locked: false, pending: false, aim: null, aimFar: null, manifestCooldown: 0, held: false };
 const uiCbs = new Set<(s: Readonly<GhostUi>) => void>();
 
 /** 订阅第三人称的界面状态：注册时先按当前值回调一次，之后每次变化回调；返回取消订阅的函数 */

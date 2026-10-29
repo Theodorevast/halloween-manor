@@ -5,12 +5,16 @@
 // 第三人称（dissolve）：鬼魂穿过物件时，物件和家具一样在它周围溶开、洞口一圈冷光（walls.ts 的 DISSOLVE），
 // 不然飘进摇椅里就是直接穿模（2026-10-28 第二次试玩）
 // 机关（2026-10-28）：设下了的物件（armed > 0）表面结一层很薄的霜，只有玩家看得见的提示（见 FROST）
+// 第三人称的幽光（2026-10-30 美术分析 ART-5）：平时压淡、变细、降饱和，轮廓外缘淡到 0，不再是一圈亮绿细线（GLOW_GHOST）；娃娃屋不变
 import * as THREE from 'three/webgpu';
 import { abs, add, and, bool, dot, float, materialEmissive, mx_noise_float, normalLocal, normalView, normalWorld, positionGeometry, positionViewDirection, positionWorld, smoothstep, uniform, vec3 } from 'three/tsl';
 import { PROPS, propCenter, type PropPlacement } from '../config/house';
+import { watchGhostUi } from '../engine/ghostRig';
+import { AIM_RANGE } from '../engine/picking';
 import type { FrameCtx, Module, Quality, RenderCore } from '../engine/types';
 import { yawFor } from '../lib/angle';
 import type { ScareObjectState, ScareType, SimEvent, WorldState } from '../sim/types';
+import { PALETTE } from './palette';
 import { createBed } from './props/bed';
 import { createWardrobe } from './props/wardrobe';
 import { createDoor } from './props/door';
@@ -28,7 +32,7 @@ export type PropsView = Module & {
   setHover(id: string | null): void;
 };
 
-/** 幽光的参数：平时呼吸（周期、强弱），悬停时更亮、整体放大 */
+/** 幽光的参数：平时呼吸（周期、强弱），悬停时更亮、整体放大。娃娃屋（俯视）用这一组 */
 const GLOW = {
   period: 3.2,
   base: 0.2,
@@ -40,7 +44,33 @@ const GLOW = {
   thickness: 0.02,
   hoverThickness: 0.032,
   hoverScale: 1.04,
+  /** 外壳颜色（PALETTE.possess） */
+  tint: PALETTE.possess as number,
+  /** 轮廓外缘：0 = 留 25% 的亮边（原来的曲线），1 = 淡到 0（见 kit.ts 的 createGlow） */
+  soft: 0,
 };
+
+/**
+ * 第三人称（2026-10-30 美术分析 ART-5）：透视镜头下外壳是 1–2 像素宽的亮薄荷绿细线（厨房门侧着看是一根竖线，台灯杆、画架一圈绿边），
+ * 正是用户不要的「发光描边」。平时压淡、变细，颜色降饱和（同色相），轮廓外缘淡到 0。
+ * 只压淡还不够（量过：走廊里侧看 6 米外的厨房门，还是两根比背景亮 30–50 的细竖线；薄板、细杆的外壳露出来的就是一条线）：
+ * 平时的那点幽光只给够得着的物件（离鬼魂 AIM_RANGE 米内，再远 REACH_FADE 米淡没）——够不着的本来就点不了（FEEL-7 的
+ * Too far away.），亮着反而像在招手；镜头跟前的那一截也不画（kit.ts 的 GLOW_NEAR）。
+ * 悬停的物件仍然一眼看得出（和瞄准的反馈一起定）：亮到 hover、外壳加厚、整体放大 1.04，加上悬停标签和准星外圈。
+ * 娃娃屋保持原值（触屏玩家靠它，40 米外线本来就细）
+ */
+const GLOW_GHOST: typeof GLOW = {
+  ...GLOW,
+  base: 0.06,
+  breath: 0.05,
+  hover: 0.5,
+  thickness: 0.012,
+  hoverThickness: 0.02,
+  tint: 0x9fdcc0,
+  soft: 1,
+};
+/** 第三人称：平时的幽光从离鬼魂 AIM_RANGE 米处开始淡，再远这么多米（水平距离）淡没 */
+const REACH_FADE = 1;
 
 /**
  * 机关的提示：设下了的物件表面一层很薄的霜。用的是物件幽光外壳的一个冷色变体，不是 frost.ts 的 frost.small（物件脚下地上的一小圈霜）：
@@ -109,7 +139,12 @@ interface Entry {
   frost: number;
   /** 呼吸相位错开，几个物件不同步 */
   phase: number;
+  /** 物件中心（房屋坐标）：第三人称按它离鬼魂多远决定平时亮不亮 */
+  c: { x: number; z: number };
 }
+
+/** 0..1 夹住再做一次 smoothstep */
+const smooth01 = (t: number) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
 
 export interface PropsOptions {
   /** 第三人称：物件在鬼魂周围溶开（用全页共用的 ghostDissolve，house.ts 每帧写） */
@@ -179,13 +214,26 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
     }
     root.add(hit);
     core.houseRoot.add(root);
-    const entry: Entry = { p, root, rig, glow, shells, frostShells, hit, ready: 1, hover: 0, flash: 0, frost: 0, phase: i * 1.7 };
+    const entry: Entry = { p, root, rig, glow, shells, frostShells, hit, ready: 1, hover: 0, flash: 0, frost: 0, phase: i * 1.7, c };
     for (const f of frostShells) f.onBeforeRender = () => { frost.amount.value = entry.frost; };
     return entry;
   });
   const byId = new Map(entries.map((e) => [e.p.id, e]));
   const targets = entries.map((e) => e.hit);
   let hovered: string | null = null;
+  /** 幽光用哪一组参数：第三人称（建过鬼魂镜头，GhostUi.active）用 GLOW_GHOST，娃娃屋用 GLOW。颜色、轮廓外缘的曲线只在换的时候写 */
+  let glow = GLOW;
+  const useGlow = (g: typeof GLOW) => {
+    glow = g;
+    for (const e of entries) {
+      e.glow.tint.value.setHex(g.tint);
+      e.glow.soft.value = g.soft;
+    }
+  };
+  useGlow(GLOW);
+  const unwatch = watchGhostUi((s) => {
+    if ((s.active ? GLOW_GHOST : GLOW) !== glow) useGlow(s.active ? GLOW_GHOST : GLOW);
+  });
 
   // 找不到状态（state 里没有这个物件）时用的占位，保证物件照样能显示。
   // 每帧直接 find（8 × 8 次比较），不缓存索引：模拟层哪怕整个换掉对象也不会读到旧的
@@ -210,6 +258,9 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
     update(ctx: FrameCtx) {
       const { dt, time, state } = ctx;
       houseOffset.value.copy(core.houseRoot.position);
+      // 鬼魂在哪（房屋坐标）：house.ts 每帧先写进全页共用的溶开 uniform（第三人称才有；关掉时在地板下很远）
+      const gv = ghostDissolve.ghost.value;
+      const ghostAt = gv.y > -100 ? gv : null;
       for (const e of entries) {
         const obj = objOf(state, e);
         e.rig.update({ dt, time, obj, state });
@@ -218,12 +269,18 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
         const readyTarget = obj.cooldown <= 0 ? 1 : 0;
         e.ready = approach(e.ready, readyTarget, readyTarget ? 2.5 : 18, dt);
         e.hover = approach(e.hover, hovered === e.p.id ? 1 : 0, 16, dt);
-        e.flash = Math.max(0, e.flash - dt / GLOW.flashTime);
-        const breath = 0.5 + 0.5 * Math.sin((time / GLOW.period) * Math.PI * 2 + e.phase);
-        const amount = e.ready * (GLOW.base + GLOW.breath * breath + GLOW.hover * e.hover) + GLOW.flash * e.flash * e.flash;
+        e.flash = Math.max(0, e.flash - dt / glow.flashTime);
+        const breath = 0.5 + 0.5 * Math.sin((time / glow.period) * Math.PI * 2 + e.phase);
+        // 第三人称：平时的那点幽光只给够得着的（离鬼魂 AIM_RANGE 米内）；悬停本来就只有够得着的才有
+        const reach = glow.soft > 0 && ghostAt ? 1 - smooth01((Math.hypot(e.c.x - ghostAt.x, e.c.z - ghostAt.z) - AIM_RANGE) / REACH_FADE) : 1;
+        const amount = e.ready * ((glow.base + glow.breath * breath) * reach + glow.hover * e.hover) + glow.flash * e.flash * e.flash;
         e.glow.amount.value = amount;
-        e.glow.thickness.value = GLOW.thickness + (GLOW.hoverThickness - GLOW.thickness) * e.hover * e.ready + 0.018 * e.flash;
-        const show = amount > 0.004;
+        e.glow.thickness.value = glow.thickness + (glow.hoverThickness - glow.thickness) * e.hover * e.ready + 0.018 * e.flash;
+        // 悬停、附身那一下：外壳整圈都亮；平时（第三人称）镜头跟前的那一截不画（见 kit.ts 的 createGlow、GLOW_NEAR）
+        e.glow.focus.value = Math.max(e.hover, e.flash);
+        // 画不画照「不按远近淡」时的量算（够不着的外壳照样画，只是量是 0，加法混合什么也不加）：外壳还是和原来一样一直在场景里，
+        // 开场的预编译、切画质时照样编到它们，走近了第一次亮起来不会现编管线卡一下
+        const show = e.ready * (glow.base + glow.hover * e.hover) + glow.flash * e.flash * e.flash > 0.004;
         for (const s of e.shells) s.visible = show;
         // 机关：设下了（armed > 0）就慢慢结霜，解除、触发了就很快化掉
         const set = obj.armed > 0 ? 1 : 0;
@@ -231,13 +288,14 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
         if (e.frost < 0.004 && !set) e.frost = 0;
         const frosted = e.frost > 0;
         for (const f of e.frostShells) f.visible = frosted;
-        if (!NO_HOVER_SCALE.has(e.p.type)) e.root.scale.setScalar(1 + (GLOW.hoverScale - 1) * e.hover);
+        if (!NO_HOVER_SCALE.has(e.p.type)) e.root.scale.setScalar(1 + (glow.hoverScale - 1) * e.hover);
       }
     },
     setQuality(q: Quality) {
       for (const e of entries) e.rig.setQuality?.(q);
     },
     dispose() {
+      unwatch();
       // 几何体、材质在这里统一收集去重后释放；贴图、灯由各物件自己的 dispose 释放
       const geos = new Set<THREE.BufferGeometry>();
       const mats = new Set<THREE.Material>();

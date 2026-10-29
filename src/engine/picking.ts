@@ -7,7 +7,8 @@
 // 按住期间准星对着的物件变了就作废；叠加按键（按住左键再按右键）时，左键一松开手势就结束，右键不开始也不打断（见 createHoldInput）。
 // 没锁定时那一下是「点一下继续」（ghostRig 重新锁定），不附身。
 // 开场遮罩还挂着（ghostRig 的 hold，界面状态 held）：指针虽然锁上了，也不悬停、不附身。
-// 够不着（2026-10-30 试玩报告 P2-3，上手那一路的 refused('tooFar')）：准星对着一个看得见的物件、但离鬼魂超过 4 米，按下左键时回调 onTooFar
+// 够不着（2026-10-30 试玩报告 P2-3，上手那一路的 refused('tooFar')）：准星对着一个看得见的物件、但离鬼魂超过 4 米，按下左键时回调 onTooFar；
+// 而且每帧都把它写进界面状态 GhostUi.aimFar（2026-10-30 手感分析 FEEL-7）：对准时标签就写 Too far away.、准星外圈变虚线，不用等点下去
 import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W } from '../config/house';
 import { TRAP } from '../config/visitors';
@@ -30,8 +31,8 @@ export function eventTime(stamp: number, now: number): number {
 }
 /** 触屏轻点后，悬停标签停留多久（毫秒） */
 const TOUCH_HOVER_MS = 1500;
-/** 第三人称：准星对着的物件离鬼魂（水平距离，米）这么近才够得着 */
-const AIM_RANGE = 4;
+/** 第三人称：准星对着的物件离鬼魂（水平距离，米）这么近才够得着（物件的幽光也按它：够不着的不亮，见 view/props.ts） */
+export const AIM_RANGE = 4;
 /**
  * 第三人称：够不着、但还算「对着它」的最远距离（米）。和叠层的物件标记完全淡出的距离一样（view/overlays.ts 的 FADE_FAR）：
  * 再远，眼睛、圆环都不显示了，点一下不回应
@@ -371,11 +372,15 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
   };
   const aimed = (): string | null => scan().near;
 
-  const setHover = (id: string | null) => {
-    if (id === hover) return;
-    hover = id;
-    setGhostUi({ aim: id });
-    for (const cb of hoverCbs) cb(id);
+  /**
+   * 准星此刻对着的：够得着的是悬停（通知订阅者、写 GhostUi.aim）；没有够得着的、只有看得见但够不着的，写 GhostUi.aimFar
+   * （2026-10-30 手感分析 FEEL-7：标签写 Too far away.、准星外圈变虚线，不用等按下去才知道）。setGhostUi 只在变化时通知
+   */
+  const setAim = (near: string | null, far: string | null) => {
+    setGhostUi({ aim: near, aimFar: near ? null : far });
+    if (near === hover) return;
+    hover = near;
+    for (const cb of hoverCbs) cb(near);
   };
 
   // 按住手势的输入层（规则和叠加按键的细节见 createHoldInput）
@@ -392,9 +397,9 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
   const tick = () => {
     if (disposed) return;
     requestAnimationFrame(tick);
-    const id = aimed();
-    setHover(id);
-    input.frame(id);
+    const { near, far } = scan();
+    setAim(near, far);
+    input.frame(near);
   };
   requestAnimationFrame(tick);
   // 丢了锁定：下一帧 aimed() 返回 null，悬停自己收起；按着的手势也作废（Esc 之后松手，松手事件到不了这里）。
@@ -410,7 +415,7 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
   const onDown = (e: PointerEvent) => {
     if (e.button === 0 && locked) {
       const { near, far } = scan();
-      setHover(near);
+      setAim(near, far);
       // 够不着：这一下做不到，回应一句（hints.refused）；够得着的照常开始手势
       if (!near && far) for (const cb of farCbs) cb(far);
     }
@@ -438,7 +443,7 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
       unwatch();
       disposed = true;
       input.cancel();
-      setHover(null);
+      setAim(null, null);
       hoverCbs.length = 0;
       pickCbs.length = 0;
       armCbs.length = 0;

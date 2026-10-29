@@ -101,6 +101,26 @@ export const STRINGS = {
     tapHint: 'Tap a glowing object when someone is looking at it.',
     turnSideways: 'Turn your phone sideways for a better view.',
   },
+  /**
+   * 结果（2026-10-30 手感分析 FEEL-3）：附身以后，准星（手指）还对着这个物件时，悬停标签的第二行先报结果，停一会儿再回到冷却秒数。
+   * 骨白 / 灰烬色的小型大写，和播报一个口气：一句话、没有感叹号
+   */
+  outcome: {
+    /** 惊吓类：被它吓到的人（名字用下面的 names 连起来） */
+    jumped: (who: string) => `${who} jumped`,
+    /** 引诱类：听见了、会过来查看的人 */
+    heard: (who: string) => `${who} heard it`,
+    /** 生效窗口结束都没人 */
+    noneSaw: 'No one saw it',
+    noneHeard: 'No one heard it',
+  },
+  /** 名字连起来（结果、播报里合并的尖叫传染共用）：Theo / Theo and Mia / Theo, Mia and Sam / Theo, Mia and 2 others */
+  names: (list: readonly string[]): string => {
+    if (list.length <= 1) return list[0] ?? '';
+    if (list.length === 2) return `${list[0]} and ${list[1]}`;
+    if (list.length === 3) return `${list[0]}, ${list[1]} and ${list[2]}`;
+    return `${list[0]}, ${list[1]} and ${list.length - 2} others`;
+  },
   /** 访客登记簿（2026-10-30「一夜」；收夜时翻开，中途也能翻） */
   register: {
     title: 'Register of Visitors',
