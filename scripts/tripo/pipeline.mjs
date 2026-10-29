@@ -23,6 +23,7 @@ import * as C from './catalog.mjs';
 import { BASE_URL, DownloadError, TripoError, apiKeyStatus, createClient, download, mask, readApiKey, shortUrl } from './client.mjs';
 import { GAME_LIMITS, checkForGame, formatInspection, imageInfo, inspectGlb } from './glb.mjs';
 import { refineGlb } from '../blender/refine.mjs';
+import { hasRetint, retintGlb } from '../blender/retint.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..');
@@ -1083,6 +1084,22 @@ async function exportVariant(ctx, vc, nodes, order) {
     via += `${extra.length ? ` + 并入第 ${anims.slice(1).map((_, i) => i + 2).join('、')} 批动作` : ''} + Blender 精修`;
     if (res.sheet) L(`    预览表 ${ctx.rel(res.sheet)}（第一行是权重分类：蓝 = 跟着身体，橙 = 跟着腿 / 手臂）`);
   }
+  // 精修之后的贴图后处理（visitors.json 的 retint：手套重涂成参考访客的颜色和材质、按色相提亮）：只换贴图的字节，网格、权重、动作不动。
+  // 失败就停下，不把半成品放进游戏
+  let retint = null;
+  if (hasRetint(vc.cfg.retint)) {
+    const dir = join(ctx.paths.raw, vc.id);
+    const out = join(dir, 'retinted.glb');
+    L(`  [export] 贴图后处理 ${src} …`);
+    const res = await retintGlb({ src: ctx.abs(src), out, config: vc.cfg.retint, report: join(dir, 'retint.json'), preview: join(dir, 'retint-preview', vc.id), root: ctx.paths.root, log: (s) => L(`    ${s}`) });
+    if (!res.ok) {
+      L(`  [export] ✗ ${res.error}`);
+      return false;
+    }
+    retint = { from: src, report: ctx.rel(join(dir, 'retint.json')), changedTexels: res.report.changed_texels ?? null, changedTexelsMR: res.report.changed_texels_mr ?? null, warnings: res.report.warnings ?? [] };
+    src = ctx.rel(out);
+    via += ' + 贴图后处理';
+  }
   const buf = readFileSync(ctx.abs(src));
   let info;
   try {
@@ -1126,6 +1143,7 @@ async function exportVariant(ctx, vc, nodes, order) {
       },
       game: { ok: check.ok, problems: check.problems, notes: check.notes },
       refine,
+      ...(retint ? { retint } : {}),
       source: {
         from: via,
         tasks: Object.fromEntries(own.map((x) => [x.step, ctx.state.nodes[x.key]?.task_id ?? null])),

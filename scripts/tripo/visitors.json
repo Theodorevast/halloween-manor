@@ -117,6 +117,9 @@
       "$comment": "导出前用本机 Blender 精修（scripts/blender/refine_visitor.py）：球身、帽子、披风整块跟着肩膀那节脊柱骨，腿边的配件不跟腿拉伸，清碎片，面数 / 贴图限到游戏预算，去根运动。结果 assets-src/visitors/<id>/refined.glb，预览表 refine-preview/<id>-sheet.png。args 传给 refine_visitor.py，比如 [\"--limb-scale\", \"1.6\"]（腿 / 手臂的管子算粗一点）、[\"--spine-damp\", \"0.6\"]（脊柱晃动减到 60%）。",
       "enabled": true,
       "args": []
+    },
+    "retint": {
+      "$comment": "2026-10-29 加：精修之后的贴图后处理（scripts/blender/retint.py，由 scripts/blender/retint.mjs 调用），重新导出时照样做。只换贴图的字节，网格、权重、动作不动。这里只有说明、没有规则：访客自己在 overrides.retint 里写才会做。gloves = {reference：参考访客的 GLB（相对项目根），bones：手骨（默认 LeftHand、RightHand），maxDist：离手骨多远以内的面才算手套（默认 0.15 米；再远的是被自动绑骨误分给手的别处网格），dilate：往 UV 岛外的填充扩几像素（默认 6），material：ORM 的粗糙度 / 金属度也照参考（默认 true）}；lift = [{hue：色相范围（度），sat：饱和度从这里平滑变成全量，value：明度从这里平滑减到 0（亮的不动），gain：明度最多乘多少，exclude：不碰的部位 gloves / legs / hands}]。结果 assets-src/visitors/<id>/retinted.glb、retint.json、retint-preview/<id>-before / after / mask.png"
     }
   },
   "variants": [
@@ -167,6 +170,33 @@
         "costume": {
           "$comment": "联名皮肤专用的换装提示词。保留原模板里「还是同一个吉祥物」的要求（黑色球身、正面 logo 看得见、短黑腿、半透明灰色手臂、黄色球鞋、没有脸和人的躯干、T 字站姿、全身正面、两条腿分开、浅灰背景、手里不拿东西、不发光、不加字）；去掉「维多利亚哥特、灰暗颜色」那句，换成「照原作配色、不压暗，每件像搪胶玩具的配件」（原模板「像搪胶玩具的配件：帽子、披肩、领子、带子和涂装」那句并进这一句）。套进服装后不超过 1024 字符（CLI 文档写的上限，未核实会不会截断）。",
           "promptTemplate": "Dress this character in a Halloween costume: {costume}. It must stay clearly the same mascot: a round matte-black ball body with its gold-and-white logo on the front still visible, short black legs, translucent grey arms and yellow sneakers; do not give it a face or a human torso. Colours faithful to the source costume, not muted; every piece fits the ball like a vinyl toy accessory; no glow, no added text, nothing held in the hands. Keep exactly the same T-pose, camera angle and framing, full body visible from top to sneakers, facing the viewer. Both legs stay visible and separate. Plain light grey seamless background, soft even lighting."
+        },
+        "retint": {
+          "$comment": "2026-10-29 用户：「改回灰手套，大衣提亮」。手套：游戏里发黑不是底色的问题（手套底色是 0.655 的灰，和 DIO 一样），是 Tripo 把手套做成了金属（金属度 0.98、粗糙度 0.24），游戏里没有环境贴图，金属只剩高光；照 DIO 的手套换成中性灰、金属度 0.035、粗糙度 0.016（吸血鬼的手套也是 0.98 的金属，不能当参考）。同时去掉手套上被误分给手的深蓝碎块颜色。大衣：深藏青（色相 195–265 度、饱和度 0.2 以上、明度 0.45 以下）明度 × 2；黑球身、logo、金扣金链、皮带、帽檐、鞋都不是这个颜色，不受影响，帽子的深藏青布料一起提亮（同一块布）。2.0 是在游戏页 ?collab 落地灯下和吸血鬼并排量的：大衣背面平均亮度 0.031，吸血鬼斗篷 0.032（原来 0.017，1.8 是 0.026，2.4 是 0.045 就比斗篷亮了）",
+          "gloves": {
+            "reference": "public/assets/visitors/dio.glb"
+          },
+          "lift": [
+            {
+              "hue": [
+                195,
+                265
+              ],
+              "sat": [
+                0.2,
+                0.35
+              ],
+              "value": [
+                0.3,
+                0.45
+              ],
+              "gain": 2.0,
+              "exclude": [
+                "gloves",
+                "legs"
+              ]
+            }
+          ]
         }
       }
     },

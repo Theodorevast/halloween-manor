@@ -1,6 +1,6 @@
 {
   "$comment": "由 scripts/tripo/visitors.mjs 生成，重跑 export 会覆盖对应条目。url 相对于 import.meta.env.BASE_URL；clips 的键对应 src/config/character.ts 的 clips，值是 GLB 里的片段原名（null = 没有）",
-  "updatedAt": "2026-10-29T08:34:58.446Z",
+  "updatedAt": "2026-10-29T10:08:06.699Z",
   "visitors": [
     {
       "id": "lantern-explorer",
@@ -336,7 +336,7 @@
         "scared2": "preset:biped:scared_02"
       },
       "stats": {
-        "bytes": 2094928,
+        "bytes": 2140176,
         "triangles": 12863,
         "textures": [
           "1024x1024",
@@ -372,8 +372,15 @@
         "sheet": "assets-src/visitors/jotaro/refine-preview/jotaro-sheet.png",
         "warnings": []
       },
+      "retint": {
+        "from": "assets-src/visitors/jotaro/refined.glb",
+        "report": "assets-src/visitors/jotaro/retint.json",
+        "changedTexels": 2081231,
+        "changedTexelsMR": 49785,
+        "warnings": []
+      },
       "source": {
-        "from": "animate + 并入第 2 批动作 + Blender 精修",
+        "from": "animate + 并入第 2 批动作 + Blender 精修 + 贴图后处理",
         "tasks": {
           "costume": "e21b687e-bc7f-4ebd-8e45-cce9d68fbed5",
           "views": "e8dfee81-f5f6-401b-83c1-b9cc3107c6ea",
@@ -384,7 +391,7 @@
           "animate2": "b45367ae-df03-4716-aed0-afcaeae942b4"
         },
         "credits": 245,
-        "exportedAt": "2026-10-29T08:12:39.968Z"
+        "exportedAt": "2026-10-29T10:08:06.697Z"
       }
     },
     {
