@@ -112,7 +112,8 @@ export const REVEAL = {
 export const AO = {
   radius: 0.4,
   range: 1.6,
-  intensity: 2.6,
+  /** 2.6 → 4（2026-10-30 PX 审查：direct 留 0.4 时 2.6 在鞋下只暗约 2%，接触阴影看不出；只提这一项，不动 direct，雾和鬼魂最多被压的比例不变） */
+  intensity: 4,
   bias: 0.08,
   samples: 12,
   /** 最终乘到间接光上的比例（1 = 全量） */
