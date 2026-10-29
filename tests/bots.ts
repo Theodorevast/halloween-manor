@@ -25,7 +25,7 @@ import { SCARES } from '../src/config/scares';
 import { BEHAVIOR, TRAITS, TRAP, VISION } from '../src/config/visitors';
 import { angleOf } from '../src/lib/angle';
 import { GHOST_SOURCE } from '../src/sim/types';
-import type { NpcState, Personality, ScareObjectState, ScareType, Vec2, World } from '../src/sim/types';
+import type { NpcState, Personality, ScareObjectState, ScareType, SimEvent, Vec2, World } from '../src/sim/types';
 
 export type BotKind = 'skilled' | 'random' | 'idle';
 /** 鬼魂：none = 没有鬼魂（触屏的俯视模式），hover = 鬼魂机器人贴着最近的访客，manifest = 到他面前现身 */
@@ -128,16 +128,11 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
   const rng = createRng(seed * 7919 + 17);
   const visitors = new Map<number, VisitorLog>();
   let maxSingleScare = 0, lureLedScares = 0;
-  const landing: Record<string, { fired: number; landed: number }> = {};
-  /** 附身了、还没吓到人的惊吓物件（同一个物件冷却比生效窗口长，不会重叠） */
-  const pendingLand = new Set<string>();
+  const land = landingLog();
   const fire: Fire = (id) => {
     const ok = w.trigger(id);
     const o = w.state.objects.find((x) => x.id === id);
-    if (ok && o && isSight(o)) {
-      (landing[id] ??= { fired: 0, landed: 0 }).fired++;
-      pendingLand.add(id);
-    }
+    if (ok && o && isSight(o)) land.fired(id);
     return ok;
   };
   const lastHeard = new Map<number, number>();
@@ -155,7 +150,9 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
       if (k % LURE_EVERY === 0 && lures !== 'none') fireLures(w, lures, fire, inReach);
       if (k % TRAP_EVERY === 0) armTraps(w, inReach);
     } else if (kind === 'random' && k % RANDOM_EVERY === 0) randomMove(w, rng, fire);
-    for (const e of w.step(DT)) {
+    const events = w.step(DT);
+    land.observe(events, w.state.objects);
+    for (const e of events) {
       if (e.type === 'spawn') {
         const n = w.state.npcs.find((m) => m.id === e.npc)!;
         visitors.set(e.npc, { id: e.npc, personality: n.personality, spawnedAt: w.state.time, exitedAt: null, peakFear: 0 });
@@ -173,7 +170,6 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
           maxNeck = Math.max(maxNeck, e.amount);
         } else chills++;
       } else if (e.type === 'startle' && e.object !== null && e.object !== GHOST_SOURCE) {
-        if (pendingLand.delete(e.object)) landing[e.object].landed++;
         maxSingleScare = Math.max(maxSingleScare, e.amount);
         const h = lastHeard.get(e.npc);
         if (h !== undefined && w.state.time - h <= LURE_LED_WINDOW) lureLedScares++;
@@ -187,8 +183,32 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
   const list = [...visitors.values()];
   const lifetimes = list.filter((v) => v.exitedAt !== null).map((v) => v.exitedAt! - v.spawnedAt);
   return {
-    seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares, landing,
+    seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares, landing: land.landing,
     chills, necks, ghostFear, maxNeck, manifests, manifestScares, wallPasses: ghost?.passes ?? 0,
+  };
+}
+
+/**
+ * 目标 6 的统计：机器人每附身一个惊吓物件（fired），这一次有没有真的吓到至少一个人。
+ * observe 每步调一次（这一步的事件、此刻的物件状态）：附身了、还没吓到人的物件，第一次有人被它吓到（startle 的 object 是它）记一次吓到；
+ * 生效窗口（active）走完还没人被吓到，这一次就是落空，不再等。以前一直等下去：同一个物件之后被机关触发吓到了人，
+ * 会记到前面落空的那次附身头上（最终审查 S M5），落空率偏低
+ */
+export function landingLog() {
+  const landing: Record<string, { fired: number; landed: number }> = {};
+  /** 附身了、生效窗口还没走完、还没吓到人的惊吓物件（同一个物件冷却比生效窗口长，不会重叠） */
+  const pending = new Set<string>();
+  return {
+    landing,
+    fired(id: string) {
+      (landing[id] ??= { fired: 0, landed: 0 }).fired++;
+      pending.add(id);
+    },
+    observe(events: readonly SimEvent[], objects: readonly ScareObjectState[]) {
+      for (const e of events) if (e.type === 'startle' && e.object !== null && pending.delete(e.object)) landing[e.object].landed++;
+      // 先认这一步的惊吓、再关窗口：窗口最后一步吓到的人照样算
+      for (const id of pending) if (!(objects.find((o) => o.id === id)!.active > 0)) pending.delete(id);
+    },
   };
 }
 
