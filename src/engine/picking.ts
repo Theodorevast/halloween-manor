@@ -49,7 +49,7 @@ export interface Picker {
   onArm(cb: (id: string) => void): void;
   /**
    * 第三人称：准星对着一个看得见的物件，但离鬼魂太远（AIM_RANGE 到 FAR_RANGE 米）够不着，按下左键的那一刻回调（每按一下一次）。
-   * main.ts 接到 hints.refused('tooFar')。触屏 / 娃娃屋没有准星，永远不会调
+   * 现在 main.ts 不接它：对准时标签已经写 Too far away.（overlays，FEEL-7），点下去不再另说一句；留着给以后要回应「点了」的地方。触屏 / 娃娃屋没有准星，永远不会调
    */
   onTooFar(cb: (id: string) => void): void;
   dispose(): void;
@@ -416,7 +416,7 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
     if (e.button === 0 && locked) {
       const { near, far } = scan();
       setAim(near, far);
-      // 够不着：这一下做不到，回应一句（hints.refused）；够得着的照常开始手势
+      // 够不着：这一下做不到，通知 onTooFar 的订阅者（现在没人订：标签对准时已经写 Too far away.）；够得着的照常开始手势
       if (!near && far) for (const cb of farCbs) cb(far);
     }
     input.down(e.button, eventTime(e.timeStamp, performance.now()));
