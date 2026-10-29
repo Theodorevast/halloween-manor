@@ -26,8 +26,9 @@
 //     neck 为真是「后颈一凉」：倒吸一口气（从他身上出来）+ 低沉的不协和涌起（不定位，2.5 秒内不重复涌起），同一个人 1.5 秒内不重复。
 //     模拟在同一步紧跟着给这个人一个 startle（object = 'ghost'）：不再放 gasp（已经倒吸过了），尖叫照放，但挪到这口气之后；
 //     紧张度也只由那个 startle 加（不重复加）。同一帧里他被吓跑了：只留 braam 和逃跑的尖叫（这口气会被 hit-stop 的静音吞掉）
-//   - 现身（2026-10-28，manifest 事件，配方在 ghost.ts 开头）：windup / drop / end 三个节拍转给 createManifestSound；drop 同一批里有人被吓跑时
-//     冲击让给吓跑的 braam，冷气挪到静音之后（现身的冲击不算 braamAt：否则现身后 0.8 秒内吓跑的人就没有 braam 了）
+//   - 现身（2026-10-28，manifest 事件，配方在 ghost.ts 开头）：windup / drop / end 三个节拍转给 createManifestSound；drop 同一批里真的放了 braam 时
+//     （有人被吓跑、而且离上一声 braam 超过 BRAAM_GAP）冲击让给它，冷气挪到静音之后；有人被吓跑但这一批没放 braam（0.8 秒内上一声还没响完）冲击照放
+//     （现身的冲击不算 braamAt：否则现身后 0.8 秒内吓跑的人就没有 braam 了）
 //   - 被手电照到（reveal 事件）：lit 集合里有人就淡入压力声（ghost.ts 的 createRevealLayer），空了就淡出。lit 不能只靠 on / off 事件：
 //     模拟那边走了的人（mode = gone，下一步就从 npcs 里删掉）不会再有 off，逃跑中的人又不理会鬼魂（canBeScared），所以 tick 每帧最先调 sync，
 //     把 lit 里「已经不在 state.npcs 里 / gone / fleeing」的人清掉，没人了压力声就淡出，不会一直响下去（tests/audio.test.ts 守着）
@@ -282,12 +283,15 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
       }
       // 同一帧里有人被吓跑：先静音，再 braam；这一帧的尖叫都挪到静音之后
       let voiceAt = t + SCREAM.delay;
+      /** 这一批真的放了 braam（BRAAM_GAP 之内的吓跑不放：上一声还没响完）：现身落下的冲击要不要让路，看的是它，不是「有人被吓跑」 */
+      let braamed = false;
       if (fleeing.size) {
         voiceAt = t + HIT_STOP + 0.02;
         if (t - braamAt > BRAAM_GAP) {
           silence(bus, t, HIT_STOP);
           braam(bus, t + HIT_STOP, 0);
           braamAt = t;
+          braamed = true;
         }
       }
       const npc = (id: number) => state.npcs.find((n) => n.id === id);
@@ -374,8 +378,9 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
             const at = placeAt(e.pos, GHOST_Y);
             if (e.phase === 'windup') manifest.windup(t, at);
             else if (e.phase === 'drop') {
-              // 同一批里有人被吓跑：吓跑自己有 braam 和静音，冲击让给它，冷气挪到静音之后
-              manifest.drop(t, at, fleeing.size ? { hit: false, breathDelay: HIT_STOP + 0.05 } : {});
+              // 这一批放了 braam（吓跑自己有 braam 和静音）：冲击让给它，冷气挪到静音之后。有人被吓跑但这一批没放 braam
+              // （0.8 秒内上一声还没响完）：现身自己的冲击照放，不然落下的那一下几乎没声音
+              manifest.drop(t, at, braamed ? { hit: false, breathDelay: HIT_STOP + 0.05 } : {});
             } else manifest.end(t, at);
             break;
           }

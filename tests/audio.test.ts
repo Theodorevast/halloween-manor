@@ -1,6 +1,7 @@
 // 声音的纯数值部分（WebAudio 节点在 node 里没有，合成本身靠 dev/audio.html 的离线渲染量；这里只守几个不该悄悄变掉的约定，
 // 包括和画面对齐的几个时刻：现身蓄力的灯暗一下一声咔哒、床的布料声和呼吸——看样时调画面那边的数，声音要么自己跟着走，要么这里变红），
-// 外加一组用 WebAudio 最小替身跑真的 Router 的测试：被手电照着的访客走了以后，压力声一定淡出
+// 外加一组用 WebAudio 最小替身跑真的 Router 的测试：被手电照着的访客走了以后，压力声一定淡出；
+// 现身落下时冲击让给吓跑的 braam，只在「这一批真的放了 braam」时才让；AudioContext 没在跑时被照到的名单照样记账
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CELL, FURNITURE } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
@@ -13,6 +14,18 @@ import type { NpcMode, NpcState, SimEvent, WorldState } from '../src/sim/types';
 import { GHOST } from '../src/view/ghost';
 import { LIGHTFX, MANIFEST_WINDUP_PATTERN, letterLevel, patternDips } from '../src/view/lightfx';
 import { BED_TIMELINE } from '../src/view/props/bed';
+
+// 现身落下的冲击让不让路，看的是「这一批有没有放 braam / 现身自己的冲击 / 那口冷气」：把这三个声音换成只记时刻的替身，其余照旧（真的 Router、真的现身声音）
+const played = vi.hoisted(() => ({ braam: [] as number[], manifestHit: [] as number[], coldBreath: [] as number[] }));
+vi.mock('../src/audio/sfx', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/audio/sfx')>()),
+  braam: (_bus: unknown, t: number) => (played.braam.push(t), t),
+  manifestHit: (_bus: unknown, t: number) => (played.manifestHit.push(t), t),
+}));
+vi.mock('../src/audio/voices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/audio/voices')>()),
+  coldBreath: (_bus: unknown, t: number) => (played.coldBreath.push(t), t),
+}));
 
 const db = (x: number) => 20 * Math.log10(x);
 
@@ -218,9 +231,12 @@ const world = (...npcs: NpcState[]): WorldState => ({
   time: 0, npcs, objects: [], scaredOff: 0, hitStop: 0, manifest: { phase: 'idle', t: 0, cooldown: 0, pos: null }, avoid: [],
 });
 const reveal = (npc: number, on: boolean): SimEvent => ({ type: 'reveal', npc, on });
-/** 一个只够处理 reveal 事件的 Router：总线是假的，节点是替身 */
+/** 一个只够处理 reveal、flee、manifest 事件的 Router：总线是假的，节点是替身（duck / ambDuck 是吓跑前的静音要用的） */
 const newRouter = () =>
-  createRouter({ ac: { sampleRate: 48000 }, sfx: {}, voice: {}, amb: {}, reverb: {}, noise: { duration: 4 }, pulse: {}, ambHush: new FakeNode(), space: { active: false } } as unknown as MixBus, () => 0);
+  createRouter(
+    { ac: { sampleRate: 48000 }, sfx: {}, voice: {}, amb: {}, reverb: {}, noise: { duration: 4 }, pulse: {}, ambHush: new FakeNode(), duck: new FakeNode(), ambDuck: new FakeNode(), space: { active: false } } as unknown as MixBus,
+    () => 0,
+  );
 
 describe('被照到的压力声：照着鬼魂的访客走了，它不会一直响下去', () => {
   beforeEach(() => {
@@ -269,5 +285,55 @@ describe('被照到的压力声：照着鬼魂的访客走了，它不会一直�
     expect(fades).toEqual([IN]);
     r.sync(world(), 3);
     expect(fades).toEqual([IN, { target: 0, at: 3, tau: REVEAL.out / 3 }]);
+  });
+});
+
+describe('现身落下时冲击让路：条件是「这一批真的放了 braam」', () => {
+  // BRAAM_GAP = 0.8 秒：两次 braam 至少隔这么久，之内的吓跑不再放 braam（上一声还没响完）
+  /** 时刻是浮点数相加出来的：比到微秒 */
+  const us = (a: number[]) => a.map((x) => Math.round(x * 1e6) / 1e6);
+  const flee: SimEvent = { type: 'flee', npc: 1 };
+  const drop: SimEvent = { type: 'manifest', phase: 'drop', pos: { x: 8, z: 6 }, scared: [1] };
+  beforeEach(() => {
+    played.braam.length = 0;
+    played.manifestHit.length = 0;
+    played.coldBreath.length = 0;
+  });
+
+  it('同一批里有人被吓跑、这一批放了 braam：现身的冲击让给它，冷气挪到静音之后', () => {
+    const r = newRouter();
+    r.play([flee, drop], world(), 10);
+    expect(us(played.braam)).toEqual([10.15]);
+    expect(played.manifestHit).toEqual([]);
+    expect(us(played.coldBreath)).toEqual([10.2]);
+  });
+
+  it('没有人被吓跑：现身的冲击照放，冷气不挪，也没有 braam', () => {
+    const r = newRouter();
+    r.play([drop], world(), 10);
+    expect(played.braam).toEqual([]);
+    expect(played.manifestHit).toEqual([10]);
+    expect(played.coldBreath).toEqual([10]);
+  });
+
+  it('0.8 秒之内刚放过 braam、这一批有人被吓跑却没放 braam：现身自己的冲击照放，冷气不挪（以前冲击和 braam 都没有，落下几乎没声音）', () => {
+    const r = newRouter();
+    r.play([flee], world(), 10); // 先吓跑一个：放了 braam
+    expect(us(played.braam)).toEqual([10.15]);
+    played.braam.length = 0;
+    r.play([flee, drop], world(), 10.4); // 0.4 秒后：在 BRAAM_GAP 之内，这一批不放 braam
+    expect(played.braam).toEqual([]);
+    expect(played.manifestHit).toEqual([10.4]);
+    expect(played.coldBreath).toEqual([10.4]);
+  });
+
+  it('隔了 BRAAM_GAP 再来：又放 braam，冲击再让给它', () => {
+    const r = newRouter();
+    r.play([flee], world(), 10);
+    played.braam.length = 0;
+    r.play([flee, drop], world(), 11); // 1 秒后
+    expect(us(played.braam)).toEqual([11.15]);
+    expect(played.manifestHit).toEqual([]);
+    expect(us(played.coldBreath)).toEqual([11.2]);
   });
 });
