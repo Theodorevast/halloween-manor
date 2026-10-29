@@ -4,6 +4,7 @@
 
 - 设计：`docs/superpowers/specs/2026-10-26-haunted-house-design.md`（末尾「替用户做的决定」是待审清单）
 - 实现计划：`docs/superpowers/plans/2026-10-27-haunted-house.md`
+- 10/30 看样清单（这一轮要你定的）：`docs/superpowers/specs/2026-10-30-preview-checklist.md`
 - 技术栈：Vite · TypeScript · three.js r186（`three/webgpu`，自动退回 WebGL2）· Web Audio（声音全部程序化合成）
 
 ## 常用命令
