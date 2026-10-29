@@ -44,6 +44,8 @@ def parse_args():
     p.add_argument('--spine-damp', type=float, default=1.0, help='脊柱各节转动保留多少（1 = 不改，0.5 = 减半）')
     p.add_argument('--no-reweight', action='store_true')
     p.add_argument('--trust', default='', help='逗号分隔的 arms / legs：这些肢体不做「管子」判断，照自动绑骨的权重跟着肢体走（骨头放偏了的模型用）')
+    p.add_argument('--trust-dist', type=float, default=math.inf,
+                   help='--trust 点名的肢体只信离骨段这么远（米）以内的点：d 以内跟肢体，d 到 2d 平滑过渡到身体，再远的算身体（被自动绑骨误分给肢体的大衣、披风碎块）。手脚不受影响；不给就不限（和以前一样）')
     p.add_argument('--min-island', type=float, default=0.002, help='面数少于总数这个比例的孤立碎片删掉')
     return p.parse_args(argv)
 
@@ -501,7 +503,9 @@ def reweight(obj):
         if us:
             report.setdefault('tube_frac', {})[name] = round(sum(1 for u in us if u <= A.limb_scale) / len(us), 3)
     if trusted:
-        log(f'{obj.name}：{sorted(trust_kinds)} 照原权重跟着肢体')
+        near = f'（只信离骨段 {A.trust_dist} 米以内的点，{A.trust_dist}–{A.trust_dist * 2} 米过渡）' if math.isfinite(A.trust_dist) else ''
+        log(f'{obj.name}：{sorted(trust_kinds)} 照原权重跟着肢体{near}')
+        report['trust'] = {'kinds': sorted(trust_kinds), 'dist': A.trust_dist if math.isfinite(A.trust_dist) else None}
 
     body = skel['body']
     if body not in vg_by_name:
@@ -516,7 +520,11 @@ def reweight(obj):
         elif dom in effector:
             limbness = 1.0  # 手、脚（含鞋）整块跟着肢体
         elif dom in trusted:
-            limbness = 1.0
+            # --trust-dist（2026-10-29）：只信离骨段 d 以内的点，d 到 2d 平滑过渡到身体。承太郎的大衣、吸血鬼的斗篷上有被自动绑骨
+            # 误分给手臂、大腿的远处碎块，不限距离时整块跟着肢体走，大衣后背被扯成斜三角；不加 --trust 时腿后侧、鞋口、袖子又被判成身体
+            # （鞋后跟拉出细长的面、袖子在肩上翘着）。默认无穷大，和以前完全一样
+            a, b = bone_seg[dom]
+            limbness = 1.0 - smoothstep(A.trust_dist, A.trust_dist * 2.0, seg_dist(p, a, b)) if math.isfinite(A.trust_dist) else 1.0
         elif dom in radius:
             # 大腿、上臂这些「管子」：贴着管子的是肢体，离得远的（挂在旁边的配件）算身体，中间平滑过渡
             a, b = bone_seg[dom]

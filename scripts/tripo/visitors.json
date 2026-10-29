@@ -119,7 +119,7 @@
       "args": []
     },
     "retint": {
-      "$comment": "2026-10-29 加：精修之后的贴图后处理（scripts/blender/retint.py，由 scripts/blender/retint.mjs 调用），重新导出时照样做。只换贴图的字节，网格、权重、动作不动。这里只有说明、没有规则：访客自己在 overrides.retint 里写才会做。gloves = {reference：参考访客的 GLB（相对项目根），bones：手骨（默认 LeftHand、RightHand），maxDist：离手骨多远以内的面才算手套（默认 0.15 米；再远的是被自动绑骨误分给手的别处网格），dilate：往 UV 岛外的填充扩几像素（默认 6），material：ORM 的粗糙度 / 金属度也照参考（默认 true）}；lift = [{hue：色相范围（度），sat：饱和度从这里平滑变成全量，value：明度从这里平滑减到 0（亮的不动），gain：明度最多乘多少，exclude：不碰的部位 gloves / legs / hands}]。结果 assets-src/visitors/<id>/retinted.glb、retint.json、retint-preview/<id>-before / after / mask.png"
+      "$comment": "2026-10-29 加：精修之后的贴图后处理（scripts/blender/retint.py，由 scripts/blender/retint.mjs 调用），重新导出时照样做。只换贴图的字节，网格、权重、动作不动。这里只有说明、没有规则：访客自己在 overrides.retint 里写才会做。gloves = {color：手套底色 [r, g, b]（0–1，和贴图里存的值一样；不写就不改颜色），roughness / metallic：ORM 里手套的粗糙度 / 金属度（0–1；不写就不改），bones：手骨（默认 LeftHand、RightHand），maxDist：离手骨多远以内的面才算手套（默认 0.15 米；再远的是被自动绑骨误分给手的别处网格），dilate：往 UV 岛外的填充扩几像素（默认 6），reference：旧写法，从另一个访客的 GLB 取没写的值，会让导出顺序有依赖，别用（2026-10-29 审查 M4 起改成直接写数值）}。出错就停（审查 M3）：手套范围是空的、reference 找不到、数值不在 0–1、提亮规则一个像素都没选中、什么都没改，都会打「[retint] ✗ 原因」、导出停下，不往 public/ 放半成品；lift = [{hue：色相范围（度），sat：饱和度从这里平滑变成全量，value：明度从这里平滑减到 0（亮的不动），gain：明度最多乘多少，exclude：不碰的部位 gloves / legs / hands}]。结果 assets-src/visitors/<id>/retinted.glb、retint.json、retint-preview/<id>-before / after / mask.png"
     }
   },
   "variants": [
@@ -128,14 +128,41 @@
       "status": "approved",
       "label": "提灯夜行的探险家",
       "costume": "a Victorian night explorer: a small flat tweed cap perched on top of the ball, a short olive waxed shoulder cape with brass buttons draped over the back and shoulders, a narrow leather satchel strap across the ball, a small unlit brass lantern clipped at one side, leather gaiters over the sneakers",
-      "notes": "灯挂在身侧、手里空着：游戏会在访客手边画手电。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。"
+      "notes": "灯挂在身侧、手里空着：游戏会在访客手边画手电。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。",
+      "overrides": {
+        "retint": {
+          "$comment": "2026-10-29（用户批准）：手套的材质照 DIO 的手套（金属度 0.0353、粗糙度 0.0157）。原来金属度 0.88、粗糙度 0.09：游戏里没有环境贴图，金属的手套只剩高光，背光处发黑（承太郎手套发黑查出来的同一个原因）。底色本来就是中性灰（中位数 0.753 / 0.757 / 0.745），不改颜色。精修参数没动",
+          "gloves": {
+            "roughness": 0.0157,
+            "metallic": 0.0353
+          }
+        }
+      }
     },
     {
       "id": "vampire",
       "status": "approved",
       "label": "维多利亚吸血鬼",
       "costume": "a restrained Victorian vampire: a tall stand-up black collar behind the ball and a short black cape lined with deep oxblood red draped down the back, ending above the legs; a white silk cravat with a small garnet pin just below the logo; no fangs, no blood, no bat wings",
-      "notes": "斗篷只搭在背后、不拖到腿上：绑骨后走路不会被扯着变形。 2026-10-28：用户同意做 3D（「Either is fine」），先做这一个试 P2 + 四视图 + Blender 精修。"
+      "notes": "斗篷只搭在背后、不拖到腿上：绑骨后走路不会被扯着变形。 2026-10-28：用户同意做 3D（「Either is fine」），先做这一个试 P2 + 四视图 + Blender 精修。",
+      "overrides": {
+        "refine": {
+          "$comment": "2026-10-29（用户批准）：腿照自动绑骨的权重跟着腿走，但只信离骨段 0.10 米以内的点（0.10–0.20 米过渡，再远的算身体）。原来（默认参数）腿骨不在腿的正中，腿后侧和鞋口被判成身体，走、跑、afraid 时鞋子被拉成长条；不限距离的 --trust legs 又会把斗篷下摆拽走。量的拉伸（每个动作最坏一帧拉长超过 2 倍的边数）：idle 643 → 394、walk 746 → 481、run 855 → 492，其余动作也少 40%–50%；斗篷和手不受影响（见 .superpowers 的 lane-K-report）",
+          "args": [
+            "--trust",
+            "legs",
+            "--trust-dist",
+            "0.10"
+          ]
+        },
+        "retint": {
+          "$comment": "2026-10-29（用户批准）：手套的材质照 DIO 的手套（金属度 0.0353、粗糙度 0.0157）。原来金属度 0.98、粗糙度 0.20：游戏里没有环境贴图，金属的手套只剩高光，背光处发黑。底色本来就是中性灰（中位数 0.784 / 0.784 / 0.776），不改颜色",
+          "gloves": {
+            "roughness": 0.0157,
+            "metallic": 0.0353
+          }
+        }
+      }
     },
     {
       "id": "witch",
@@ -171,10 +198,25 @@
           "$comment": "联名皮肤专用的换装提示词。保留原模板里「还是同一个吉祥物」的要求（黑色球身、正面 logo 看得见、短黑腿、半透明灰色手臂、黄色球鞋、没有脸和人的躯干、T 字站姿、全身正面、两条腿分开、浅灰背景、手里不拿东西、不发光、不加字）；去掉「维多利亚哥特、灰暗颜色」那句，换成「照原作配色、不压暗，每件像搪胶玩具的配件」（原模板「像搪胶玩具的配件：帽子、披肩、领子、带子和涂装」那句并进这一句）。套进服装后不超过 1024 字符（CLI 文档写的上限，未核实会不会截断）。",
           "promptTemplate": "Dress this character in a Halloween costume: {costume}. It must stay clearly the same mascot: a round matte-black ball body with its gold-and-white logo on the front still visible, short black legs, translucent grey arms and yellow sneakers; do not give it a face or a human torso. Colours faithful to the source costume, not muted; every piece fits the ball like a vinyl toy accessory; no glow, no added text, nothing held in the hands. Keep exactly the same T-pose, camera angle and framing, full body visible from top to sneakers, facing the viewer. Both legs stay visible and separate. Plain light grey seamless background, soft even lighting."
         },
+        "refine": {
+          "$comment": "2026-10-29（用户批准）：手臂、腿照自动绑骨的权重跟着肢体走，但只信离骨段 0.10 米以内的点（0.10–0.20 米过渡，再远的算身体）。原来（默认参数）袖子比手臂粗、腿骨不在腿的正中，袖子和腿后侧、鞋口被判成身体：手垂下来袖子横在肩上，走、跑、afraid 时鞋后跟拉出细长的面；不限距离的 --trust 又会把大衣上被误分给手臂、大腿的远处碎块一起拽走（大衣后背扯成斜三角）。量的拉伸（每个动作最坏一帧：p99.9 拉伸倍数 / 拉长超过 2 倍的边数）：walk 10.29 / 1313 → 9.25 / 1196、afraid 16.16 / 1465 → 12.81 / 1417，其余动作最坏拉伸都小，边数除 run 持平外都少（见 .superpowers 的 lane-K-report）",
+          "args": [
+            "--trust",
+            "arms,legs",
+            "--trust-dist",
+            "0.10"
+          ]
+        },
         "retint": {
-          "$comment": "2026-10-29 用户：「改回灰手套，大衣提亮」。手套：游戏里发黑不是底色的问题（手套底色是 0.655 的灰，和 DIO 一样），是 Tripo 把手套做成了金属（金属度 0.98、粗糙度 0.24），游戏里没有环境贴图，金属只剩高光；照 DIO 的手套换成中性灰、金属度 0.035、粗糙度 0.016（吸血鬼的手套也是 0.98 的金属，不能当参考）。同时去掉手套上被误分给手的深蓝碎块颜色。大衣：深藏青（色相 195–265 度、饱和度 0.2 以上、明度 0.45 以下）明度 × 2；黑球身、logo、金扣金链、皮带、帽檐、鞋都不是这个颜色，不受影响，帽子的深藏青布料一起提亮（同一块布）。2.0 是在游戏页 ?collab 落地灯下和吸血鬼并排量的：大衣背面平均亮度 0.031，吸血鬼斗篷 0.032（原来 0.017，1.8 是 0.026，2.4 是 0.045 就比斗篷亮了）",
+          "$comment": "2026-10-29 用户：「改回灰手套，大衣提亮」。手套颜色、材质直接写 DIO 手套量出来的中位数（审查 M4：不再读 dio.glb，导出顺序无关）。手套：游戏里发黑不是底色的问题（手套底色是 0.655 的灰，和 DIO 一样），是 Tripo 把手套做成了金属（金属度 0.98、粗糙度 0.24），游戏里没有环境贴图，金属只剩高光；照 DIO 的手套换成中性灰、金属度 0.035、粗糙度 0.016（吸血鬼的手套也是 0.98 的金属，不能当参考）。同时去掉手套上被误分给手的深蓝碎块颜色。大衣：深藏青（色相 195–265 度、饱和度 0.2 以上、明度 0.45 以下）明度 × 2；黑球身、logo、金扣金链、皮带、帽檐、鞋都不是这个颜色，不受影响，帽子的深藏青布料一起提亮（同一块布）。2.0 是在游戏页 ?collab 落地灯下和吸血鬼并排量的：大衣背面平均亮度 0.031，吸血鬼斗篷 0.032（原来 0.017，1.8 是 0.026，2.4 是 0.045 就比斗篷亮了）。2026-10-29 第 4 轮：提亮的排除从 legs 改成 feet（只护住鞋）：精修加了 --trust legs 以后，大衣下摆靠腿的几块被分给腿，用 legs 排除会少提亮约 3.4 万个像素、下摆发暗；feet 只排除主导骨头是脚、脚尖的面（鞋上的深色条纹 653 个像素），黑腿本来就不在深藏青的颜色范围里",
           "gloves": {
-            "reference": "public/assets/visitors/dio.glb"
+            "color": [
+              0.6549,
+              0.6471,
+              0.6392
+            ],
+            "roughness": 0.0157,
+            "metallic": 0.0353
           },
           "lift": [
             {
@@ -193,7 +235,7 @@
               "gain": 2.0,
               "exclude": [
                 "gloves",
-                "legs"
+                "feet"
               ]
             }
           ]

@@ -4,7 +4,7 @@
 //   node scripts/blender/retint.mjs <输入.glb> <输出.glb> --config <cfg.json> [--report <r.json>] [--preview <前缀>]
 //   cfg.json 的写法见 retint.py 文件头；里面的相对路径（gloves.reference）按项目根目录解析
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findBlender } from './refine.mjs';
@@ -35,11 +35,21 @@ export async function retintGlb({ src, out, config, report, preview = null, root
   const cfgFile = `${report}.config.json`;
   writeFileSync(cfgFile, `${JSON.stringify(absConfig(config, root), null, 2)}\n`);
   const argv = ['-b', '--factory-startup', '--python-exit-code', '1', '-P', join(HERE, 'retint.py'), '--', '--in', src, '--out', out, '--config', cfgFile, '--report', report, ...(preview ? ['--preview', preview] : [])];
+  // 先删掉上一次的输出：失败时不能把旧文件当成这次的结果
+  rmSync(out, { force: true });
   const r = spawnSync(blender, argv, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const lines = `${r.stdout ?? ''}\n${r.stderr ?? ''}`.split(/\r?\n/).filter((l) => /^\[retint\]|Error|Traceback|^\s+File "|Exception|SystemExit/.test(l));
   for (const l of lines) log(l);
-  if (r.status !== 0 || !existsSync(out) || !existsSync(report)) return { ok: false, error: `Blender 退出码 ${r.status ?? r.error?.message}，没有生成后处理结果`, lines };
-  return { ok: true, report: JSON.parse(readFileSync(report, 'utf8')), lines };
+  // retint.py 停下时打「[retint] ✗ 原因」：把原因直接带出去，流水线日志里一眼看得到
+  const why = lines.find((l) => l.startsWith('[retint] ✗'))?.replace('[retint] ✗ ', '');
+  if (r.status !== 0 || !existsSync(out)) return { ok: false, error: why ? `贴图后处理停下了：${why}` : `Blender 退出码 ${r.status ?? r.error?.message}，没有生成后处理结果`, lines };
+  let rep;
+  try {
+    rep = JSON.parse(readFileSync(report, 'utf8'));
+  } catch (e) {
+    return { ok: false, error: `后处理报告 ${report} 读不懂：${e.message}`, lines };
+  }
+  return { ok: true, report: rep, lines };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -56,7 +66,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const config = JSON.parse(readFileSync(abs(opt('--config')), 'utf8'));
   const res = await retintGlb({
     src: abs(src), out: abs(out), config, report: abs(opt('--report') ?? `${out}.retint.json`), preview: opt('--preview') ? abs(opt('--preview')) : null,
-    root: process.cwd(), log: (s) => console.log(s),
+    root: ROOT, log: (s) => console.log(s),
   });
   if (!res.ok) {
     console.error(`\n${res.error}`);

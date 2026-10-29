@@ -1,6 +1,6 @@
 {
   "$comment": "由 scripts/tripo/visitors.mjs 生成，重跑 export 会覆盖对应条目。url 相对于 import.meta.env.BASE_URL；clips 的键对应 src/config/character.ts 的 clips，值是 GLB 里的片段原名（null = 没有）",
-  "updatedAt": "2026-10-29T10:08:06.699Z",
+  "updatedAt": "2026-10-29T11:31:21.295Z",
   "visitors": [
     {
       "id": "lantern-explorer",
@@ -28,7 +28,7 @@
         "scared2": "preset:biped:scared_02"
       },
       "stats": {
-        "bytes": 1766668,
+        "bytes": 1761840,
         "triangles": 12952,
         "textures": [
           "1024x1024",
@@ -64,8 +64,15 @@
         "sheet": "assets-src/visitors/lantern-explorer/refine-preview/lantern-explorer-sheet.png",
         "warnings": []
       },
+      "retint": {
+        "from": "assets-src/visitors/lantern-explorer/refined.glb",
+        "report": "assets-src/visitors/lantern-explorer/retint.json",
+        "changedTexels": 0,
+        "changedTexelsMR": 52222,
+        "warnings": []
+      },
       "source": {
-        "from": "animate + 并入第 2 批动作 + Blender 精修",
+        "from": "animate + 并入第 2 批动作 + Blender 精修 + 贴图后处理",
         "tasks": {
           "costume": "ac63d3cb-80c8-421f-9fde-1d42bf877cf7",
           "views": "5c66caeb-7346-493e-af9a-d58189e22373",
@@ -76,7 +83,7 @@
           "animate2": "737188ef-5eb9-4fac-9c9a-d60aee02f956"
         },
         "credits": 245,
-        "exportedAt": "2026-10-28T15:46:02.117Z"
+        "exportedAt": "2026-10-29T11:27:13.435Z"
       }
     },
     {
@@ -105,7 +112,7 @@
         "scared2": "preset:biped:scared_02"
       },
       "stats": {
-        "bytes": 2097896,
+        "bytes": 2100208,
         "triangles": 12247,
         "textures": [
           "1024x1024",
@@ -141,8 +148,15 @@
         "sheet": "assets-src/visitors/vampire/refine-preview/vampire-sheet.png",
         "warnings": []
       },
+      "retint": {
+        "from": "assets-src/visitors/vampire/refined.glb",
+        "report": "assets-src/visitors/vampire/retint.json",
+        "changedTexels": 0,
+        "changedTexelsMR": 41480,
+        "warnings": []
+      },
       "source": {
-        "from": "animate + 并入第 2 批动作 + Blender 精修",
+        "from": "animate + 并入第 2 批动作 + Blender 精修 + 贴图后处理",
         "tasks": {
           "costume": "2881387a-b407-4a0c-bad3-b9c97de9b178",
           "views": "6179b622-af41-4963-b470-79483ba47f96",
@@ -153,7 +167,7 @@
           "animate2": "0edcd2ab-caf2-4f88-96ca-bfcceec9f6d4"
         },
         "credits": 245,
-        "exportedAt": "2026-10-28T15:46:11.481Z"
+        "exportedAt": "2026-10-29T11:27:30.427Z"
       }
     },
     {
@@ -336,7 +350,7 @@
         "scared2": "preset:biped:scared_02"
       },
       "stats": {
-        "bytes": 2140176,
+        "bytes": 2140312,
         "triangles": 12863,
         "textures": [
           "1024x1024",
@@ -375,7 +389,7 @@
       "retint": {
         "from": "assets-src/visitors/jotaro/refined.glb",
         "report": "assets-src/visitors/jotaro/retint.json",
-        "changedTexels": 2081231,
+        "changedTexels": 2083666,
         "changedTexelsMR": 49785,
         "warnings": []
       },
@@ -391,7 +405,7 @@
           "animate2": "b45367ae-df03-4716-aed0-afcaeae942b4"
         },
         "credits": 245,
-        "exportedAt": "2026-10-29T10:08:06.697Z"
+        "exportedAt": "2026-10-29T11:31:21.294Z"
       }
     },
     {
