@@ -70,4 +70,37 @@
 
 ---
 
-（第二部分：镜头、范围显示、反馈几路，等 `feel-and-feedback.md` 出来后补在下面）
+## 第二部分：镜头、范围显示、反馈（按手感设计的分析 `feel-and-feedback.md`）
+
+主会话的取舍：FEEL-1 … FEEL-8、FEEL-10、FEEL-11 都做；FEEL-9（收尾时吊臂拉远）留到最后一轮有余量再做。「不建议做的」十条照它的理由不做（镜头不推近、不自动转向、范围不常挂、不用访客的手电标范围……）。
+为了不让两路改同一个文件，几条并进第一部分已经在跑的路：
+
+| 加给 | 内容 | 文件 |
+|---|---|---|
+| LT 光 | FEEL-4 墙后的镜头（靠镜头那半段吊臂上、隔开镜头和鬼魂的墙整片溶开）；做完 ART-1、ART-2、ART-5 以后、ART-9 之前 | `src/view/walls.ts` 的 `dissolveAt`、`DISSOLVE.sight` |
+| GF 鬼魂和雾 | FEEL-5 鬼魂挡住访客时自己淡下去 | `src/view/ghost.ts`（`GHOST.occlude`、写 `u.fade` 那里） |
+| PX 后处理 | FEEL-8 贴近发毛时访客呼出白气（只改「什么时候呼气」，样子归 ART-8） | `src/view/particles/breath.ts` |
+
+新开两路：
+
+| 路 | 端口 | 文件 |
+|---|---|---|
+| AF 瞄准和反馈 | 5735 | 新 `src/sim/reach.ts`；`src/view/overlays.ts`；`src/styles.css`；`src/config/strings.ts`（只加 `outcome`、`names`）；`src/ui/hud.ts`；`src/engine/picking.ts`；`src/engine/ghostRig.ts`（只加 `GhostUi.aimFar`）；`src/view/props.ts`、`src/view/props/kit.ts`（ART-5 的物件那一半）；测试 新 `tests/reach.test.ts`、`tests/overlays.test.ts`、`tests/hints.test.ts` |
+| RF 范围霜线 | 5736 | 新 `src/view/rangeFrost.ts`；`src/main.ts`（只加它的接线）；测试 新 `tests/range-mask.test.ts` |
+
+## 路 AF：瞄准和反馈（FEEL-1、FEEL-3、FEEL-6、FEEL-7、FEEL-10、ART-5 的物件那一半）
+
+照 `feel-and-feedback.md` 的做法、数值、验收做（ART-5 照 `art-direction.md`），顺序：
+1. **FEEL-1 名牌上的小眼睛**（P0）：`src/sim/reach.ts` 纯函数和规则照搬结算；`tests/reach.test.ts` 的一致性测试；机器人和平衡数字不能变（模拟只加只读函数）
+2. **FEEL-3 结果写在准星对着的地方**（P0）：`STRINGS.outcome`、`STRINGS.names` 加进 `strings.ts`（`names` 是纯函数：Theo / Theo and Mia / Theo, Mia and Sam / Theo, Mia and 2 others），测试覆盖
+3. **FEEL-7 够不着时也有回应**
+4. **FEEL-6 播报的合并和挤出顺序**（纯函数 + 单测）
+5. **ART-5 的物件那一半**：`props/kit.ts` 的 `createGlow` 朝向和 `props.ts` 的 `GLOW` 第三人称数值（娃娃屋不变）；悬停的物件仍然一眼看得出（截图）。墙那一半归 LT
+6. **FEEL-10 恐惧条**
+名牌记号、结果、够不着三者在同一个标签 / 名牌上，做完一起截图看一遍：一眼读得懂、不吵。
+
+## 路 RF：范围霜线（FEEL-2、FEEL-11）
+
+照 `feel-and-feedback.md` 的做法、数值、验收做：
+1. **FEEL-2 地上的范围霜线**（P0）：新模块 `rangeFrost.ts`；范围掩码的计算（二值图 + 有符号距离）写成纯函数，`tests/range-mask.test.ts` 测和 `canSee` / `canHear` / `facesToward` 一致；材质 `deferCompile`，第一次瞄准不卡（量）；`main.ts` 只加接线（`picker.onHover` → `rangeFrost.show(id)`，模块进 modules）。够不着的物件（4–10 米，AF 路的 FEEL-7）不画线：AF 还没合并时先按 `picking.ts` 现有的「够得着」判断
+2. **FEEL-11 现身冷却好了，脚下的霜往外呼一次**（P2）：第 1 项做完、量过再做

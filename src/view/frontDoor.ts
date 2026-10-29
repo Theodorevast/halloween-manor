@@ -6,7 +6,8 @@
 // - spawn 事件（有人在门外）：先两下敲门，门还关着；接着门轴吱呀的那一秒里往屋里推开，先快后慢，访客走到门口之前已经开到 70° 以上
 // - 附近有进门、逃跑、天亮自己走的人（离门洞 FRONT_DOOR_MOTION.hold 米以内）就一直开着
 // - 有人被吓跑：他离门洞 flee.reach 米时被撞开（赶在他前面）；exit 事件（他冲出去、远处那声关门响起）那一刻起甩上，
-//   exit.contact 秒后撞上门框，闷响（sfx.ts 的 exitDoor）就落在撞上那一刻；后面还有人要过就先不甩，等最后一个
+//   exit.contact 秒后撞上门框，闷响（sfx.ts 的 exitDoor）就落在撞上那一刻；后面还有人要过就先不甩，等最后一个。
+//   关门声只跟着画面上真的甩门的那一下：声音那边（audio/engine.ts）每个 exit 都问 slammed(编号)，一群人出门只响最后那一声
 // - 天亮自己走的人（mode leaving）：他走到离门洞 calm.reach 米时慢慢推开，没有声音
 // - 没人了：停 settle 秒，用 close 秒慢慢自己合上，没有声音
 // 第三人称：鬼魂和镜头穿过时溶开（照 props.ts 的写法，walls.ts 的 DISSOLVE）。
@@ -24,6 +25,12 @@ import { DISSOLVE, Side, dissolveAt, ghostDissolve, v3, wallFullness } from './w
 export interface FrontDoor extends Module {
   /** 门现在开着多少（0 = 关上，1 = 全开）：收夜检测「最后一个人走了、门关上了」用 */
   readonly openness: number;
+  /**
+   * 这个人出门（exit 事件）时门真的甩上了没有：声音那边（audio/engine.ts 的 setFrontDoor）按它决定响不响关门声，
+   * 画面上真的甩门的那一下才响。后面还有人要过、门本来就关着、正有人敲门时不甩，是 false；没见过的编号也是 false。
+   * 要在声音处理这一批事件之前问：main.ts 里前门排在声音前面（同一批事件先分发给前门）
+   */
+  slammed(npc: number): boolean;
 }
 
 // ───────────────────────── 动作 ─────────────────────────
@@ -76,8 +83,8 @@ export interface DoorMotion {
   readonly openness: number;
   /** spawn 事件：门外有人敲门 */
   spawn(): void;
-  /** exit 事件：id 是走出前门的人，npcs 是此刻 state.npcs（可能还留着他） */
-  exit(id: number, npcs: readonly DoorNpc[]): void;
+  /** exit 事件：id 是走出前门的人，npcs 是此刻 state.npcs（可能还留着他）。返回这一下门真的甩上了没有（关门声跟着它） */
+  exit(id: number, npcs: readonly DoorNpc[]): boolean;
   /** 每帧：dt 是真实时间（hit-stop 里也照常走），npcs 是此刻 state.npcs */
   update(dt: number, npcs: readonly DoorNpc[]): void;
 }
@@ -125,13 +132,14 @@ export function createDoorMotion(): DoorMotion {
     },
     exit(id, npcs) {
       // 又有人在敲门了、或者门本来就关着：不用甩
-      if (pending !== null || deg < 1) return;
-      // 后面还有人要过：先不甩，等最后一个（远处那声关门的闷响照样响，是声音那边的事）
+      if (pending !== null || deg < 1) return false;
+      // 后面还有人要过：先不甩，等最后一个（关门声也跟着不响，见 FrontDoor.slammed）
       for (const n of npcs) {
-        if (n.id !== id && needsDoor(n.mode) && distOf(n) <= M.hold) return;
+        if (n.id !== id && needsDoor(n.mode) && distOf(n) <= M.hold) return false;
       }
       begin('slam', 0, TL.exit.contact, slamEase);
       idle = 0;
+      return true;
     },
     update(dt, npcs) {
       now += dt;
@@ -273,14 +281,19 @@ export function createFrontDoor(core: RenderCore, rig: GhostRig | null): FrontDo
   core.houseRoot.add(root);
 
   const motion = createDoorMotion();
+  /** 出门时门真的甩上了的那些人（编号；一夜几十个，不清） */
+  const slams = new Set<number>();
 
   return {
     get openness() {
       return motion.openness;
     },
+    slammed(npc) {
+      return slams.has(npc);
+    },
     onEvent(e, state) {
       if (e.type === 'spawn') motion.spawn();
-      else if (e.type === 'exit') motion.exit(e.npc, state.npcs);
+      else if (e.type === 'exit' && motion.exit(e.npc, state.npcs)) slams.add(e.npc);
     },
     update(ctx) {
       houseOffset.value.copy(core.houseRoot.position);

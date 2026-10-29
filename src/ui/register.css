@@ -1,0 +1,334 @@
+/* 访客登记簿（ui/registerView.ts，2026-10-30「一夜」）
+ *
+ * 一页维多利亚式的访客登记：沿用 styles.css 的夜色、骨白、灰烬，标题页的外框（--frame-page）和颗粒（--grain），
+ * 标题用 IM Fell English，正文用 EB Garamond。每人两行——名字小型大写 · 性格标注（斜体）· 穿哪套，下一行斜体写几点进来、怎么走的；
+ * 页脚是两三句散文。宽屏两栏（像账簿的一页），窄屏一栏、可以滚。
+ * 文字只用小型大写、斜体、细线、透明度；不做大号数字、表格、打分、评级，不发光、不描边、不闪。
+ * 翻开时纸页绕左边轻轻转正、淡入；减少动态时不转，只淡入
+ */
+
+/* ── 右下角的小本子（HUD 按钮栏的左边，位置由 registerView.ts 量好写在 style 上；量不到时在这里的右下角）── */
+
+.rg-dock {
+  position: fixed;
+  z-index: 3;
+  right: max(20px, env(safe-area-inset-right));
+  bottom: max(20px, env(safe-area-inset-bottom));
+  pointer-events: auto;
+  opacity: 0;
+  /* 和 .hud-play 一起淡入 */
+  transition: opacity 0.9s ease 0.3s;
+}
+
+.rg-dock.is-on {
+  opacity: 1;
+}
+
+/* ── 一页 ──────────────────────────────────────────── */
+
+.rg-page {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+  /* 和标题页一样不透明：半透明时 HUD 的计数、按钮会从纸底下透出来，像没盖住 */
+  background: var(--grain) var(--night);
+  color: var(--bone);
+  /* 整个画面都是这一层（翻开、淡入淡出时都是）：点纸外面也落在它上面，点不到画布——不然点一下就把指针锁回去，俯视时还会附身物件 */
+  pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+
+.rg-page.is-on {
+  opacity: 1;
+}
+
+.rg-page.is-leaving {
+  opacity: 0;
+  transition-duration: 0.35s;
+}
+
+/* 外框和标题页同一种：双线、四角内凹 */
+.rg-page::before {
+  content: '';
+  position: absolute;
+  z-index: 1;
+  inset: 18px;
+  border-image: var(--frame-page) 20 / 20px stretch;
+  pointer-events: none;
+}
+
+/* 滚动的是框里面这一块：上下边缘很淡地隐去，滚的时候字不会硬生生切在框线上 */
+.rg-scroll {
+  position: absolute;
+  inset: 24px;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  outline: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(220, 210, 189, 0.22) transparent;
+  -webkit-mask-image: linear-gradient(transparent, #000 14px, #000 calc(100% - 14px), transparent);
+  mask-image: linear-gradient(transparent, #000 14px, #000 calc(100% - 14px), transparent);
+}
+
+/* margin: auto：放得下时上下居中，放不下时从顶上开始（不会把开头挤到看不见的地方） */
+.rg-sheet {
+  width: 100%;
+  max-width: 62rem;
+  margin: auto;
+  padding: 30px 48px 26px;
+}
+
+.rg-page.is-on .rg-sheet {
+  transform-origin: 0 50%;
+  animation: rg-turn 0.8s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes rg-turn {
+  from {
+    opacity: 0;
+    transform: perspective(1600px) rotateY(8deg) translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rg-head {
+  text-align: center;
+}
+
+.rg-title {
+  margin: 0;
+  font-family: var(--face-display);
+  font-weight: 400;
+  font-size: clamp(2.3rem, 5.4vw, 3.5rem);
+  line-height: 1;
+  letter-spacing: 0.005em;
+  color: var(--bone);
+}
+
+.rg-sub {
+  margin: 0.7rem 0 0;
+  font-style: italic;
+  font-size: 1.2rem;
+  line-height: 1.3;
+  color: var(--ash);
+}
+
+.rg-rule {
+  display: block;
+  width: min(13rem, 56vw);
+  height: auto;
+  margin: 1.05rem auto 1.55rem;
+  color: var(--ash);
+}
+
+/* 登记的一行行：宽屏两栏，中间一道细线 */
+.rg-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  columns: 2;
+  column-gap: 3.5rem;
+  column-rule: 1px solid rgba(220, 210, 189, 0.13);
+}
+
+.rg-entry {
+  break-inside: avoid;
+  padding-bottom: 0.72rem;
+}
+
+.rg-who {
+  margin: 0;
+  font-size: 1.14rem;
+  line-height: 1.3;
+  color: var(--ash);
+}
+
+.rg-name {
+  font-weight: 600;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.05em;
+  color: var(--bone);
+}
+
+.rg-who > span + span::before {
+  content: '\00B7';
+  margin: 0 0.45em;
+  font-style: normal;
+}
+
+.rg-tag {
+  font-style: italic;
+}
+
+/* 第二行：斜体，退半步（悬挂缩进），墨色淡一点 */
+.rg-story {
+  margin: 0.12rem 0 0 1.1rem;
+  font-style: italic;
+  font-size: 1.04rem;
+  line-height: 1.32;
+  color: rgba(220, 210, 189, 0.78);
+  /* 折行时别把最后一个钟点单独甩到下一行 */
+  text-wrap: pretty;
+}
+
+.rg-others {
+  break-inside: avoid;
+  padding-top: 0.1rem;
+  font-style: italic;
+  font-size: 1.04rem;
+  line-height: 1.32;
+  color: var(--ash);
+}
+
+/* 页脚：一道短细线下面两三句散文；墙上多一个影子那一句单独一行 */
+.rg-foot {
+  max-width: 34rem;
+  margin: 1.1rem auto 0;
+  text-align: center;
+  text-wrap: pretty;
+}
+
+.rg-foot::before {
+  content: '';
+  display: block;
+  width: 3rem;
+  height: 1px;
+  margin: 0 auto 1rem;
+  background: rgba(220, 210, 189, 0.3);
+}
+
+.rg-foot p {
+  margin: 0;
+  font-size: 1.2rem;
+  line-height: 1.5;
+}
+
+/* 一句一块：放得下时整句不折开（比一行还长的照常在句子里面折行） */
+.rg-s {
+  display: inline-block;
+}
+
+.rg-foot .rg-ps {
+  margin-top: 0.45rem;
+  font-style: italic;
+  color: var(--ash);
+}
+
+.rg-end {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.rg-notover {
+  margin: 0;
+  font-style: italic;
+  font-size: 1.08rem;
+  color: var(--ash);
+}
+
+.rg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  gap: 0.3rem 2.2rem;
+}
+
+/* 按钮和标题页的「Click to begin」一个排法：只有字，不加框；聚焦时一道细线框 */
+.rg-act {
+  margin: 0;
+  padding: 0.1em 0.3em;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-family: var(--face-display);
+  font-size: clamp(1.35rem, 3.6vw, 1.7rem);
+  line-height: 1.2;
+  color: var(--bone);
+  opacity: 0.8;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+
+.rg-act:hover {
+  opacity: 1;
+}
+
+.rg-act:focus-visible {
+  opacity: 1;
+  outline: 1px solid var(--bone);
+  outline-offset: 4px;
+}
+
+@media (pointer: coarse) {
+  .rg-act {
+    min-height: 44px;
+  }
+}
+
+/* ── 窄屏：一栏，整页可以滚 ───────────────────────────── */
+
+@media (max-width: 760px) {
+  .rg-list {
+    columns: 1;
+  }
+}
+
+@media (max-width: 640px) {
+  .rg-page::before {
+    inset: 10px;
+  }
+
+  .rg-scroll {
+    inset: 14px;
+  }
+
+  .rg-sheet {
+    padding: 30px 18px 26px;
+  }
+
+  .rg-sub {
+    font-size: 1.05rem;
+  }
+
+  .rg-rule {
+    margin: 1rem auto 1.5rem;
+  }
+
+  .rg-who {
+    font-size: 1.07rem;
+  }
+
+  .rg-story,
+  .rg-others {
+    font-size: 0.99rem;
+  }
+
+  .rg-story {
+    margin-left: 0.9rem;
+  }
+
+  .rg-foot p {
+    font-size: 1.1rem;
+  }
+}
+
+/* ── 减少动态：不转，只淡入 ───────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .rg-page.is-on .rg-sheet {
+    animation: none;
+  }
+}

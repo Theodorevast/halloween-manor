@@ -12,15 +12,33 @@
 // main.ts 只调这里，不自己拼文案
 import { SCARES } from '../config/scares';
 import { STRINGS } from '../config/strings';
+import { TRAP } from '../config/visitors';
 import { watchGhostUi } from '../engine/ghostRig';
 import type { FrameCtx, Module } from '../engine/types';
-import type { ScareObjectState, ScareType, SimEvent, WorldState } from '../sim/types';
+import type { ManifestPhase, ScareObjectState, ScareType, SimEvent, WorldState } from '../sim/types';
 
 /** 做不到时的原因（main.ts 按模拟的返回值和状态判断后传进来） */
 export type Refusal = 'manifestCooldown' | 'manifestWall' | 'trapsFull' | 'tooFar';
 
 /** 哪一种情境提示（STRINGS.onboarding.hints 的键） */
 export type HintKey = keyof typeof STRINGS.onboarding.hints;
+
+/**
+ * 现身被拒以后回应哪一句（main.ts：world.manifest() 返回 false 之后，按此刻的现身阶段问）。
+ * 冷却中 → manifestCooldown（Not yet.）；就绪却被拒 → manifestWall（模拟只在鬼魂中心所在的格子挡视线时拒，见 World.manifest）；
+ * 正在现身（蓄力、停留）时再按 → null，不回应：现身正在发生，说 Not yet 不对
+ */
+export function manifestRefusal(phase: ManifestPhase): Refusal | null {
+  return phase === 'cooldown' ? 'manifestCooldown' : phase === 'idle' ? 'manifestWall' : null;
+}
+
+/**
+ * 设机关被拒以后要不要说 trapsFull（Two traps are already set.）：同时设下的满了（TRAP.max），而且这个物件自己没设着——
+ * 自己已经设着的，悬停标签写着 Trap set，再按一下什么都不用说
+ */
+export function trapsFull(objects: readonly Pick<ScareObjectState, 'id' | 'armed'>[], id: string): boolean {
+  return objects.filter((o) => o.armed > 0).length >= TRAP.max && !((objects.find((o) => o.id === id)?.armed ?? 0) > 0);
+}
 
 export interface Hints extends Module {
   /** 某种「做不到」：每次都回应一句（很轻、很快淡掉），同一种短时间内不重复 */
