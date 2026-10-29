@@ -82,6 +82,11 @@ export const RANGE_FROST = {
   manifest: { melt: 1.2, fallback: 1 },
   /** 冷却好了往外呼一次（FEEL-11）：grow 秒长到 MANIFEST.noticeRadius（ease-out），线、片乘 line、film（比蓄力时淡），再 melt 秒化掉 */
   exhale: { grow: 0.9, line: 0.22, film: 0.03, melt: 1.2 },
+  /**
+   * 空闲预算（9 个物件的范围趁空闲先算好，一次一个）：这一段空闲剩不到 need 毫秒就等下一段（等了 timeout 毫秒还没空就照算一个，
+   * 一直忙的页面也算得完）；没有 requestIdleCallback（Safari / iOS）时退成 setTimeout，隔 gap 毫秒算一个
+   */
+  idle: { need: 3, timeout: 3000, gap: 200 },
 };
 
 /**
@@ -364,6 +369,8 @@ export interface RangeFrostDebug {
   box: Box | null;
   /** 最近一次现算一张范围花了多少毫秒 */
   lastComputeMs: number;
+  /** 物件的范围已经缓存了几张（空闲预算算到哪了） */
+  cached: number;
 }
 
 export interface RangeFrost extends Module {
@@ -384,6 +391,13 @@ export interface RangeFrost extends Module {
 export interface RangeFrostOptions {
   /** 减少动态（prefers-reduced-motion）：不呼气；对准时不从里面往外推，现身时不往外跑，只淡入 */
   reduced(): boolean;
+  /**
+   * 此刻要安静（审查 I-1；main.ts 给：一夜不在 night / closed——收夜的静、光收回、登记簿那一页——或者登记簿翻着）：
+   * 收尾那几秒是整局刻意做静的，模拟又不停，现身的冷却可能正好在这时候结束。安静时不浮现、不画现身那一圈、不呼气，
+   * 正在画的照平常的退法退掉（对准的 fadeOut 秒线性退，现身 / 呼气那张 melt 秒化掉）；安静结束时准星还对着物件就自己回来。
+   * 不给 = 从不安静
+   */
+  quiet?(): boolean;
 }
 
 export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFrostOptions): RangeFrost {
@@ -510,15 +524,22 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
     return o && o.cooldown > 0 ? RANGE_FROST.cooling : 1;
   };
 
-  /** 把物件 id 的范围写进 slot 的通道（第一次现算，之后用缓存）。物件不存在、范围是空的返回 false */
-  const load = (slot: ObjSlot, id: string): boolean => {
+  /** 物件 id 的范围（PROPS 里的摆放，和模拟 createScareObjects 同一份数据）：现算或者取缓存；没有这个物件是 null */
+  const objectRange = (id: string): Encoded | null => {
     let enc = cache.get(id);
     if (!enc) {
       const p = PROPS.find((x) => x.id === id);
-      if (!p) return false;
+      if (!p) return null;
       enc = compute({ kind: 'object', object: { type: p.type, pos: propCenter(p), facing: p.facing } });
       cache.set(id, enc);
     }
+    return enc;
+  };
+
+  /** 把物件 id 的范围写进 slot 的通道（第一次现算，之后用缓存）。物件不存在、范围是空的返回 false */
+  const load = (slot: ObjSlot, id: string): boolean => {
+    const enc = objectRange(id);
+    if (!enc) return false;
     if (!enc.box) return false;
     writeChannel(slot.channel, enc.bytes);
     slot.box = enc.box;
@@ -558,10 +579,15 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
 
   const ghostAt = (): Vec2 | null => (isGhostRig(rig) ? { x: rig.ghost.x, z: rig.ghost.z } : null);
 
-  /** 物件那两张此刻该画哪个：准星对着的；现身蓄力、停留时不画（这一下要看的是 5 米那一圈），收回、开始化的时候再回来 */
+  const quiet = () => opts.quiet?.() ?? false;
+
+  /**
+   * 物件那两张此刻该画哪个：准星对着的；现身蓄力、停留时不画（这一下要看的是 5 米那一圈），收回、开始化的时候再回来；
+   * 安静时不画（见 RangeFrostOptions.quiet），安静结束再回来
+   */
   let showing: string | null = null;
   const sync = () => {
-    const want = man.kind === 'manifest' && man.melt === null ? null : hover;
+    const want = quiet() || (man.kind === 'manifest' && man.melt === null) ? null : hover;
     if (want === showing) return;
     showing = want;
     for (const s of objSlots) if (s.id !== null && s.id !== want) s.target = 0;
@@ -581,6 +607,32 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
     slot.e = 1 - Math.sqrt(Math.max(0, 1 - slot.level));
   };
 
+  // ── 空闲预算：物件的范围趁空闲先算好（一次一个，一个几毫秒），第一次瞄准时就只剩写纹理（参数见 RANGE_FROST.idle）。
+  // 没有 requestIdleCallback（Safari / iOS）时退成 setTimeout：没有 deadline，当它「剩一点、够算一个」。dispose 取消还在排的那一个 ──
+  const hasIdle = typeof requestIdleCallback === 'function';
+  const todo = PROPS.map((p) => p.id);
+  let idleHandle: number | null = null;
+  let idleStopped = false;
+  const runIdle = (deadline?: IdleDeadline) => {
+    idleHandle = null;
+    if (idleStopped) return;
+    const left = deadline ? deadline.timeRemaining() : RANGE_FROST.idle.need;
+    if (left >= RANGE_FROST.idle.need || deadline?.didTimeout) objectRange(todo.shift()!);
+    scheduleIdle();
+  };
+  const scheduleIdle = () => {
+    if (idleStopped || todo.length === 0) return;
+    idleHandle = hasIdle ? requestIdleCallback(runIdle, { timeout: RANGE_FROST.idle.timeout }) : setTimeout(runIdle, RANGE_FROST.idle.gap);
+  };
+  const stopIdle = () => {
+    idleStopped = true;
+    if (idleHandle === null) return;
+    if (hasIdle) cancelIdleCallback(idleHandle);
+    else clearTimeout(idleHandle);
+    idleHandle = null;
+  };
+  scheduleIdle();
+
   const api: RangeFrost = {
     show(id) {
       hover = id;
@@ -588,7 +640,7 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
     },
     exhale(at) {
       const c = at ?? ghostAt();
-      if (!c || !ghostMode || opts.reduced()) return false;
+      if (!c || !ghostMode || opts.reduced() || quiet()) return false;
       // 鬼魂在墙格里不能现身（world.manifest 同一个判断），这时呼一下是在说谎
       if (grid.isOpaque(...cellOf(c.x, c.z))) return false;
       return startMan('exhale', c);
@@ -600,10 +652,13 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
       width: uW.value,
       box: drawBox ? { ...drawBox } : null,
       lastComputeMs,
+      cached: cache.size,
     }),
     onEvent(e) {
       if (e.type !== 'manifest') return;
       if (e.phase === 'windup') {
+        // 安静时不画这一圈（也不白算一张距离场）
+        if (quiet()) return;
         startMan('manifest', e.pos);
         sync();
       } else if (e.phase === 'end' && man.kind === 'manifest') {
@@ -630,6 +685,8 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
         } else {
           man.t += dt;
         }
+        // 变安静了：正在长、正停着的这一圈照平常的化法化掉，不等收回
+        if (man.melt === null && quiet()) man.meltPending = true;
         const g = Math.min(1, man.t / man.grow);
         const R = MANIFEST.noticeRadius;
         // 减少动态：不往外跑，整圈一起淡入
@@ -719,27 +776,13 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
       meshes.low.visible = visible && quality === 'low';
     },
     dispose() {
+      stopIdle();
       core.houseRoot.remove(root);
       geometry.dispose();
       for (const mesh of Object.values(meshes)) (mesh.material as THREE.Material).dispose();
       tex.dispose();
     },
   };
-
-  // 物件的范围趁空闲先算好（每次一个，一个几毫秒）：第一次瞄准时就只剩写纹理
-  if (typeof requestIdleCallback === 'function') {
-    const todo = PROPS.map((p) => p.id);
-    const next = () => {
-      const id = todo.shift();
-      if (id === undefined) return;
-      if (!cache.has(id)) {
-        const p = PROPS.find((x) => x.id === id)!;
-        cache.set(id, compute({ kind: 'object', object: { type: p.type, pos: propCenter(p), facing: p.facing } }));
-      }
-      requestIdleCallback(next, { timeout: 3000 });
-    };
-    requestIdleCallback(next, { timeout: 3000 });
-  }
 
   // ?debug：看样、量性能时从页面里直接调（window.__rangeFrost.show('mirror') / .exhale() / .debug()）
   if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('debug')) {

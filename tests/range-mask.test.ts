@@ -5,7 +5,7 @@
 // - 模块：平时藏着、标了 deferCompile；对准时 0.25 秒浮现、移开 0.35 秒退掉；冷却中整体减半；现身蓄力时前沿长到 5 米，收回后化掉；
 //   冷却好了脚下的霜往外呼一次（瞄着物件、减少动态、鬼魂在墙里时不呼）
 import * as THREE from 'three/webgpu';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { blocksSight, buildTiles, cellOf, GRID_H, GRID_W, idx, PROPS, propCenter, type Tile } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
 import { MANIFEST, VISION } from '../src/config/visitors';
@@ -517,6 +517,126 @@ describe('模块：显隐和时间', () => {
       const d = run(m, state, 0.3, clock);
       expect({ name, kind: d.manifest.kind }).toEqual({ name, kind: null });
       m.dispose();
+    }
+  });
+});
+
+describe('修复第 1 轮：安静时不画（审查 I-1），空闲预算的退路（M-1）', () => {
+  test('冷却好了那一刻正安静（收夜的静、光收回、登记簿翻着）：不呼；不安静时照呼', () => {
+    let quiet = true;
+    const m = createRangeFrost(makeCore(), makeRig({ x: 8, z: 6 }), { reduced: () => false, quiet: () => quiet });
+    const state = makeState();
+    const clock = { t: 0 };
+    const cool = () => ({ phase: 'cooldown' as const, t: 0, cooldown: 0.05, pos: { x: 3, z: 3 } });
+    state.manifest = cool();
+    run(m, state, 0.1, clock);
+    state.manifest = idleManifest();
+    let d = run(m, state, 0.3, clock);
+    expect(d.manifest.kind).toBe(null);
+    expect(d.visible).toBe(false);
+    expect(m.exhale()).toBe(false); // 手动调也不呼
+    quiet = false;
+    state.manifest = cool();
+    run(m, state, 0.1, clock);
+    state.manifest = idleManifest();
+    d = run(m, state, 0.3, clock);
+    expect(d.manifest.kind).toBe('exhale');
+    m.dispose();
+  });
+
+  test('对准时变安静：物件的范围照平常 0.35 秒退掉；安静期间对准、现身都不画；安静结束准星还对着就回来', () => {
+    let quiet = false;
+    const m = createRangeFrost(makeCore(), makeRig({ x: 8, z: 6 }), { reduced: () => false, quiet: () => quiet });
+    const state = makeState();
+    const clock = { t: 0 };
+    m.show('lamp-living');
+    let d = run(m, state, 0.4, clock);
+    expect(d.slots[0].level).toBe(1);
+    quiet = true;
+    d = run(m, state, 0.175, clock);
+    expect(d.slots[0].target).toBe(0);
+    expect(d.slots[0].level).toBeCloseTo(0.5, 1);
+    d = run(m, state, 0.2, clock);
+    expect(d.slots.every((s) => s.id === null)).toBe(true);
+    expect(d.visible).toBe(false);
+    m.show('mirror');
+    m.onEvent!({ type: 'manifest', phase: 'windup', pos: { x: 8, z: 6 }, scared: [] }, state);
+    d = run(m, state, 0.5, clock);
+    expect(d.slots.every((s) => s.id === null)).toBe(true);
+    expect(d.manifest.kind).toBe(null);
+    expect(d.visible).toBe(false);
+    quiet = false;
+    d = run(m, state, 0.3, clock);
+    const mirror = d.slots.find((s) => s.id === 'mirror')!;
+    expect(mirror.target).toBe(1);
+    expect(mirror.level).toBe(1);
+    m.dispose();
+  });
+
+  test('现身那一圈正停着时变安静：照平常 1.2 秒化掉，不等收回', () => {
+    let quiet = false;
+    const m = createRangeFrost(makeCore(), makeRig({ x: 8, z: 6 }), { reduced: () => false, quiet: () => quiet });
+    const state = makeState();
+    const clock = { t: 0 };
+    m.onEvent!({ type: 'manifest', phase: 'windup', pos: { x: 8, z: 6 }, scared: [] }, state);
+    let d = run(m, state, 1.0, clock);
+    expect(d.manifest.level).toBe(1);
+    expect(d.manifest.front).toBeCloseTo(MANIFEST.noticeRadius, 6);
+    quiet = true;
+    d = run(m, state, 0.6, clock);
+    expect(d.manifest.level).toBeCloseTo(0.5, 1);
+    d = run(m, state, 0.7, clock);
+    expect(d.manifest.kind).toBe(null);
+    expect(d.visible).toBe(false);
+    m.dispose();
+  });
+
+  test('没有 requestIdleCallback（Safari / iOS）：退成 setTimeout 200 毫秒算一个；dispose 取消这条链', () => {
+    vi.useFakeTimers();
+    try {
+      const m = createRangeFrost(makeCore(), makeRig({ x: 8, z: 6 }), { reduced: () => false });
+      expect(m.debug().cached).toBe(0);
+      vi.advanceTimersByTime(200);
+      expect(m.debug().cached).toBe(1);
+      vi.advanceTimersByTime(400);
+      expect(m.debug().cached).toBe(3);
+      m.dispose();
+      vi.advanceTimersByTime(5000);
+      expect(m.debug().cached).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('有 requestIdleCallback：这一段空闲不够算一个就等下一段，超时那一下照算；算完 9 个就停；dispose 取消还在排的那一个', () => {
+    const queue: { cb: (d: IdleDeadline) => void; h: number }[] = [];
+    const cancelled: number[] = [];
+    let h = 0;
+    vi.stubGlobal('requestIdleCallback', (cb: (d: IdleDeadline) => void) => { queue.push({ cb, h: ++h }); return h; });
+    vi.stubGlobal('cancelIdleCallback', (x: number) => { cancelled.push(x); });
+    try {
+      const fire = (left: number, didTimeout = false) => queue.shift()!.cb({ timeRemaining: () => left, didTimeout } as IdleDeadline);
+      const m = createRangeFrost(makeCore(), makeRig({ x: 8, z: 6 }), { reduced: () => false });
+      expect(queue.length).toBe(1);
+      fire(1); // 只剩 1 毫秒、没超时：不算，排下一段
+      expect(m.debug().cached).toBe(0);
+      expect(queue.length).toBe(1);
+      fire(12);
+      expect(m.debug().cached).toBe(1);
+      fire(0, true); // 等超时了：照算
+      expect(m.debug().cached).toBe(2);
+      for (let k = 0; k < 7; k++) fire(12);
+      expect(m.debug().cached).toBe(PROPS.length);
+      expect(queue.length).toBe(0); // 都算完了，不再排
+      m.dispose();
+      expect(cancelled).toEqual([]);
+
+      const m2 = createRangeFrost(makeCore(), makeRig({ x: 8, z: 6 }), { reduced: () => false });
+      const pending = queue[0].h;
+      m2.dispose();
+      expect(cancelled).toEqual([pending]);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

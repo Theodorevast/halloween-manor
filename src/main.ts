@@ -224,8 +224,12 @@ async function boot() {
   const registerView = createRegisterView(uiRoot);
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   // 地上的范围霜线（手感 FEEL-2、FEEL-11）：准星 / 手指对上物件时画出它的范围，现身蓄力时跑到 5 米，冷却好了往外呼一次。
-  // 网格标了 deferCompile，要在下面开场的预编译收集之前建好
-  const rangeFrost = createRangeFrost(c, r, { reduced: () => reducedMotion.matches });
+  // 网格标了 deferCompile，要在下面开场的预编译收集之前建好。
+  // 收夜的静、光收回、登记簿那一页（一夜不在 night / closed），或者登记簿翻着：安静，不画（night 在下面才建，调到的时候早建好了）
+  const rangeFrost = createRangeFrost(c, r, {
+    reduced: () => reducedMotion.matches,
+    quiet: () => registerView.isOpen || (night.phase !== 'night' && night.phase !== 'closed'),
+  });
   // 一夜的收尾（src/night.ts）：到点收夜、天亮，屋里没人、前门关上以后静一会儿、光收回前门、翻开登记簿；?night=<分钟> 改夜长
   const night = createNight({
     world,
@@ -267,6 +271,8 @@ async function boot() {
   picker.onHover((id) => {
     props.setHover(id);
     overlays.setHover(id);
+    // 只画够得着的物件的范围：靠的是 onHover 只发够得着的（第三人称 4 米内、看得见；够不着的走 onTooFar，不经过这里）。
+    // 以后谁让 onHover 也发够不着的，这里要先判断够不够得着再 show
     rangeFrost.show(id);
     if (id) hints.aimed(id);
   });
