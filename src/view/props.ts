@@ -1,6 +1,7 @@
-// 可附身物件的画面：肖像、两盏落地灯、摇椅、厨房门、八音盒、落地镜、床。
+// 可附身物件的画面：肖像、两盏落地灯、摇椅、厨房门、八音盒、落地镜、床、衣柜。
 // 每个物件挂在 houseRoot 下（位置 propCenter、朝向 yawFor(facing)，模型正面朝局部 +z），
 // 自己的模型和惊吓动画在 src/view/props/*.ts；这里统一管：事件分发、幽光（可附身时呼吸、悬停变亮放大）、拾取盒。
+// trigger 事件原样交给物件（rig.trigger(state, e)）：有变体的物件（衣柜的手指）按 e.variant 挑，和声音挑的是同一个
 // 第三人称（dissolve）：鬼魂穿过物件时，物件和家具一样在它周围溶开、洞口一圈冷光（walls.ts 的 DISSOLVE），
 // 不然飘进摇椅里就是直接穿模（2026-10-28 第二次试玩）
 // 机关（2026-10-28）：设下了的物件（armed > 0）表面结一层很薄的霜，只有玩家看得见的提示（见 FROST）
@@ -201,7 +202,7 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
         const en = byId.get(e.object);
         if (!en) return;
         en.flash = 1;
-        en.rig.trigger(state);
+        en.rig.trigger(state, e);
       } else if (e.type === 'reset') {
         byId.get(e.object)?.rig.reset();
       }

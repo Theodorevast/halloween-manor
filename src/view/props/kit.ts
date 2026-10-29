@@ -4,7 +4,7 @@ import * as THREE from 'three/webgpu';
 import { abs, color, normalLocal, normalViewGeometry, positionLocal, uniform } from 'three/tsl';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { Quality } from '../../engine/types';
-import type { ScareObjectState, WorldState } from '../../sim/types';
+import type { ScareObjectState, SimEvent, WorldState } from '../../sim/types';
 import { PALETTE } from '../palette';
 
 // ── 缓动（自己写，不引库） ──────────────────────────────────────────────
@@ -193,6 +193,9 @@ export interface PropFrame {
   state: WorldState;
 }
 
+/** 附身事件（模拟发的 trigger）：带 variant，画面和声音按它挑同一个变体 */
+export type TriggerEvent = Extract<SimEvent, { type: 'trigger' }>;
+
 export interface PropRig {
   /** 模型根（局部坐标：正面朝 +z，原点在 propCenter 的地面上） */
   model: THREE.Object3D;
@@ -200,8 +203,11 @@ export interface PropRig {
   hit: { size: [number, number, number]; center: [number, number, number] };
   /** 需要幽光外壳的部件：外壳挂在 parent 下，用 geometry 生成 */
   shells: { parent: THREE.Object3D; geometry: THREE.BufferGeometry }[];
-  /** trigger 事件：开始被附身的表演（时间从 0 开始，由 update 的 dt 推进） */
-  trigger(state: WorldState): void;
+  /**
+   * trigger 事件：开始被附身的表演（时间从 0 开始，由 update 的 dt 推进）。
+   * e 是那个事件本身：有变体的物件（衣柜：要不要手指）按 e.variant 挑，别的物件用不着，实现里可以不写这个参数
+   */
+  trigger(state: WorldState, e: TriggerEvent): void;
   /** reset 事件：从「被破坏」复原 */
   reset(): void;
   update(f: PropFrame): void;
