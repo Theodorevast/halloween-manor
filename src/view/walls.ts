@@ -814,6 +814,12 @@ function glassMaterial(hU: FloatU[], dissolve?: DissolveUniforms) {
 
 // ───────────────────────── 对外接口 ─────────────────────────
 
+/**
+ * 每面外墙「全高」的程度 0..1（按 Side 编号，0 = 降低、1 = 全高）：最近建好的那一份墙的读数（createWalls 里指到它的 fullness，house.ts 每帧推进）。
+ * 只读：前门的门板（view/frontDoor.ts）在娃娃屋模式南墙降低时跟着藏起来，读它；第三人称模式墙一直全高，读到的一直是 1
+ */
+export let wallFullness: readonly number[] = [1, 1, 1, 1];
+
 export interface Walls {
   /** 可见墙 + 玻璃（挂到 houseRoot） */
   group: THREE.Group;
@@ -849,6 +855,7 @@ export function createWalls(tiles: Uint8Array, viewDir: Vec2, opts: WallsOptions
   const runs = windowRuns();
   const full = opts.fullHeight === true;
   const fullness: number[] = [0, 1, 2, 3].map((s) => (full || isFar(s as Side, viewDir) ? 1 : 0));
+  wallFullness = fullness; // 同一个数组：update 推进它，上面的只读导出就跟着走
   const hU: FloatU[] = [0, 1, 2, 3].map((s) => uniform(WALL_CUT_H + (WALL_H - WALL_CUT_H) * fullness[s]));
   hU.push(uniform(full ? WALL_H : WALL_CUT_H));
 
