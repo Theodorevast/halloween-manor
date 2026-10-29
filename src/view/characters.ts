@@ -404,11 +404,20 @@ export interface CharactersView extends Module {
    * 其余几套造型（loadFirstOutfit 的 rest）：一套一套在后台下载（不分带宽，第二套最早到），下载好一套就上传贴图、
    * 异步编好它的管线（compileOutfit：编出来的就是真画时用的那批，不卡），临时访客在地板下面真画几帧，才放进轮换。
    * 在那之前进门的人只穿已经能用的几套。after：等它结束再开始编（main.ts 传后台预编译整栋房子的那一次：点了开始要等它编完，
-   * 不跟它抢）；下载不等。WebGL2 上贴图上传是同步的，只能趁开场遮罩挡着时加，不等 after；开局以后下载好的不再加（见 join），
-   * 没下载的也不下载了，正在下载的 abort 掉。
-   * 全部处理完时 resolve，不会 reject
+   * 不跟它抢）；下载不等。WebGL2 上贴图上传是同步的，只能趁开场遮罩挡着时加：不等 after，main.ts 点了开始以后也留着遮罩，
+   * 等这里都有了着落再开场（outfitsBeforeStart）。每一套都有了着落（加入轮换、加载失败、放弃）时 resolve，不会 reject
    */
   streamOutfits(target: OutfitCompileTarget, after?: Promise<unknown>): Promise<void>;
+  /**
+   * 其余几套要不要在开局之前加完：WebGL2 为真（贴图在主线程上同步传，开局以后加会卡；2026-10-29 用户定的「点了开始等它们加完」），
+   * main.ts 点了开始要等 streamOutfits 结束才收起遮罩；WebGPU 为假，开局以后照样加
+   */
+  readonly outfitsBeforeStart: boolean;
+  /**
+   * 不等了（WebGL2 上点了开始等太久，见 main.ts 的 OUTFIT_WAIT）：没下载完的停掉，还没开始加的不加了，正在编的那一套编完照样加进去
+   * （遮罩还挡着）。返回 streamOutfits 结束的 Promise
+   */
+  stopStreaming(): Promise<void>;
 }
 
 const sineOut = (u: number) => Math.sin((u * Math.PI) / 2);
@@ -497,6 +506,11 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
   let lastGiven: Outfit | null = null;
   const outfitFor = () => (lastGiven = usable[(lastGiven ? usable.indexOf(lastGiven) + 1 : 0) % usable.length]);
   let disposed = false;
+  /** 不等其余几套了（stopStreaming）。下载用的 AbortController 放在这一层：不等了、dispose 时都把正在下载的那一套停掉 */
+  let givenUp = false;
+  const streamAbort = new AbortController();
+  /** streamOutfits 全部有了着落（stopStreaming 返回它） */
+  let streamDone: Promise<void> = Promise.resolve();
 
   const torches: Flashlight[] = Array.from({ length: TORCH_SLOTS }, () => createFlashlight(parent, core.quality));
   const owner = new Map<Flashlight, number>();
@@ -925,9 +939,10 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
    * 半透明的双面材质真画时分背面、正面两遍（side 临时改成 BackSide / FrontSide），也是编的时候已经改回 DoubleSide，同样用两份代理（克隆，只改 side）。
    *
    * 对不上的时候（换了 three 版本、内部接口没了或者行为变了；材质没有底色贴图，见 shadowPasses）不会出错，只是退回现编：
-   * 开局之前（开场遮罩挡着），兜底真画的那几帧会把场景 pass 和阴影一起现编，看不见；开局以后临时访客不投影，兜底真画只兜得住场景 pass，
-   * 月光阴影的管线要等第一个穿这套的真访客进门时才同步现编，卡一下（2026-10-29 实测 83–167 ms）——正好是这里要消掉的那一下。
-   * 所以第一次编的时候核对一遍版本和接口，对不上就打一条警告（只打一次），要重跑 scripts/stall-outfits.mjs。
+   * 开局之前（开场遮罩挡着），兜底真画的那几帧会把场景 pass 和阴影一起现编，看不见。开局以后（只有 WebGPU 会在开局以后加）卡在两处：
+   *   · 场景 pass 对不上（层数对不上、内部接口没了）：兜底真画的那几帧在游戏里同步现编，加入轮换的那一刻就卡；
+   *   · 月光阴影对不上：开局以后临时访客不投影，兜底兜不住，要等第一个穿这套的真访客进门时才同步现编，进门时卡（2026-10-29 实测 83–167 ms）
+   * ——正好是这里要消掉的两下。所以第一次编的时候核对一遍版本和接口，对不上就打一条警告（只打一次），要重跑 scripts/stall-outfits.mjs。
    *
    * 代理材质用完不 dispose：dispose 会把它们的渲染对象一起销毁，编好的节点和管线引用数归零，three 就从缓存里删掉，
    * 真访客进门时又得同步重编（2026-10-29 实测：缓存键完全一样，照样现编，就是这个原因）。不 dispose 的代理也不会被回收：
@@ -948,8 +963,9 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
         shadowNodes ? '' : 'renderer._getShadowNodes 没有了',
       ].filter(Boolean);
       if (problems.length) {
-        console.warn(`[characters] 后加的访客造型预编译可能对不上（${problems.join('；')}）：会退回普通的 compileAsync，`
-          + '开局以后加进来的造型，第一个穿它的访客进门时可能同步现编管线、卡一下。用 node scripts/stall-outfits.mjs 核对');
+        console.warn(`[characters] 后加的访客造型预编译可能对不上（${problems.join('；')}）：会退回普通的 compileAsync。`
+          + '开局以后加进来的造型，加入轮换的那一刻（兜底真画现编场景管线）和第一个穿它的访客进门时（现编月光阴影）都可能卡一下。'
+          + '用 node scripts/stall-outfits.mjs 核对');
       }
     }
     let warnedColor = false;
@@ -984,7 +1000,7 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
       const nodes = shadowNodes(m);
       if (!nodes.colorNode && !warnedColor) {
         // 没有底色贴图（也没有 colorNode / castShadowNode / maskNode）的材质，three 真画阴影时用的是阴影材质自己的那个
-        // vec4(0,0,0,1) 节点，代理里 new 的这个编号不同（节点的缓存键默认就是编号），对不上
+        // vec4(0,0,0,1) 节点，代理里 new 的这个编号不同（节点的缓存键默认就是编号），对不上。只影响阴影，场景管线照样编得上
         warnedColor = true;
         console.warn(`[characters] ${label}：材质 ${m.name || m.type} 没有底色贴图，月光阴影的预编译对不上，`
           + '穿这套的访客第一次进门时会同步现编阴影管线、卡一下');
@@ -1077,17 +1093,20 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
    * 没有 KHR_parallel_shader_compile 时着色器链接也是同步的。这时只在开场遮罩还挡着的时候加，开局以后就不加了
    */
   const inBackground = !(core.renderer.backend as unknown as { isWebGLBackend?: boolean }).isWebGLBackend;
+  /** WebGL2 上已经开局了：这时再加新造型会在主线程上卡（main.ts 点了开始要等其余几套加完，正常碰不上，见 outfitsBeforeStart） */
+  const startedBlocking = (target: OutfitCompileTarget) => !inBackground && !target.hidden();
   /** 后台下载好的一套：上传贴图 → 临时访客站到地板下面（先藏着）→ 异步编管线 → 露出来真画几帧 → 收走、放进轮换 */
   const join = async (outfit: Outfit, index: number, target: OutfitCompileTarget) => {
-    /** 这一步会在主线程上卡、而玩家已经开局了：这一局就不穿这套了（只在 WebGL2、网速慢、一能点就点开始时才会碰上） */
-    const tooLate = () => {
-      if (inBackground || target.hidden()) return false;
-      console.warn(`[characters] ${outfit.spec.url}：这个浏览器加新造型会卡（贴图同步上传），开局以后不再加进轮换`);
+    const drop = (why: string) => console.warn(`[characters] ${outfit.spec.url}：${why}，不加进轮换`);
+    /** 先别动手：不等了（stopStreaming），或者 WebGL2 上已经开局了 */
+    const abandon = () => {
+      if (!givenUp && !startedBlocking(target)) return false;
+      drop(givenUp ? '其余造型等得太久，不等了' : '这个浏览器开局以后加新造型会卡（贴图同步上传）');
       return true;
     };
-    if (tooLate()) return;
-    if (outfit.asset && !(await uploadTextures(outfit.asset, tooLate))) return;
-    if (disposed || tooLate()) return;
+    if (abandon()) return;
+    if (outfit.asset && !(await uploadTextures(outfit.asset, abandon))) return;
+    if (disposed || abandon()) return;
     // 开场遮罩还挡着时照开场前那一套（stageOutfits）的做法：前一个临时访客拿一支点亮的手电、两个都投影，
     // 兜底真画那几帧把手电的阴影管线也编好（WebGL2 上第一次被手电照到时现编要卡 80 ms 左右，WebGPU 上很快）。开局以后不拿手电、不投影，见下
     const shadows = target.hidden();
@@ -1099,13 +1118,21 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
       for (const r of roots) r.visible = false;
       await compiled;
     } catch (err) {
-      // 编不成也照样放进轮换：开局之前，下面露出来真画的那几帧现编（遮罩挡着，看不见）；
-      // 开局以后临时访客不投影，阴影管线要等第一个穿这套的访客进门时现编，会卡一下
+      // 编不成也照样放进轮换：开局之前，下面露出来真画的那几帧现编（遮罩挡着，看不见）；开局以后（WebGPU）卡两下：
+      // 场景管线在下面那几帧现编，加入轮换时卡；阴影管线等第一个穿这套的访客进门时现编，进门时卡
       console.warn(`[characters] 造型 ${outfit.spec.url} 的管线预编译失败，改为真画时现编`, err);
     }
+    // 编的这段时间里 WebGL2 上开局了（main.ts 等这里加完，正常碰不上）：不露出来真画了，免得在游戏里现编。
+    // 「不等了」但遮罩还挡着时照样往下加完：已经编好了，几帧就完，main.ts 等它收尾才开场
+    if (startedBlocking(target)) {
+      release();
+      drop('编的时候开局了');
+      return;
+    }
     // 编完露出来真画几帧兜底：万一有没编到的，在这里现编，不等到有人穿着它进门。开局之前连阴影一起兜住（遮罩挡着）；
-    // 已经开局了就只画场景 pass、不投影：临时访客不做视锥剔除，投影的话会画进每一支亮着的手电的阴影图，屋里人多时一帧里要现编
-    // 好几条手电的阴影管线。所以开局以后这里兜不住阴影：月光阴影要是没编到（compileOutfit 对不上），要等第一个穿这套的访客进门时才现编；
+    // 已经开局了（只有 WebGPU）就只画场景 pass、不投影：临时访客不做视锥剔除，投影的话会画进每一支亮着的手电的阴影图，屋里人多时
+    // 一帧里要现编好几条手电的阴影管线。所以开局以后：场景 pass 要是没编到（compileOutfit 对不上），在这几帧现编，加入轮换的那一刻卡；
+    // 月光阴影要是没编到，这里兜不住，要等第一个穿这套的访客进门时才现编，进门时卡。
     // 手电的阴影和原来一样，等手电第一次照到穿这套的人时再编（WebGPU 上一次一两条，不卡）
     if (!target.hidden()) {
       for (const v of vs) {
@@ -1123,6 +1150,31 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
     if (disposed) return;
     usable.push(outfit);
     console.log(`[characters] ${outfit.spec.url} 编好，加入轮换（第 ${usable.length} 套，页面打开后 ${Math.round(performance.now())} ms）`);
+  };
+
+  /**
+   * 一套一套下载：下载好一套就接着下一套，同时把下载好的这套按顺序编好、放进轮换（见 streamOutfits）。
+   * 编要等 after；只在开场遮罩挡着时才能加的（WebGL2，见 inBackground）不等：标题页上、点了开始遮罩还留着的那几秒正好用来加
+   */
+  const streamRest = async (target: OutfitCompileTarget, after?: Promise<unknown>) => {
+    let joined: Promise<void> = Promise.resolve();
+    const ready = (inBackground && after ? after : Promise.resolve()).catch(() => undefined);
+    for (const [i, spec] of rest.entries()) {
+      // 不等了，或者 WebGL2 上已经开局了（照理碰不上，见 outfitsBeforeStart）：剩下的不下载了，正在下载的那一套已经 abort 掉
+      if (disposed || givenUp || startedBlocking(target)) break;
+      let asset: CharacterAsset;
+      try {
+        // 只停下载、不停解析（见 loadCharacterAsset 的 signal）
+        asset = await loadCharacterAsset(spec, streamAbort.signal);
+      } catch (err) {
+        if (givenUp || disposed) break; // 停掉的
+        console.warn(`[characters] 角色模型 ${spec.url} 加载失败，跳过。`, err);
+        continue;
+      }
+      const outfit: Outfit = { spec, asset };
+      joined = joined.then(() => ready).then(() => join(outfit, i, target)).catch((err) => console.warn('[characters] 造型加入轮换失败', err));
+    }
+    await joined;
   };
 
   const view: CharactersView = {
@@ -1156,45 +1208,18 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
         for (const s of staged) s.release();
       };
     },
-    async streamOutfits(target, after) {
-      // 一套一套下载：下载好一套就接着下一套，同时把下载好的这套按顺序编好、放进轮换。
-      // 编要等 after；只在开场遮罩挡着时才能加的（WebGL2，见 inBackground）不等：点了开始、遮罩还留着等 after 的那几秒正好用来加
-      let joined: Promise<void> = Promise.resolve();
-      const ready = (inBackground && after ? after : Promise.resolve()).catch(() => undefined);
-      // WebGL2 开局以后下载好的也不会再加（见 join），剩下的就不下载了，正在下载的那一套也 abort 掉（只停下载，见 loadCharacterAsset）：
-      // WebGL2 多半是手机（娃娃屋模式），最多能省 5.30 MB 流量
-      const abort = new AbortController();
-      let stopped = false;
-      let downloading = true;
-      const stop = () => {
-        if (stopped || inBackground || target.hidden()) return stopped;
-        stopped = true;
-        abort.abort();
-        console.warn('[characters] 这个浏览器开局以后不再加新造型（贴图同步上传会卡，见 join），其余几套不下载了');
-        return true;
-      };
-      if (!inBackground) {
-        // 下载期间每帧看一眼开没开局，开局了马上停（等这一套下载完再看，就白下了这一套）
-        const watch = () => {
-          if (downloading && !stop()) requestAnimationFrame(watch);
-        };
-        requestAnimationFrame(watch);
+    streamOutfits(target, after) {
+      streamDone = streamRest(target, after);
+      return streamDone;
+    },
+    get outfitsBeforeStart() { return !inBackground; },
+    stopStreaming() {
+      if (!givenUp) {
+        givenUp = true;
+        streamAbort.abort();
+        console.warn('[characters] 其余造型等得太久，不等了：没下载完的停掉，还没开始加的不加了（正在编的那一套编完照样加）');
       }
-      for (const [i, spec] of rest.entries()) {
-        if (disposed || stop()) break;
-        let asset: CharacterAsset;
-        try {
-          asset = await loadCharacterAsset(spec, abort.signal);
-        } catch (err) {
-          if (stopped) break; // 开局时 abort 掉的
-          console.warn(`[characters] 角色模型 ${spec.url} 加载失败，跳过。`, err);
-          continue;
-        }
-        const outfit: Outfit = { spec, asset };
-        joined = joined.then(() => ready).then(() => join(outfit, i, target)).catch((err) => console.warn('[characters] 造型加入轮换失败', err));
-      }
-      downloading = false;
-      await joined;
+      return streamDone;
     },
     onEvent(e: SimEvent, state: WorldState) {
       // object 为 null 是被别人的尖叫吓到（模拟里不僵住），不跳。
@@ -1287,6 +1312,7 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
     },
     dispose() {
       disposed = true;
+      streamAbort.abort();
       for (const v of [...visuals.values()]) destroy(v);
       for (const t of torches) t.dispose();
     },
