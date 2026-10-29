@@ -517,6 +517,9 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
     pin(on) {
       pinned = on;
     },
+    hold() {
+      // 接口先占位（2026-10-30），上手那一路实现
+    },
   };
 
   // ── 调试口 ──────────────────────────────────────────────

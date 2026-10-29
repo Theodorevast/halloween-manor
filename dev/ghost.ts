@@ -95,6 +95,7 @@ function makeRig(): GhostRig {
     lockPointer() {},
     onManifest() {},
     pin() {},
+    hold() {},
     rotate() {},
     zoom(f) { opt.dist = Math.min(4, Math.max(1, opt.dist / f)); },
     shake() {},

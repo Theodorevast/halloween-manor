@@ -46,6 +46,11 @@ export interface GhostRig extends CameraRig {
   onManifest(cb: () => void): void;
   /** 定住鬼魂（现身的蓄力和停留期间，main.ts 每帧按模拟设）：按键不再推动，浮动和身体朝向停住；视角、镜头照常转 */
   pin(on: boolean): void;
+  /**
+   * 不收输入（2026-10-30 试玩报告 P1-1）：点了开始、遮罩还挂着（还在编管线、等造型）的时候，指针已经锁上，
+   * 随手一动鼠标就把开场镜头转走了。hold(true) 期间鼠标转向、按键移动、右键 / F 都不算；hold(false) 时视角回到开场那一刻的朝向
+   */
+  hold(on: boolean): void;
 }
 
 export const isGhostRig = (r: CameraRig): r is GhostRig => 'ghost' in r;

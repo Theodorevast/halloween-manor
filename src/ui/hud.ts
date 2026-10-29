@@ -24,6 +24,8 @@ export interface Hud extends Module {
   setQuality(q: Quality): void;
   /** 渲染器和模型还没就绪时为 false：开场按钮显示加载文案、点了不开始。默认 true */
   setReady(ready: boolean): void;
+  /** 播报一行（不是模拟事件带出来的那种，比如收夜的 "No one else is coming tonight."）。quiet = 次要的灰字 */
+  say(text: string, tone?: 'quiet' | 'scare'): void;
 }
 
 /** 播报最多几条、每条停留多久、淡出多久（秒）——计划 Task 7 */
@@ -350,6 +352,9 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
       refreshGhost();
     },
     setQuality: setQualityUi,
+    say(text, tone = 'quiet') {
+      push(text, tone);
+    },
     setReady(r) {
       ready = r;
       const label = r ? STRINGS.start.begin : STRINGS.start.loading;
