@@ -32,8 +32,8 @@ import {
 /** 墙体之外、墙格之内的那一条（地板伸进墙格这么多，正好接到墙面） */
 const M = (CELL - WALL_T) / 2;
 
-/** 月光：仰角、相对「从远墙照向镜头」偏转的方位角、强度 */
-const MOON = {
+/** 月光：仰角、相对「从远墙照向镜头」偏转的方位角、强度（导出给天亮的测试按真实强度算总亮度） */
+export const MOON = {
   elevation: (38 * Math.PI) / 180,
   yawOffset: (12 * Math.PI) / 180,
   intensity: 2.6,
@@ -707,6 +707,7 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
   // （scene.onBeforeRender，和 lightfx.ts 一样）。一帧里场景会画好几遍（每张阴影图也走这个钩子），只在 update 之后的第一遍算一次；
   // 镜头位置按 rig 的相机取（阴影那几遍传进来的是灯的相机）
   let bounceDue = false;
+  let bounceDt = 0;
   const bounceCam = new THREE.Vector3();
   const prevHook = core.scene.onBeforeRender;
   if (dissolve) {
@@ -715,7 +716,7 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
         bounceDue = false;
         rig.camera.getWorldPosition(bounceCam);
         core.houseRoot.worldToLocal(bounceCam);
-        updateBounce(bounceCam);
+        updateBounce(bounceCam, bounceDt);
       }
       prevHook.apply(this, args);
     };
@@ -725,6 +726,7 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
   return {
     update(ctx: FrameCtx) {
       bounceDue = dissolve !== undefined;
+      bounceDt = ctx.dt;
       if (ghostMode) writeGhost(ctx);
       else {
         walls.update(ctx.dt, rig.viewDir);

@@ -13,7 +13,7 @@ import type { RenderCore } from '../src/engine/types';
 import { NIGHT_FX, createNight, type NightDeps, type NightTiming } from '../src/night';
 import type { NpcMode, NpcState, SimEvent, WorldState } from '../src/sim/types';
 import { manifestLights } from '../src/view/ghost';
-import { DAWN, PORCH_FADE, createPorchDimmer, dawnLights, porchFlicker, smoothRamp } from '../src/view/house';
+import { DAWN, MOON, PORCH_FADE, createPorchDimmer, dawnLights, porchFlicker, smoothRamp } from '../src/view/house';
 import { countDips, createLightFx, dipStarts } from '../src/view/lightfx';
 import { PALETTE } from '../src/view/palette';
 
@@ -562,7 +562,7 @@ describe('天亮的光：只改已有的月光、半球光，慢慢往灰白偏�
     expect(mid - next).toBeLessThan(0.01);
   });
 
-  it('dawnLights：k = 0 就是原来的夜；k = 1 月光、天空色饱和度降下来（往灰白偏），仍然不偏暖（不像黄昏）；月亮落下去直射弱一点、天光散开亮一些；k 从 0 走到 1 亮度一路只往上', () => {
+  it('dawnLights：k = 0 就是原来的夜；k = 1 月光、天空色饱和度降下来（往灰白偏），仍然不偏暖（不像黄昏）；月亮落下去直射弱一点、天光散开亮一些；k 从 0 走到 1：直射（月光、光斑）一路往下、天光一路往上，按真实强度算的总亮度一路往上', () => {
     const lum = (c: THREE.Color) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
     const sat = (c: THREE.Color) => c.getHSL({ h: 0, s: 0, l: 0 }).s;
     const night = dawnLights(0);
@@ -581,12 +581,19 @@ describe('天亮的光：只改已有的月光、半球光，慢慢往灰白偏�
     expect(dawn.moonGain).toBeLessThan(1);
     expect(dawn.hemiGain).toBeGreaterThan(1);
     expect(dawn.hemiGain).toBeLessThanOrEqual(1.6);
-    let prev = 0;
-    for (let k = 0; k <= 100; k++) {
+    // 一路平滑地走（每 1% 的 k 变化不到 1%），各自单调：直射的月光、窗下的光斑往下，天光往上；
+    // 总亮度按真实强度（MOON：月光 High / Low 两档、半球光）算，两档都一路往上（审查 M-1：原来那句不带强度，月光往下也测不出来）
+    let prev = dawnLights(0);
+    const total = (l: ReturnType<typeof dawnLights>, moonI: number) => lum(l.moon) * moonI * l.moonGain + lum(l.sky) * MOON.hemi * l.hemiGain;
+    for (let k = 1; k <= 100; k++) {
       const l = dawnLights(k / 100);
-      const b = lum(l.moon) * l.moonGain + lum(l.sky) * l.hemiGain;
-      expect(b).toBeGreaterThanOrEqual(prev - 1e-12);
-      prev = b;
+      const direct = lum(l.moon) * l.moonGain, prevDirect = lum(prev.moon) * prev.moonGain;
+      expect(direct).toBeLessThanOrEqual(prevDirect + 1e-12);
+      expect(prevDirect - direct).toBeLessThan(prevDirect * 0.01);
+      expect(l.patch).toBeLessThanOrEqual(prev.patch + 1e-12);
+      expect(lum(l.sky) * l.hemiGain).toBeGreaterThanOrEqual(lum(prev.sky) * prev.hemiGain - 1e-12);
+      for (const moonI of [MOON.intensity, MOON.intensityLow]) expect(total(l, moonI)).toBeGreaterThanOrEqual(total(prev, moonI) - 1e-12);
+      prev = l;
     }
   });
 
