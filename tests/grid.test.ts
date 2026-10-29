@@ -35,15 +35,23 @@ describe('Grid', () => {
         expect(g.isWalkable(i, j)).toBe(false);
         expect(g.isOpaque(i, j)).toBe(false);
         continue;
+      } else if (p.type === 'wardrobe') {
+        // 衣柜（2026-10-29）：物件格是衣柜三格里中间那一格，同样本来就挡路；正面（南边）那一格能站人
+        expect(under.map((f) => f.kind)).toEqual(['wardrobe']);
+        expect(roomAt(i, j)).toBe(p.room);
+        expect(g.isWalkable(i, j)).toBe(false);
+        expect(g.isOpaque(i, j)).toBe(false);
+        expect(g.isWalkable(i, j + 1)).toBe(true);
+        continue;
       } else expect(under).toEqual([]);
       expect(roomAt(i, j)).toBe(p.room);
       // 至少有一个相邻格能走（人能走到跟前）
       const around = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([di, dj]) => g.isWalkable(i + di, j + dj));
       expect(around).toBe(true);
     }
-    // 每个房间最多 2 个物件（床不算：它是家具上的物件，不另占地方）
+    // 每个房间最多 2 个物件（床、衣柜不算：它们是家具上的物件，不另占地方）
     const per = new Map<string, number>();
-    for (const p of PROPS) if (p.type !== 'bed') per.set(p.room, (per.get(p.room) ?? 0) + 1);
+    for (const p of PROPS) if (p.type !== 'bed' && p.type !== 'wardrobe') per.set(p.room, (per.get(p.room) ?? 0) + 1);
     for (const n of per.values()) expect(n).toBeLessThanOrEqual(2);
   });
 

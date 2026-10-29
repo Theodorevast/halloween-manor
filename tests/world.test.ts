@@ -80,7 +80,7 @@ describe('World：附身与惊吓（计划测试 1–3）', () => {
     const n = w.spawn({ pos: STUDY, personality: 'average', lookDir: angleTo(STUDY, prop('portrait')) });
     expect(w.trigger('portrait')).toBe(true);
     const ev = stepToHit(w, 'portrait', n);
-    expect(ofType(ev, 'trigger')).toEqual([{ type: 'trigger', object: 'portrait', scareType: 'portrait' }]);
+    expect(ofType(ev, 'trigger')).toEqual([{ type: 'trigger', object: 'portrait', scareType: 'portrait', variant: expect.any(Number) }]);
     expect(ofType(ev, 'startle')).toEqual([{ type: 'startle', npc: n.id, object: 'portrait', amount: 32, scream: true }]);
     expect(n.fear).toBe(32);
     expect(n.mode).toBe('startled');

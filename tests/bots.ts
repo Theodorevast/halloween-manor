@@ -281,7 +281,9 @@ function manifestGhost(w: World, g: GhostBot) {
   placeGhost(w, g);
 }
 
-const ready = (o: ScareObjectState) => o.cooldown === 0;
+/** 衣柜（2026-10-29）：模拟那一路按机器人测好数值之前，机器人先不用它（平衡数字和加衣柜之前一样） */
+const UNTUNED: ReadonlySet<ScareType> = new Set<ScareType>(['wardrobe']);
+const ready = (o: ScareObjectState) => o.cooldown === 0 && !UNTUNED.has(o.type);
 const isSight = (o: ScareObjectState) => SCARES[o.type].kind === 'sight';
 
 /** 机器人附身用的函数（runBot 里包了一层，用来统计惊吓有没有落到人身上） */

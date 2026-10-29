@@ -47,6 +47,7 @@ export const STRINGS = {
     portrait: 'Portrait',
     mirror: 'Mirror',
     bed: 'Bed',
+    wardrobe: 'Wardrobe',
   } satisfies Record<ScareType, string>,
   ticker: {
     spawn: (name: string) => `${name} let themselves in`,

@@ -1352,7 +1352,8 @@ export const trapArm: SfxFn = (bus, t, at) => {
 };
 
 /** 附身物件 → 声音（编译期检查：每种物件都得有声音） */
-export const TRIGGER: Record<ScareType, SfxFn> = { musicBox, door, lamp, rockingChair, portrait, mirror, bed };
+// 衣柜（2026-10-29）先借厨房门的吱呀占位，声音那一路换成衣柜自己的（锁舌、合页、闷响、低频冲击，时间轴读 config/scares.ts 的 WARDROBE）
+export const TRIGGER: Record<ScareType, SfxFn> = { musicBox, door, lamp, rockingChair, portrait, mirror, bed, wardrobe: door };
 /** 物件复原 → 声音（只有台灯和肖像有「被破坏」状态） */
 export const RESET: Partial<Record<ScareType, SfxFn>> = { lamp: lampReset, portrait: portraitReset };
 

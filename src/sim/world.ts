@@ -27,6 +27,8 @@ const EPS = 1e-9;
 
 export function createWorld(opts: WorldOptions): World {
   const rng = createRng(opts.seed);
+  /** 附身变体（trigger 事件的 variant）用单独的一串随机数：不动 rng 的序列，原有的种子、平衡数字都不变 */
+  const variantRng = createRng((opts.seed ^ 0x9e3779b9) >>> 0);
   const grid = new Grid();
   const nav = createNav(grid);
   const objects = createScareObjects();
@@ -92,7 +94,7 @@ export function createWorld(opts: WorldOptions): World {
   function fireTrap(o: ScareObject) {
     if (!triggerObject(o, TRAP.fearMult)) return;
     ctx.events.push({ type: 'trap', object: o.state.id, phase: 'sprung' });
-    ctx.events.push({ type: 'trigger', object: o.state.id, scareType: o.state.type });
+    ctx.events.push({ type: 'trigger', object: o.state.id, scareType: o.state.type, variant: variantRng.next() });
     if (trapKind(o) !== 'behind') return;
     for (const n of npcs) if (startledByWindup(o, n, grid)) notice(n, ctx, 'sound', o.state.pos);
   }
@@ -360,7 +362,7 @@ export function createWorld(opts: WorldOptions): World {
     trigger(objectId: string): boolean {
       const o = byId.get(objectId);
       if (!o || !triggerObject(o)) return false;
-      pending.push({ type: 'trigger', object: o.state.id, scareType: o.state.type });
+      pending.push({ type: 'trigger', object: o.state.id, scareType: o.state.type, variant: variantRng.next() });
       return true;
     },
 

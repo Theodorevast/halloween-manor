@@ -21,6 +21,28 @@ export interface ScareSpec {
   broken: number;
 }
 
+/**
+ * 衣柜的时间轴（秒，从 trigger 算起；调研 3.3 的 A 版「被从里面拉上」）。画面（view/props/wardrobe.ts）和声音（audio/sfx.ts）都读这里，
+ * 不各抄一份：
+ * - latch：柜子里「咔哒」一声（锁舌），门板轻轻一震，像有人从里面推了一下
+ * - open：门自己慢慢开出一条缝，到 openDeg 度（先快后慢，停住，不回弹、不晃），配一声长长的合页吱呀
+ * - hold：停住，没有声音（看着它的访客被定住，手电照着门缝）
+ * - slamAt（SCARES.wardrobe.hitAt 就用它）：门猛地合上，slamTime 秒合完；一声闷响加锁舌，柜顶落灰，低频冲击
+ * - fingersChance：variant（trigger 事件）小于它时，合上之前先有几根苍白的手指从门缝里扶住门边（fingers 时段），看不见手后面连着什么
+ * - settle：合上以后多久灰落完、环境声回来
+ */
+export const WARDROBE = {
+  latch: [0, 0.3] as const,
+  open: [0.3, 1.6] as const,
+  openDeg: 25,
+  hold: [1.6, 2.2] as const,
+  slamAt: 2.2,
+  slamTime: 0.12,
+  fingersChance: 1 / 3,
+  fingers: [1.7, 2.2] as const,
+  settle: 5,
+};
+
 export const SCARES: Record<ScareType, ScareSpec> = {
   musicBox: { kind: 'lure', range: 7, fear: 4, cooldown: 14, active: 4, broken: 0, hitAt: 0 },
   door: { kind: 'lure', range: 9, fear: 10, cooldown: 10, active: 0.6, broken: 0, hitAt: 0 },
@@ -31,7 +53,10 @@ export const SCARES: Record<ScareType, ScareSpec> = {
   portrait: { kind: 'sight', range: 6, fear: 32, cooldown: 16, active: 1.8, broken: 10, hitAt: 0.94 },
   mirror: { kind: 'sight', range: 2.5, fear: 48, cooldown: 20, active: 1.5, broken: 0, hitAt: 0.6 },
   bed: { kind: 'sight', range: 5, fear: 26, cooldown: 14, active: 3.2, broken: 0, hitAt: 2.6 },
+  // 衣柜（2026-10-29，设计文档 4.3、调研 3.3）：门自己开一条缝、停住，2.2 秒时被从里面猛地拉上。数值是占位，模拟那一路按机器人测
+  wardrobe: { kind: 'sight', range: 5, fear: 26, cooldown: 14, active: 2.8, broken: 0, hitAt: WARDROBE.slamAt },
 };
+
 
 /** 引诱声隔着墙（声源和听者之间没有视线）时，听得见的距离乘这个系数 */
 export const WALL_HEARING_FACTOR = 0.6;

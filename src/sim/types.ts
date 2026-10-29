@@ -68,7 +68,7 @@ export interface NpcState {
 }
 
 export type ScareKind = 'lure' | 'sight';
-export type ScareType = 'musicBox' | 'door' | 'lamp' | 'rockingChair' | 'portrait' | 'mirror' | 'bed';
+export type ScareType = 'musicBox' | 'door' | 'lamp' | 'rockingChair' | 'portrait' | 'mirror' | 'bed' | 'wardrobe';
 
 export interface ScareObjectState {
   id: string;
@@ -136,7 +136,11 @@ export const GHOST_SOURCE = 'ghost';
 export type SimEvent =
   | { type: 'spawn'; npc: number }
   /** 玩家附身物件 */
-  | { type: 'trigger'; object: string; scareType: ScareType }
+  /**
+   * variant：这一次附身的随机数（0..1，模拟每次都给）。画面和声音按它挑同一个变体，两边一致，比如衣柜 A 版里
+   * WARDROBE.fingersChance 的时候先有几根手指扶住门边。可选只是为了不打扰手写事件的开发页、测试（没有当 0）
+   */
+  | { type: 'trigger'; object: string; scareType: ScareType; variant?: number }
   /** NPC 听到引诱声，转入警觉 */
   | { type: 'heard'; npc: number; object: string }
   /**

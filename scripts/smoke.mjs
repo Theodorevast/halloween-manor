@@ -290,8 +290,8 @@ try {
   }
   check('第三人称：准星对准每个物件、点击附身到它自己', gMisses.length === 0, gMisses.join('；'));
   await gp.screenshot({ path: `shots/smoke-4-ghost${WEBGL ? '-webgl' : ''}.png` });
-  // 床（2026-10-28）在场：物件 7 → 8，上面那项也对准、附身过它
-  check('第三人称：床在场（8 个物件）', ids.length === 8 && ids.includes('bed'), ids.join(', '));
+  // 床（2026-10-28）、衣柜（2026-10-29）在场：物件 7 → 9，上面那项也对准、附身过它们
+  check('第三人称：床、衣柜在场（9 个物件）', ids.length === 9 && ids.includes('bed') && ids.includes('wardrobe'), ids.join(', '));
 
   // 现身（2026-10-29）：F 现身，蓄力 0.6 秒后落下，准星外面出现冷却环；冷却中右键不理，冷却完右键能现身
   const twoFrames = () => gp.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));

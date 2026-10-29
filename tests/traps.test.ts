@@ -92,7 +92,7 @@ describe('机关：三种触发', () => {
     expect(d).toBeGreaterThanOrEqual(TRAP.behind[0] - 0.05);
     expect(d).toBeLessThanOrEqual(TRAP.behind[1]);
     expect(Math.abs(wrapAngle(bearingTo(n.pos, chair) - n.heading))).toBeGreaterThan(Math.PI / 2);
-    expect(ofType(ev, 'trigger')).toEqual([{ type: 'trigger', object: 'rocking-chair', scareType: 'rockingChair' }]);
+    expect(ofType(ev, 'trigger')).toEqual([{ type: 'trigger', object: 'rocking-chair', scareType: 'rockingChair', variant: expect.any(Number) }]);
     expect(ofType(ev, 'notice')).toEqual([{ type: 'notice', npc: n.id, kind: 'sound', src: chair }]);
     expect(obj(w, 'rocking-chair').armed).toBe(0);
     expect(obj(w, 'rocking-chair').cooldown).toBeGreaterThan(0);

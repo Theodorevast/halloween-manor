@@ -30,6 +30,7 @@ const GHOST_MARK_Y: Record<ScareType, number> = {
   portrait: 2.05,
   mirror: 1.85,
   bed: 0.9,
+  wardrobe: 2.3,
 };
 /** 第三人称：离鬼魂这么远（米）开始淡出，到 FADE_FAR 完全不显示 */
 const FADE_NEAR = 7;

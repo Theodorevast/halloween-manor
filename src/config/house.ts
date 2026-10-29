@@ -124,6 +124,8 @@ export const PROPS: PropPlacement[] = [
   { id: 'lamp-bedroom', type: 'lamp', cell: [1, 16], facing: E, room: 'bedroom' },
   { id: 'mirror', type: 'mirror', cell: [22, 17], facing: E, room: 'bathroom' },
   { id: 'bed', type: 'bed', cell: [2, 20], facing: E, room: 'bedroom' },
+  // 衣柜（2026-10-29）：卧室北墙那个衣柜（FURNITURE 的 bedroom-wardrobe，x 7–10、z 15–16）的门板，从卧室门进来正对着它
+  { id: 'wardrobe', type: 'wardrobe', cell: [8, 15], facing: S, room: 'bedroom' },
 ];
 
 export const cellCenter = (i: number, j: number) => ({ x: (i + 0.5) * CELL, z: (j + 0.5) * CELL });

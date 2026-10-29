@@ -15,8 +15,8 @@ import { facesToward } from './scares';
 import type { ScareObject } from './scares';
 import type { NpcState, ScareType, SimEvent, Vec2 } from './types';
 
-/** 背后型的物件（以后的衣柜也算这一种） */
-const BEHIND: ReadonlySet<ScareType> = new Set<ScareType>(['rockingChair', 'bed']);
+/** 背后型的物件 */
+const BEHIND: ReadonlySet<ScareType> = new Set<ScareType>(['rockingChair', 'bed', 'wardrobe']);
 export type TrapKind = 'behind' | 'facing' | 'lure';
 export const trapKind = (o: ScareObject): TrapKind => (o.spec.kind === 'lure' ? 'lure' : BEHIND.has(o.state.type) ? 'behind' : 'facing');
 

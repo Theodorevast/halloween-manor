@@ -11,6 +11,7 @@ import type { FrameCtx, Module, Quality, RenderCore } from '../engine/types';
 import { yawFor } from '../lib/angle';
 import type { ScareObjectState, ScareType, SimEvent, WorldState } from '../sim/types';
 import { createBed } from './props/bed';
+import { createWardrobe } from './props/wardrobe';
 import { createDoor } from './props/door';
 import { approach, attachShell, createGlow, hitBox, type Glow, type PropRig } from './props/kit';
 import { createLamp } from './props/lamp';
@@ -75,9 +76,9 @@ function createFrostHint() {
 }
 
 /**
- * 悬停时不整体放大的物件：床的被子盖在不动的床架上，放大 4% 会让被子比床架多漂出几厘米、边缘悬空
+ * 悬停时不整体放大的物件：床的被子盖在不动的床架上，放大 4% 会让被子比床架多漂出几厘米、边缘悬空；衣柜的门板同理（柜体是家具）
  */
-const NO_HOVER_SCALE: ReadonlySet<ScareType> = new Set(['bed']);
+const NO_HOVER_SCALE: ReadonlySet<ScareType> = new Set(['bed', 'wardrobe']);
 
 const builders: Record<ScareType, (i: number) => PropRig> = {
   portrait: () => createPortrait(),
@@ -87,6 +88,7 @@ const builders: Record<ScareType, (i: number) => PropRig> = {
   musicBox: () => createMusicBox(),
   mirror: () => createMirror(),
   bed: () => createBed(),
+  wardrobe: () => createWardrobe(),
 };
 
 interface Entry {
