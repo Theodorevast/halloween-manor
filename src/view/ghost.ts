@@ -19,6 +19,9 @@
 //   暗两下、借 frost.ts 让脚下结霜；落下时灯暗一下，暗到最深的那一帧换上「实」的那份材质（普通混合、暗、挡光、写深度，被手电照着的那面亮一点），
 //   停留时不飘、头慢慢抬起、只每秒更新 10 次，冷雾从下摆往下淌；收的时候再暗一下换回来。没有淡入淡出。
 //   「实」的那份标了 deferCompile，开场按钮可用之后由 main.ts 预编译
+// - 挡住访客时自己淡下去（2026-10-30，手感 FEEL-5，参数见 GHOST.occlude）：朝人飘过去时他就在鬼魂身后，贴近发毛、现身落下被吓的人、
+//   吓跑的人都被鬼魂自己挡住。每帧把鬼魂和比它离镜头更远的访客投到屏幕上，访客被鬼魂的矩形盖住得多就把 u.fade 乘一个小于 1 的数
+//   （平时 0.35、现身的实体 0.5、正被手电照出来 0.6），变淡快、回来慢；只是 uniform 的值，不加材质
 // ?noghostfx：不画鬼魂（量开销的对照，和 house.ts 一致）
 import * as THREE from 'three/webgpu';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -29,6 +32,7 @@ import {
   mx_noise_float, mx_noise_vec3, normalView, normalWorld, positionLocal, positionViewDirection, positionWorld,
   pow, sin, smoothstep, uniform, uv, varying, vec2, vec3, vec4,
 } from 'three/tsl';
+import { CHARACTER } from '../config/character';
 import { GHOST_MODEL } from '../config/ghost';
 import { CELL, Tile, buildTiles, cellOf, idx, inGrid } from '../config/house';
 import { MANIFEST, VISION } from '../config/visitors';
@@ -127,12 +131,20 @@ export const GHOST = {
    * smoothstep(cos 半角, mix(cos 半角, 1, edge), cosθ) × (1 − smoothstep(照多远 × far, 照多远, 距离)) × 强度 × 中间没有墙（半角、照多远用模拟的 VISION，见 SEE_COS）；
    * 四支取最亮的 = reveal。身体的不透明度 × mix(1, density, reveal)（雾晕不乘：照着时外面那圈糊的不跟着变浓，轮廓才清楚）；
    * soft 区间的下限往 soft 收（轮廓收紧）；颜色往手电的暖色（warmColor）偏 reveal × warm。
-   * losTau：中间有没有墙是 CPU 每帧按格子判的 0 / 1，平滑这么久（秒），走过门框边时不跳
+   * losTau：中间有没有墙是 CPU 每帧按格子判的 0 / 1，平滑这么久（秒），走过门框边时不跳。
+   * near：离手电 near[0] 米以内照不出、near[1] 米以外照满，中间 smoothstep（第二波 ART-3）。「贴近」是核心吓法，鬼魂常在访客 1 米内，
+   * 手电的光锥尖端落在身上时，照出的程度不再一下拉满：近处的照出是淡的，身上不截出一圈边缘清楚的亮盘。
+   * （美术总监分析里客厅沙发那几张（f03、b33）的粉紫圆盘，实测是手电的两盏聚光（外圈为主）近距离打在深红的沙发靠背上、过曝成粉的光斑：
+   * 把鬼魂藏掉（?noghostfx）、关掉雾（?nofog）它都原样还在，把外圈聚光的强度改成 0 它缩成一小块、两盏都改成 0 就没了，
+   * 不是鬼魂造成的，见第二波 GF 路报告；这一项管的是鬼魂自己身上的照出。）
+   * 暖色：被照着的地方是「被照亮的白雾」，不是粉色，所以暖色收成近中性（(0.9, 0.86, 0.8)）、混进去的量也少（原来 (0.95, 0.8, 0.6) 混 35%，
+   * 混进冷蓝的身体里偏粉）
    */
   reveal: {
-    density: 3, soft: 0.55, warm: 0.35, edge: 0.35,
+    density: 3, soft: 0.55, warm: 0.22, edge: 0.35,
     far: 0.7,
-    warmColor: new THREE.Color(0.95, 0.8, 0.6).multiplyScalar(0.5),
+    near: [0.5, 1.4] as [number, number],
+    warmColor: new THREE.Color(0.9, 0.86, 0.8).multiplyScalar(0.5),
     losTau: 0.08,
   },
   /**
@@ -166,7 +178,9 @@ export const GHOST = {
    *   简报原定 0.1（≈ 线性 0.03）：在暗房间里比周围亮，看着像一团自己发光的实雾（2026-10-29 评审 I1）；
    *   要对比就开 dev/ghost.html?manifest&solid=0.1
    * - albedo：被手电照到的那一面当作一件这么暗的长袍，按真的手电算漫反射（外圈、亮芯两盏灯的光锥、TORCH.decay 的距离衰减、强度、颜色都和
-   *   flashlight.ts 一样，见 torchIrradiance）：离得近、正对着才亮，离远了按距离暗下去；看得出褶，不发光
+   *   flashlight.ts 一样，见 torchIrradiance）：离得近、正对着才亮，离远了按距离暗下去；看得出褶，不发光。
+   *   0.11（第二波 ART-6，原来 0.06）：暗走廊里停留时的长袍和背景差不多亮，只靠挡住后面一点光读出来；亮一点以后，被手电照着的那面
+   *   读得出是一件深色的布，背光面（dark）不动、仍然是暗的剪影
    * 边上仍然用原来的侵蚀噪声散开（erode 比平时小：身子是实的，只有边和下摆散）。
    * soft：朝向镜头的程度在这之间淡入（轮廓不是一刀切）；hemFade 下摆淡出。
    * 头：身高 neck 以上的顶点（neckBlend 内渐变，脖子不折）绕 x 轴转，停留的 MANIFEST.hold 秒里从低着头 headPitch[0] 抬到 headPitch[1]
@@ -181,7 +195,7 @@ export const GHOST = {
   solid: {
     opacity: 0.85,
     dark: 0.03,
-    albedo: 0.06,
+    albedo: 0.11,
     soft: [0.0, 0.3] as [number, number],
     erode: [0.04, 0.6] as [number, number],
     hemFade: 0.3,
@@ -204,6 +218,24 @@ export const GHOST = {
    * 兜帽里那个洞、褶子深处暗下去，洞读成一团黑，不是一张脸。程序化的人形和没带 occl 的模型全是 1，和原来一样
    */
   occlusion: { body: 1, solid: 1 },
+  /**
+   * 挡住访客时自己淡下去（手感 FEEL-5）。朝人飘过去时他就在鬼魂身后（鬼魂离镜头近、他远，过肩只偏 0.32 米，2 米外的人正好落在鬼魂身宽的投影里），
+   * 贴近发毛、现身落下被吓的人、吓跑的人都被鬼魂自己挡住，画面里约四成的人看不见。做法：每帧用 GhostRig.toScreen 投出鬼魂的屏幕矩形
+   * （ghostBox：脚下 y[0] 米到头顶上 y[1] 米，左右各 half 米，左右按镜头的右方向）和每个比鬼魂离镜头更远、range 米以内的访客的矩形
+   * （visitorBox：脚到 CHARACTER.targetHeight + top 米，左右各 half 米；没走的都算，吓跑的也算——吓跑那一下正是要看清他的时候），
+   * 算访客的矩形被鬼魂的矩形盖住的比例（重叠面积 ÷ 访客的面积），取最大的（每帧只看离镜头最近的 people 个）：overlap。
+   * cover = smoothstep(from, to, overlap)，再平滑：cover 往上走（挡住了，鬼魂要淡）用 in 秒，往下走（让开了）用 out 秒，指数逼近。
+   * u.fade 再乘 lerp(1, k, cover)：k 平时 alpha，现身的实体 solid（吓人的那一下，留一半），正被手电照着（revealNow > lit）revealed
+   * （「被照出来」的显形要看得见）；k 自己的切换也按 out 秒平滑，不跳。只改 uniform 的值：墙上的影子那份网格只进手电阴影图，不受影响
+   */
+  occlude: {
+    alpha: 0.35, solid: 0.5, revealed: 0.6, from: 0.15, to: 0.5, in: 0.12, out: 0.35,
+    ghostBox: { y: [0.55, 2.05] as [number, number], half: 0.32 },
+    visitorBox: { top: 0.15, half: 0.25 },
+    range: 8,
+    people: 3,
+    lit: 0.3,
+  },
 };
 
 /**
@@ -481,7 +513,10 @@ export function ensureGhostAttributes(g: THREE.BufferGeometry): THREE.BufferGeom
 const SEE_COS = Math.cos(VISION.halfAngle);
 const SEE_RANGE = VISION.range;
 
-/** 片元 P（世界坐标）被手电照着的程度 0..1：四支里最亮的那支（公式见 GHOST.reveal，光锥和照程见 SEE_COS） */
+/**
+ * 片元 P（世界坐标）被手电照着的程度 0..1：四支里最亮的那支（公式见 GHOST.reveal，光锥和照程见 SEE_COS）。
+ * 近处淡出（GHOST.reveal.near）：离手电不到 near[0] 米照不出，near[1] 米以外照满。CPU 那份是 torchRevealAt，要一起改
+ */
 function torchReveal(u: GhostUniforms, P: V3n): F {
   const R = GHOST.reveal;
   let reveal: F = float(0);
@@ -492,7 +527,8 @@ function torchReveal(u: GhostUniforms, P: V3n): F {
     const cosT = dot(L.div(max(d, 0.001)), td.xyz);
     const cone = smoothstep(SEE_COS, SEE_COS + (1 - SEE_COS) * R.edge, cosT);
     const reach = float(1).sub(smoothstep(SEE_RANGE * R.far, SEE_RANGE, d));
-    reveal = max(reveal, cone.mul(reach).mul(u.torchPow[i]));
+    const nearK = smoothstep(R.near[0], R.near[1], d);
+    reveal = max(reveal, cone.mul(reach).mul(nearK).mul(u.torchPow[i]));
   }
   return reveal;
 }
@@ -535,15 +571,17 @@ function torchIrradiance(u: GhostUniforms, P: V3n, N: V3n): V3n {
 }
 
 /**
- * 同一个公式在 CPU 上算一点（房屋坐标）：给 uReveal 估值用。t 是登记表里的一支，los 是平滑过的「中间没有墙」
+ * 同一个公式在 CPU 上算一点（房屋坐标）：给 uReveal 估值用（墙上的影子、墙上多一个影子的判断跟着它走，要和画面一致，
+ * 所以近处淡出 GHOST.reveal.near 也乘在这里）。t 是登记表里的一支，los 是平滑过的「中间没有墙」
  */
-function torchRevealAt(t: TorchSample, los: number, x: number, y: number, z: number): number {
+export function torchRevealAt(t: TorchSample, los: number, x: number, y: number, z: number): number {
   if (t.power <= 0 || los <= 0) return 0;
   const R = GHOST.reveal;
   const lx = x - t.x, ly = y - t.y, lz = z - t.z;
   const d = Math.hypot(lx, ly, lz);
   const cosT = (lx * t.dx + ly * t.dy + lz * t.dz) / Math.max(d, 0.001);
-  return smooth01(SEE_COS, lerp(SEE_COS, 1, R.edge), cosT) * (1 - smooth01(SEE_RANGE * R.far, SEE_RANGE, d)) * t.power * los;
+  return smooth01(SEE_COS, lerp(SEE_COS, 1, R.edge), cosT) * (1 - smooth01(SEE_RANGE * R.far, SEE_RANGE, d))
+    * smooth01(R.near[0], R.near[1], d) * t.power * los;
 }
 
 /** 鬼魂这一层是什么：身体（被照着时变浓）、雾晕（不变浓） */
@@ -860,6 +898,111 @@ export function createGhostClip(root: THREE.Object3D, clip: THREE.AnimationClip)
   };
 }
 
+// ───────────────────────── 挡住访客时淡下去（FEEL-5，参数见 GHOST.occlude） ─────────────────────────
+// 下面几个都是不依赖渲染的纯函数（tests/ghost-occlude.test.ts）：投影矩形、重叠比例、平滑、挑哪些访客
+
+/** 屏幕上的矩形（像素，y 向下） */
+export interface Rect { x0: number; y0: number; x1: number; y1: number }
+/** 房屋坐标 (x, z)、离地高度 y → 屏幕像素；点在镜头背后时是 NaN（GhostRig.toScreen 的样子，参数拆开了） */
+export type CoverProject = (x: number, z: number, y: number) => { x: number; y: number };
+/** 挡人只看访客的位置和模式（NpcState 的子集） */
+export interface CoverNpc { pos: Vec2; mode: string }
+
+/** 把投影点包成矩形；没有点、或有一个点在镜头背后（NaN）就没有矩形 */
+export function rectOf(pts: readonly { x: number; y: number }[]): Rect | null {
+  if (!pts.length) return null;
+  const r: Rect = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+  for (const p of pts) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+    r.x0 = Math.min(r.x0, p.x);
+    r.y0 = Math.min(r.y0, p.y);
+    r.x1 = Math.max(r.x1, p.x);
+    r.y1 = Math.max(r.y1, p.y);
+  }
+  return r;
+}
+
+/** 访客的矩形 b 被鬼魂的矩形 a 盖住多少：重叠面积 ÷ b 的面积，0..1（b 没有面积 = 0） */
+export function rectOverlap(a: Rect, b: Rect): number {
+  const area = (b.x1 - b.x0) * (b.y1 - b.y0);
+  if (!(area > 0)) return 0;
+  const w = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
+  const h = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+  return w > 0 && h > 0 ? Math.min(1, (w * h) / area) : 0;
+}
+
+/** 水平方向左右各 half 米（right 是镜头右方向的水平单位向量）、竖直方向 y0..y1 米的一个方框，四个角投到屏幕上取包围矩形 */
+function boxRect(project: CoverProject, at: { x: number; z: number }, right: Vec2, half: number, y0: number, y1: number): Rect | null {
+  const pts: { x: number; y: number }[] = [];
+  for (const sx of [-1, 1]) for (const y of [y0, y1]) pts.push(project(at.x + right.x * half * sx, at.z + right.z * half * sx, y));
+  return rectOf(pts);
+}
+
+/** 鬼魂的屏幕矩形（GHOST.occlude.ghostBox） */
+export function ghostCoverRect(project: CoverProject, g: { x: number; z: number }, right: Vec2): Rect | null {
+  const B = GHOST.occlude.ghostBox;
+  return boxRect(project, g, right, B.half, B.y[0], B.y[1]);
+}
+
+/** 访客的屏幕矩形（GHOST.occlude.visitorBox）：脚到 CHARACTER.targetHeight + top 米 */
+export function visitorCoverRect(project: CoverProject, pos: Vec2, right: Vec2): Rect | null {
+  const B = GHOST.occlude.visitorBox;
+  return boxRect(project, pos, right, B.half, 0, CHARACTER.targetHeight + B.top);
+}
+
+/** 重叠比例 → 挡住的程度 0..1：from 以下算没挡（只擦到一点），to 以上算全挡，中间 smoothstep */
+export function coverOf(overlap: number): number {
+  const O = GHOST.occlude;
+  return smooth01(O.from, O.to, overlap);
+}
+
+/** 挡住的程度往目标走一步（指数逼近）：往上走（挡住了，鬼魂要淡）用 in 秒的时间常数，往下走（让开了）用 out 秒；dt ≤ 0 不动，不过冲 */
+export function approachCover(cur: number, target: number, dt: number): number {
+  if (!(dt > 0)) return cur;
+  const tau = target > cur ? GHOST.occlude.in : GHOST.occlude.out;
+  return cur + (target - cur) * (1 - Math.exp(-dt / tau));
+}
+
+/** 挡住时鬼魂留下多少：平时 alpha，现身的实体 solid，正被手电照着 revealed；又是实体又被照着取大的 */
+export function occludeK(solid: boolean, lit: boolean): number {
+  const O = GHOST.occlude;
+  return Math.max(solid ? O.solid : O.alpha, lit ? O.revealed : 0);
+}
+
+export interface CoverInput {
+  project: CoverProject;
+  /** 镜头的位置（房屋坐标，只用水平的） */
+  cam: { x: number; z: number };
+  /** 镜头的右方向（房屋坐标里的水平单位向量） */
+  right: Vec2;
+  ghost: { x: number; z: number };
+  npcs: readonly CoverNpc[];
+}
+
+/**
+ * 鬼魂挡住访客的程度 overlap（0..1）：比鬼魂离镜头更远、range 米以内、没走（gone）的访客里，离镜头最近的 people 个，
+ * 各自被鬼魂的矩形盖住的比例，取最大的。吓跑的人照样算（吓跑那一下正是要看清他的时候）。鬼魂在镜头背后没有矩形 = 0
+ */
+export function overlapOfGhost(c: CoverInput): number {
+  const O = GHOST.occlude;
+  const gr = ghostCoverRect(c.project, c.ghost, c.right);
+  if (!gr) return 0;
+  const dGhost = Math.hypot(c.ghost.x - c.cam.x, c.ghost.z - c.cam.z);
+  const cands: { n: CoverNpc; d: number }[] = [];
+  for (const n of c.npcs) {
+    if (n.mode === 'gone') continue;
+    const d = Math.hypot(n.pos.x - c.cam.x, n.pos.z - c.cam.z);
+    if (d > dGhost && d <= O.range) cands.push({ n, d });
+  }
+  cands.sort((a, b) => a.d - b.d);
+  let best = 0;
+  for (const { n } of cands.slice(0, O.people)) {
+    const vr = visitorCoverRect(c.project, n.pos, c.right);
+    if (vr) best = Math.max(best, rectOverlap(gr, vr));
+  }
+  return best;
+}
+
 // ───────────────────────── 组装 ─────────────────────────
 
 const isWallish = (t: number) => t === Tile.Wall || t === Tile.Window;
@@ -1034,6 +1177,14 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
   let follow = 1;
   let pours = 0;
 
+  // —— 挡住访客时淡下去（FEEL-5，GHOST.occlude）：这一帧鬼魂挡住访客的重叠比例、平滑后的挡住程度、平滑后「挡住时留下多少」——
+  const project: CoverProject = (x, z, y) => rig.toScreen({ x, z }, y);
+  const camRight = new THREE.Vector3();
+  const rightH: Vec2 = { x: 1, z: 0 };
+  let overlapNow = 0;
+  let coverS = 0;
+  let kS: number = GHOST.occlude.alpha;
+
   const setSolid = (on: boolean, t: number, byState = false) => {
     solid = on;
     solidByState = on && byState;
@@ -1162,6 +1313,7 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
         vel: vel.toArray().map((v) => +v.toFixed(2)), mistAlive: mist.alive(u.time.value),
         reveal: +revealNow.toFixed(3), torchPow: u.torchPow.map((p) => +p.value.toFixed(3)),
         solid, swapPending: swap !== null, head: +((u.head.value * 180) / Math.PI).toFixed(2), follow: +follow.toFixed(3), pours,
+        overlap: +overlapNow.toFixed(3), cover: +coverS.toFixed(3), occK: +kS.toFixed(3),
         clipTime: clipPose ? +clipPose.time.toFixed(3) : null, clipDuration: model?.clip ? +model.clip.duration.toFixed(3) : null,
       }),
       uniforms: u,
@@ -1239,7 +1391,19 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       const breathe = 1 - B.amount * (0.5 + 0.5 * Math.sin((t * Math.PI * 2) / B.period));
       // 平时的鬼魂自己发光，跟着附近灯的明暗一起暗（借暗下去的那一下出入）；「实」的那份不呼吸、不跟（它本来就暗，挡光）
       follow = thermal(follow, fx.lights ? fx.lights.level(g) : 1, dt);
-      u.fade.value = lerp(GHOST.minAlpha, 1, near) * (solid ? 1 : breathe * lerp(1, follow, M.follow));
+      // 挡住访客时自己淡下去（FEEL-5）：鬼魂的屏幕矩形盖住了比它离镜头更远的访客多少，盖得多就乘一个小于 1 的数；
+      // 现身的实体留一半、正被手电照着（上一帧的 revealNow）留多一点，k 自己的切换也平滑，不跳
+      const npcs = (ctx.state as Partial<WorldState>).npcs;
+      if (npcs && npcs.length) {
+        camRight.setFromMatrixColumn(rig.camera.matrixWorld, 0);
+        const rl = Math.hypot(camRight.x, camRight.z) || 1;
+        rightH.x = camRight.x / rl;
+        rightH.z = camRight.z / rl;
+        overlapNow = overlapOfGhost({ project, cam: camPos, right: rightH, ghost: g, npcs });
+      } else overlapNow = 0;
+      coverS = approachCover(coverS, coverOf(overlapNow), dt);
+      if (dt > 0) kS += (occludeK(solid, revealNow > GHOST.occlude.lit) - kS) * (1 - Math.exp(-dt / GHOST.occlude.out));
+      u.fade.value = lerp(GHOST.minAlpha, 1, near) * lerp(1, kS, coverS) * (solid ? 1 : breathe * lerp(1, follow, M.follow));
 
       // 手电照出（houseRoot 的世界矩阵上面已经更新过）；墙上的影子跟着被照出的程度出现，现身时整个都在
       writeTorches(dt);

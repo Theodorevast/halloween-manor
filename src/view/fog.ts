@@ -13,8 +13,9 @@
 // - 光不走 three 的灯光系统：每帧从场景里读出最多 4 支手电（每支两层光锥）和 4 盏点光（台灯、门廊灯、镜子的闪光），
 //   当 uniform 传进来，在顶点上按 three 同样的衰减公式算散射；
 // - 手电在雾里不能穿墙：每支手电每帧在格子地图上打 8 条射线，量出光锥里每个方向离最近的墙多远，顶点按这个截断。
-// 扰动（附身带起的冷风、厨房门的气浪、八音盒的回旋）：最多 DRAFT.slots 个，每个是几个 uniform，
+// 扰动（附身带起的冷风、厨房门的气浪、八音盒的回旋、现身落下的气浪）：最多 DRAFT.slots 个，每个是几个 uniform，
 // 在同一个顶点着色器里改噪声的取样点和密度，不加 draw call（见 DRAFT 和 draftField）。
+// 娃娃屋（俯视）里屋外那圈雾压淡（FOG.topDown）：每个顶点存一个「屋外程度」，着色器按相机是正交还是透视选压不压。
 import * as THREE from 'three/webgpu';
 import {
   abs, attribute, cameraFar, cameraNear, clamp, cos, dot, exp, float, floor, length, max, min, mix, mx_noise_float,
@@ -26,7 +27,7 @@ import {
   propCenter, roomAt, type RoomId,
 } from '../config/house';
 import type { CameraRig, FrameCtx, Module, Quality, RenderCore } from '../engine/types';
-import type { SimEvent } from '../sim/types';
+import type { SimEvent, Vec2 } from '../sim/types';
 import { PALETTE } from './palette';
 import { DOOR_T_LINE } from './props/door';
 import { inOutSine, outCubic, outQuad, seg } from './props/kit';
@@ -46,6 +47,15 @@ export const FOG = {
   doorSeep: { amount: 0.9, radius: 1.8 },
   /** 屋外比屋里浓多少倍（离外墙多远开始变淡、多远完全没有，见 layout） */
   outside: 1.45,
+  /**
+   * 娃娃屋（俯视、正交相机）里屋外那圈雾压淡（第二波 ART-10）：屋外是一大片深蓝斑驳的云纹，是俯视画面里最花的东西，抢房子
+   * （手机就是这个画面；关掉雾它就没了）。每个顶点存一个 outsideMix = smooth(0, ramp, 离房子外沿的米数)：0 屋里、1 屋外。
+   * dim：俯视时屋外的密度乘这个；detail：俯视时屋外第二层细噪声的权重（原来 noise[1].weight）。
+   * 第三人称（透视相机）不变：门外的雾照旧，天亮的晨雾也照旧；屋里的雾和光（台灯、手电光斑）不变。
+   * 天亮时（雾的环境色 u.ambient 比夜里亮 lift 倍，见 topDownDim）屋外那一项照样成立：密度再除以 lift，屋外的雾「贴上去的亮度」
+   * （密度 × 环境色）和夜里一样，不会因为晨雾被天光照亮、屋外那圈云纹在俯视里反而更显眼（屋外的底色天亮时也变亮，反差只会更小）
+   */
+  topDown: { dim: 0.55, detail: 0.2, ramp: 1 },
   /** 再浓也不超过这个不透明度：地板和物件永远看得见 */
   maxAlpha: 0.66,
   /**
@@ -107,6 +117,11 @@ export const FOG = {
   fanRays: 8,
 };
 
+/** 气浪（DRAFT.slam / DRAFT.manifest）的参数：字段的意思见 DRAFT.slam */
+export interface WaveParams {
+  reach: number; time: number; width: number; spread: number; compress: number; trough: number; push: number; start: number; stir: number;
+}
+
 /**
  * 雾里的扰动。每个扰动占一个槽（满了顶掉最老的），CPU 每帧按年龄算出各项强度，顶点着色器只按距离套形状：
  * - 旋（swirl，弧度）：以物件为中心把噪声的取样点转一个角度，中心转得多、边上不转，雾团被拧成旋涡；
@@ -114,7 +129,8 @@ export const FOG = {
  * - 薄（thin）：密度降下来；回填时变薄的半径从外往里收（雾从四周流回来）；
  * - 气浪（ring）：一圈往外走的波前，波前上的雾被挤浓、往外推，波前后面变薄。
  * 扰动只作用在物件所在的房间（厨房门：厨房 + 走廊），不会穿墙影响隔壁。
- * 半径、宽度都不小于低档网格（0.4 米一格）能采出来的尺度。时间都从附身那一刻（trigger 事件）算起
+ * 半径、宽度都不小于低档网格（0.4 米一格）能采出来的尺度。时间都从附身那一刻（trigger 事件）算起；
+ * 现身落下的那一圈（manifest）不按物件、按鬼魂的位置，作用在它所在的房间（门洞里是两边），从 manifest drop 事件那一刻算起
  */
 export const DRAFT = {
   slots: 4,
@@ -128,7 +144,15 @@ export const DRAFT = {
    * width 是波前的半宽（走得越远越宽，见 spread）；compress 是波前上雾变浓的比例，trough 是波前后面变薄的比例；
    * push 是雾被推走的距离（米），气浪过去后慢慢退回；stir 是波前上把雾撕成缕的程度；start 是波前的起始半径（半个门洞）
    */
-  slam: { reach: 4.2, time: 1.8, width: 0.45, spread: 1.3, compress: 1.6, trough: 0.6, push: 0.45, start: 0.35, stir: 0.8 },
+  slam: { reach: 4.2, time: 1.8, width: 0.45, spread: 1.3, compress: 1.6, trough: 0.6, push: 0.45, start: 0.35, stir: 0.8 } as WaveParams,
+  /**
+   * 现身落下（ghost.ts 的 manifest drop 事件，第二波 ART-6）：玩家最重的一下，齐膝的雾不能纹丝不动（厨房门都能推开一圈）。
+   * 和 slam 同一种气浪，更小更快：一圈波前从鬼魂脚下（start 是身宽的一半）在 time 秒里推到 reach 米外（先快后慢，落下后 0.4 秒约 2 米），
+   * 波前上的雾被挤浓 compress，后面变薄 trough（trough / compress 的比例、stir 都是这一种自己的，见 draftField 的 wave 槽）。
+   * 雾变薄是一次平滑的变化：波前过一点，那里的雾只是「浓一下、薄一下、回来」，和落下那一下灯暗同一刻出发，不多出一下
+   * （tests/fog-ring.test.ts 用 lightfx 的 countDips 数过）。没有「滞后」：事件到的那一刻就出发（slam 要等门撞上门框 DOOR_T_LINE.slam）
+   */
+  manifest: { reach: 2.6, time: 1.1, width: 0.35, spread: 1.0, compress: 1.35, trough: 0.5, push: 0.3, start: 0.25, stir: 0.6 } as WaveParams,
   /** 八音盒：音乐响着（MUSIC_BOX_T.end 秒）的时候，雾在它周围慢慢打转，停了以后 release 秒里松开 */
   musicBox: { radius: 1.5, swirl: 0.85, thin: 0.12, push: 0.08, release: 2.2 },
   /** 被搅动的雾撕成缕：缕之间的空隙 / 缕上的密度倍数（按细节噪声在两者之间过渡） */
@@ -181,9 +205,25 @@ function staticDensity(x: number, z: number, tiles: Uint8Array, fade: readonly [
     const seep = Math.max(0, 1 - Math.hypot(x - DOOR_X, z - (HOUSE_D - M)) / FOG.doorSeep.radius);
     return 1 + FOG.wallPool * pool + FOG.doorSeep.amount * seep * seep;
   }
-  const dx = Math.max(0, -x, x - HOUSE_W), dz = Math.max(0, -z, z - HOUSE_D);
-  const out = Math.hypot(dx, dz);
+  const out = outsideDist(x, z);
   return FOG.outside * (1 + 0.4 * pool) * (1 - smooth(fade[0], fade[1], out));
+}
+
+/** 离房子外沿多远（米；在房子的占地里 = 0）：屋外的雾离外墙多远变淡（staticDensity）、俯视时压淡多少（outsideMix）都按它 */
+function outsideDist(x: number, z: number): number {
+  const dx = Math.max(0, -x, x - HOUSE_W), dz = Math.max(0, -z, z - HOUSE_D);
+  return Math.hypot(dx, dz);
+}
+
+/**
+ * 屋外那圈雾在这一刻的密度倍数（着色器里 fogMaterial 逐顶点算的就是它，这里是 CPU 镜像，给测试用）：
+ * outsideMix 是顶点的屋外程度（0 屋里、1 屋外），persp 是这一次画雾的相机（true = 第三人称的透视，false = 娃娃屋的正交），
+ * lift 是雾的环境色此刻比夜里亮多少倍（天亮时 FOG_DAWN 是 ×1.8；夜里 1，小于 1 按 1 算）。
+ * 屋里、第三人称都是 1；娃娃屋的屋外是 FOG.topDown.dim ÷ lift
+ */
+export function topDownDim(outsideMix: number, persp: boolean, lift = 1): number {
+  const top = FOG.topDown.dim / Math.max(lift, 1);
+  return 1 + ((persp ? 1 : top) - 1) * outsideMix;
 }
 
 /**
@@ -205,7 +245,7 @@ function roomOfPoint(x: number, z: number): number {
   return NO_ROOM;
 }
 
-/** 雾顶的网格：位置在房屋坐标，y = FOG.top；dens 是静态密度，room 是房间编号。四角都没有雾的格子不画 */
+/** 雾顶的网格：位置在房屋坐标，y = FOG.top；dens 是静态密度，room 是房间编号，outside 是屋外程度（0 屋里、1 屋外，见 FOG.topDown）。四角都没有雾的格子不画 */
 function buildGrid(q: Quality, tiles: Uint8Array): THREE.BufferGeometry {
   const { step, fade } = FOG.layout[q];
   const reach = fade[1] + step;
@@ -214,6 +254,7 @@ function buildGrid(q: Quality, tiles: Uint8Array): THREE.BufferGeometry {
   const pos = new Float32Array((nx + 1) * (nz + 1) * 3);
   const dens = new Float32Array((nx + 1) * (nz + 1));
   const room = new Float32Array((nx + 1) * (nz + 1));
+  const outside = new Float32Array((nx + 1) * (nz + 1));
   for (let j = 0; j <= nz; j++) {
     for (let i = 0; i <= nx; i++) {
       const k = j * (nx + 1) + i;
@@ -221,6 +262,7 @@ function buildGrid(q: Quality, tiles: Uint8Array): THREE.BufferGeometry {
       pos.set([x, FOG.top, z], k * 3);
       dens[k] = staticDensity(x, z, tiles, fade);
       room[k] = roomOfPoint(x, z);
+      outside[k] = smooth(0, FOG.topDown.ramp, outsideDist(x, z));
     }
   }
   const index: number[] = [];
@@ -236,6 +278,7 @@ function buildGrid(q: Quality, tiles: Uint8Array): THREE.BufferGeometry {
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('dens', new THREE.BufferAttribute(dens, 1));
   g.setAttribute('room', new THREE.BufferAttribute(room, 1));
+  g.setAttribute('outside', new THREE.BufferAttribute(outside, 1));
   g.setIndex(index);
   g.computeBoundingSphere();
   return g;
@@ -292,11 +335,55 @@ function makeUniforms() {
       amt: v4u(),
       /** 气浪波前的半径、半宽、推走的距离（米）；作用的两个房间（打包，见 ROOM_PACK） */
       ring: uniform(new THREE.Vector4(0, 1, 0, NO_ROOM * (1 + ROOM_PACK))),
+      /** 气浪的两个形状系数（slam 和 manifest 各用自己的）：波前后面变薄的量 / 波前变浓的量（trough / compress）、波前上撕成缕的程度（stir） */
+      wave: uniform(new THREE.Vector2(DRAFT.slam.trough / DRAFT.slam.compress, DRAFT.slam.stir)),
     })),
   };
 }
 type Uniforms = ReturnType<typeof makeUniforms>;
 type DraftSlot = Uniforms['drafts'][number];
+
+/** 气浪这一刻写进 uniform 的几个数（见 waveAt） */
+export interface WaveState {
+  /** 波前半径、半宽（米） */
+  radius: number;
+  halfWidth: number;
+  /** 气浪过去之后雾被推走的距离（米） */
+  shove: number;
+  /** 波前上雾变浓的比例（带着 (1 − u)^1.5 的衰减，波前后面变薄的量是它乘 trough / compress） */
+  compress: number;
+}
+
+/**
+ * 气浪（厨房门撞上、现身落下）在波前出发 ts 秒后的样子，writeDraft 照它写 uniform，测试也用它：
+ * 波前按 outCubic 先快后慢地从 start 推到 reach；半宽随走远变宽（spread），不窄于 minW（低档网格 0.4 米一格，采不出更窄的）；
+ * 气浪过去后雾被推走的距离按 inOutSine 退回；变浓 / 变薄的幅度随 (1 − u)^1.5 衰减，出发时 0.06 秒内淡入，不是一下子出现。
+ * ts < 0 = 还没出发（半径停在 start、不起作用）
+ */
+export function waveAt(L: WaveParams, ts: number, minW: number): WaveState {
+  const u = seg(ts, 0, L.time);
+  const on = ts >= 0 ? 1 : 0;
+  return {
+    radius: L.start + (L.reach - L.start) * outCubic(u),
+    halfWidth: Math.max(L.width * (1 + L.spread * u), minW),
+    shove: on * L.push * (1 - inOutSine(u)),
+    compress: on * L.compress * (1 - u) ** 1.5 * seg(ts, 0, 0.06),
+  };
+}
+
+/**
+ * 离中心 r 米的一点上，气浪这一刻造成的密度倍数：波前上浓、后面薄，再乘「撕成缕」那一项。wisp 是那一点上细节噪声给的缕系数
+ * （DRAFT.wisp 的 0.2–1.7：缕之间的空隙 / 缕上）。和 draftField 里 density 的 ring、stir 两项是同一个式子，只是着色器里逐顶点算、
+ * 这里是它的 CPU 镜像，给测试数「雾的亮度曲线」用：雾的不透明度 = 1 − exp(−τ)，τ 正比于密度，亮度和密度单调相关
+ */
+export function waveDensity(w: WaveState, L: WaveParams, r: number, wisp = 1): number {
+  const t = (r - w.radius) / w.halfWidth;
+  const band = Math.exp(-t * t);
+  const behind = 1 - smooth(w.radius - w.halfWidth, w.radius, r);
+  const ring = w.compress * (band - behind * (L.trough / L.compress));
+  const stir = Math.min(1, Math.max(0, band * w.compress * L.stir));
+  return Math.max(ring + 1, 0) * (stir * (wisp - 1) + 1);
+}
 
 /**
  * 所有扰动叠加后：噪声的取样点往哪挪（dx, dz）、密度乘多少。
@@ -343,9 +430,9 @@ function draftField(u: Uniforms, S: V3, room: F) {
       const t = r.sub(d.ring.x).div(d.ring.y);
       const band = exp(t.mul(t).negate());
       const behind = float(1).sub(smoothstep(d.ring.x.sub(d.ring.y), d.ring.x, r));
-      const ring = d.amt.w.mul(band.sub(behind.mul(DRAFT.slam.trough / DRAFT.slam.compress))).mul(mask);
+      const ring = d.amt.w.mul(band.sub(behind.mul(d.wave.x))).mul(mask);
       // 搅动程度：这里被拧了多少弧度（f 已含房间遮罩）+ 波前
-      const stir = clamp(abs(d.amt.y).mul(f).add(band.mul(d.amt.w).mul(mask).mul(DRAFT.slam.stir)), 0, 1);
+      const stir = clamp(abs(d.amt.y).mul(f).add(band.mul(d.amt.w).mul(mask).mul(d.wave.y)), 0, 1);
       mul = mul.mul(max(float(1).sub(thin), 0)).mul(max(ring.add(1), 0)).mul(stir.mul(wisp.sub(1)).add(1));
     }
     return mul;
@@ -404,6 +491,14 @@ function fogMaterial(u: Uniforms, octaves: number, drafts = true) {
   const field = drafts ? draftField(u, S, attribute('room', 'float')) : null;
   const Sx = field ? S.x.add(field.dx) : S.x;
   const Sz = field ? S.z.add(field.dz) : S.z;
+  // 屋外的程度（顶点属性：0 屋里、1 屋外）：俯视（persp = 0）时屋外压淡、第二层细噪声的权重减小（FOG.topDown）；
+  // 第三人称（persp = 1）、屋里都不变
+  const outsideMix = attribute('outside', 'float');
+  const T = FOG.topDown;
+  const lastOctave = FOG.noise.length - 1;
+  // 天亮时环境色比夜里亮几倍（夜里 = 1）：屋外的密度跟着再除一下，贴上去的亮度（密度 × 环境色）不变
+  const lift = max(u.ambient.r.mul(0.2126).add(u.ambient.g.mul(0.7152)).add(u.ambient.b.mul(0.0722))
+    .div(0.2126 * FOG.ambient.r + 0.7152 * FOG.ambient.g + 0.0722 * FOG.ambient.b), 1);
   let fbm: F = float(0);
   let wsum = 0;
   let detail: F = float(0);
@@ -418,14 +513,17 @@ function fogMaterial(u: Uniforms, octaves: number, drafts = true) {
       side.mul(o.freq * Math.sqrt(o.stretch)),
       t.mul(o.evolve).add(k * 17.3),
     ));
-    fbm = fbm.add(n.mul(o.weight));
+    // 最细的那一层：俯视时屋外权重降到 T.detail（总和不重新归一：屋外的花纹只是更淡，屋里、第三人称的 wsum 还是 1）
+    const weight: F = k === lastOctave ? mix(float(o.weight), mix(float(T.detail), float(o.weight), u.persp), outsideMix) : float(o.weight);
+    fbm = fbm.add(n.mul(weight));
     wsum += o.weight;
     if (k === octaves - 1) detail = n;
   });
   fbm = fbm.div(wsum);
   // 成片：大部分地方是很薄的一层，噪声高的地方聚成一团团
   const patch = smoothstep(-0.35, 0.7, fbm);
-  let rho: F = attribute('dens', 'float').mul(FOG.density).mul(patch.mul(patch).mul(1.15).add(0.22));
+  let rho: F = attribute('dens', 'float').mul(FOG.density).mul(patch.mul(patch).mul(1.15).add(0.22))
+    .mul(mix(float(1), mix(float(T.dim).div(lift), float(1), u.persp), outsideMix));
   if (field) rho = rho.mul(field.density(detail));
   // 浓的地方也更高，雾面起伏
   const hs = float(FOG.scaleH).mul(patch.mul(0.4).add(0.75).add(detail.mul(0.12)));
@@ -523,7 +621,7 @@ export function createFogView(core: RenderCore, _rig: CameraRig): Module {
   if (!enabled) applyVisibility();
 
   // —— 扰动：trigger 事件开一个，update 里按年龄算强度写进 uniform ——
-  type DraftKind = 'possess' | 'slam' | 'music';
+  type DraftKind = 'possess' | 'slam' | 'music' | 'manifest';
   interface Draft { kind: DraftKind; x: number; z: number; rooms: number; age: number; life: number; spin: number }
   const drafts: (Draft | null)[] = new Array(DRAFT.slots).fill(null);
   let spin = 1;
@@ -531,7 +629,18 @@ export function createFogView(core: RenderCore, _rig: CameraRig): Module {
     const P = DRAFT.possess;
     if (k === 'possess') return P.attack + P.hold + P.refill;
     if (k === 'slam') return DOOR_T_LINE.slam + DRAFT.slam.time;
+    if (k === 'manifest') return DRAFT.manifest.time;
     return MUSIC_BOX_T.end + DRAFT.musicBox.release;
+  };
+  /** 占一个槽：空槽，没有就顶掉进度最靠后的那个 */
+  const claim = (kind: DraftKind, x: number, z: number, rooms: number) => {
+    let k = drafts.indexOf(null);
+    if (k < 0) {
+      let most = -1;
+      drafts.forEach((d, i) => { const v = d ? d.age / d.life : 0; if (v > most) { most = v; k = i; } });
+    }
+    spin = -spin; // 旋的方向轮流换，不总是同一个手性
+    drafts[k] = { kind, x, z, rooms, age: 0, life: lifeOf(kind), spin };
   };
   const startDraft = (objectId: string, kind: DraftKind) => {
     const p = PROPS.find((x) => x.id === objectId);
@@ -540,18 +649,22 @@ export function createFogView(core: RenderCore, _rig: CameraRig): Module {
     // 门在门洞里：气浪往门两边的房间走
     const doorway = kind === 'slam' ? DOORWAYS.find((d) => d.cells.some(([i, j]) => i === p.cell[0] && j === p.cell[1])) : undefined;
     const [ra, rb] = doorway ? doorway.rooms : [p.room, p.room];
-    const rooms = ROOM_IDS.indexOf(ra) + ROOM_PACK * ROOM_IDS.indexOf(rb);
-    // 空槽，没有就顶掉进度最靠后的那个
-    let k = drafts.indexOf(null);
-    if (k < 0) {
-      let most = -1;
-      drafts.forEach((d, i) => { const v = d ? d.age / d.life : 0; if (v > most) { most = v; k = i; } });
-    }
-    spin = -spin; // 旋的方向轮流换，不总是同一个手性
-    drafts[k] = { kind, x: c.x, z: c.z, rooms, age: 0, life: lifeOf(kind), spin };
+    claim(kind, c.x, c.z, ROOM_IDS.indexOf(ra) + ROOM_PACK * ROOM_IDS.indexOf(rb));
+  };
+  /**
+   * 不按物件、按位置开一个扰动（现身落下：鬼魂在哪就从哪出发），和 startDraft 一样占槽。
+   * 房间：这一点所在的格子的房间（roomAt）；站在门洞里是门两边的房间；站在墙里、屋外就按它偏向的那一侧（roomOfPoint），
+   * 扰动不会穿墙推到隔壁
+   */
+  const startDraftAt = (pos: Vec2, kind: DraftKind) => {
+    const i = Math.floor(pos.x / CELL), j = Math.floor(pos.z / CELL);
+    const doorway = DOORWAYS.find((d) => d.cells.some(([ci, cj]) => ci === i && cj === j));
+    const a = doorway ? ROOM_IDS.indexOf(doorway.rooms[0]) : roomOfPoint(pos.x, pos.z);
+    const b = doorway ? ROOM_IDS.indexOf(doorway.rooms[1]) : a;
+    claim(kind, pos.x, pos.z, a + ROOM_PACK * b);
   };
   const writeDraft = (slot: DraftSlot, d: Draft | null) => {
-    const { geo, amt, ring } = slot;
+    const { geo, amt, ring, wave } = slot;
     if (!d) {
       amt.value.set(0, 0, 0, 0);
       ring.value.set(0, 1, 0, NO_ROOM * (1 + ROOM_PACK));
@@ -568,14 +681,14 @@ export function createFogView(core: RenderCore, _rig: CameraRig): Module {
       geo.value.set(d.x, d.z, R, R * (t < P.attack ? 0.45 + 0.55 * a : 1 - 0.7 * back));
       amt.value.set(P.thin * a * (1 - back), d.spin * P.swirl * twist, P.push * a * (1 - back), 0);
       ring.value.set(0, 1, 0, d.rooms);
-    } else if (d.kind === 'slam') {
-      const L = DRAFT.slam;
-      const ts = t - DOOR_T_LINE.slam;
-      const u = seg(ts, 0, L.time);
-      const on = ts >= 0 ? 1 : 0;
+    } else if (d.kind === 'slam' || d.kind === 'manifest') {
+      // 气浪：厨房门要先摆到撞上门框（DOOR_T_LINE.slam）才出发，现身是落下那一刻就出发
+      const L = d.kind === 'slam' ? DRAFT.slam : DRAFT.manifest;
+      const w = waveAt(L, t - (d.kind === 'slam' ? DOOR_T_LINE.slam : 0), minW);
       geo.value.set(d.x, d.z, 1, 1);
-      amt.value.set(0, 0, 0, on * L.compress * (1 - u) ** 1.5 * seg(ts, 0, 0.06));
-      ring.value.set(L.start + (L.reach - L.start) * outCubic(u), Math.max(L.width * (1 + L.spread * u), minW), on * L.push * (1 - inOutSine(u)), d.rooms);
+      amt.value.set(0, 0, 0, w.compress);
+      ring.value.set(w.radius, w.halfWidth, w.shove, d.rooms);
+      wave.value.set(L.trough / L.compress, L.stir);
     } else {
       const M = DRAFT.musicBox;
       const T = MUSIC_BOX_T.end;
@@ -589,10 +702,12 @@ export function createFogView(core: RenderCore, _rig: CameraRig): Module {
       ring.value.set(0, 1, 0, d.rooms);
     }
   };
+  /** 调试截图用（?debug 的 __fog.hold / seek）：扰动的年龄定住，想截哪一刻就把年龄拨到哪一刻 */
+  let holdDrafts = false;
   const stepDrafts = (dt: number) => {
     drafts.forEach((d, k) => {
       if (d) {
-        d.age += dt;
+        if (!holdDrafts) d.age += dt;
         if (d.age >= d.life) drafts[k] = null;
       }
       writeDraft(u.drafts[k], drafts[k]);
@@ -709,12 +824,33 @@ export function createFogView(core: RenderCore, _rig: CameraRig): Module {
       },
       /** 手动开一个扰动（调试）：kind = 'possess' | 'slam' | 'music' */
       disturb: (objectId: string, kind: DraftKind = 'possess') => startDraft(objectId, kind),
+      /** 手动在一个位置（房屋米坐标）开一个扰动（调试）：现身落下的气浪，kind 默认 'manifest' */
+      disturbAt: (x: number, z: number, kind: DraftKind = 'manifest') => startDraftAt({ x, z }, kind),
+      /**
+       * 定住所有扰动的时间，连同雾的噪声时间一起（截图截某一刻用，配合 seek：云纹不飘，和「没有扰动」那一张做差只剩扰动）；
+       * 放开后接着往前走（下一次 update 会把噪声时间写回真的）
+       */
+      get hold() { return holdDrafts; },
+      set hold(v: boolean) {
+        holdDrafts = v;
+        const t = u.time as unknown as { value: number };
+        const now = t.value;
+        if (v) Object.defineProperty(t, 'value', { configurable: true, enumerable: true, get: () => now, set: () => {} });
+        else Object.defineProperty(t, 'value', { configurable: true, enumerable: true, writable: true, value: now });
+      },
+      /** 把所有在跑的扰动的年龄拨到 t 秒（从扰动开始算；不会拨过它的寿命） */
+      seek: (t: number) => { for (const d of drafts) if (d) d.age = Math.min(t, d.life - 1e-6); },
       uniforms: u,
     };
   }
 
   return {
     onEvent(e: SimEvent) {
+      // 现身落下（ghost.ts 的换材质、lightfx 的灯暗同一刻）：地面雾从鬼魂脚下被推开一圈。蓄力、停留、收不动雾
+      if (e.type === 'manifest') {
+        if (e.phase === 'drop') startDraftAt(e.pos, 'manifest');
+        return;
+      }
       if (e.type !== 'trigger') return;
       startDraft(e.object, e.scareType === 'door' ? 'slam' : e.scareType === 'musicBox' ? 'music' : 'possess');
     },
