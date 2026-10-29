@@ -5,7 +5,8 @@
     "reference: 吉祥物参考图，可以是文件，也可以是目录（目录里只能有一张 PNG / JPEG / WebP）。",
     "每个访客可以用 overrides 覆盖 defaults 里的任何字段；值写 null 表示删掉这个字段。改了已经做过的步骤会停下来提示 --reroll，不会悄悄重做。",
     "价格表在 scripts/tripo/catalog.mjs（developers.tripo3d.ai/en/pricing，2026-10-27 读取）。下面四套服装都是草稿，等用户确认。",
-    "2026-10-28：按翠宝的造型改写（黑色球形身体、正面 logo、半透明灰色手臂、黄色球鞋，没有脸）：服装是玩具配件式的帽子、披肩、领子和手绘花纹。"
+    "2026-10-28：按翠宝的造型改写（黑色球形身体、正面 logo、半透明灰色手臂、黄色球鞋，没有脸）：服装是玩具配件式的帽子、披肩、领子和手绘花纹。",
+    "2026-10-29：加联名皮肤 jotaro、dio（JOJO，草稿）。授权确认之前只在地址带 ?collab 时出现，不进公开的访客轮换；服装只用文字写，用户给的同人图不喂给任何生成模型。换装提示词在各自的 overrides 里覆盖（照原作配色、搪胶玩具配件的做工），defaults 不动，前四套已经做完的步骤不受影响。出草稿用 --run jotaro,dio --yes --until costume（只出换装图；不加 --until 会接着去传还不存在的 touchup.png）。"
   ],
   "reference": "assets-src/mascot/triboo-front.png",
   "defaults": {
@@ -153,6 +154,32 @@
             "--trust",
             "arms"
           ]
+        }
+      }
+    },
+    {
+      "id": "jotaro",
+      "status": "draft",
+      "label": "联名：承太郎装（JOJO）",
+      "costume": "a dark navy peaked school cap with a gold chain, a small gold hand-shaped badge and a round gold button on its front, its back edge one piece with the cap, slightly ragged as if torn (not hair); a long dark navy coat with a tall stand-up collar, open in front so the logo shows, a thick gold chain hanging from its left collar; a buckled leather belt at the waist below the logo",
+      "notes": "联名皮肤（JOJO），授权确认之前只在 ?collab 时出现。服装照计划文档的文字描述（深藏青学生帽：后沿和帽子连成一片、略带撕裂感，帽前金链、金色手形小徽章、圆金扣；高领深藏青长外套敞着前襟露出 logo，左领口垂粗金链；腰间带扣皮带），没有用同人图。皮带写成「logo 下面」，免得横过 logo。2026-10-29：第一段只出换装草图，等用户挑图；挑好后主会话给修手的 vmc 命令，再改 approved 做 3D。 2026-10-29 草图（e21b687e，10 积分）：logo 全露、没有脸、T 字站姿都对；帽前「金链」画成了一根金色横杆，撕裂的后沿只在一侧、像几撮毛；外套前襟两条直边把球身框成偏方的一块；外套下摆垂到球鞋上沿（绑骨走路时可能和腿穿插）。前两条可以在修手时一起改。",
+      "overrides": {
+        "costume": {
+          "$comment": "联名皮肤专用的换装提示词。保留原模板里「还是同一个吉祥物」的要求（黑色球身、正面 logo 看得见、短黑腿、半透明灰色手臂、黄色球鞋、没有脸和人的躯干、T 字站姿、全身正面、两条腿分开、浅灰背景、手里不拿东西、不发光、不加字）；去掉「维多利亚哥特、灰暗颜色」那句，换成「照原作配色、不压暗，每件像搪胶玩具的配件」（原模板「像搪胶玩具的配件：帽子、披肩、领子、带子和涂装」那句并进这一句）。套进服装后不超过 1024 字符（CLI 文档写的上限，未核实会不会截断）。",
+          "promptTemplate": "Dress this character in a Halloween costume: {costume}. It must stay clearly the same mascot: a round matte-black ball body with its gold-and-white logo on the front still visible, short black legs, translucent grey arms and yellow sneakers; do not give it a face or a human torso. Colours faithful to the source costume, not muted; every piece fits the ball like a vinyl toy accessory; no glow, no added text, nothing held in the hands. Keep exactly the same T-pose, camera angle and framing, full body visible from top to sneakers, facing the viewer. Both legs stay visible and separate. Plain light grey seamless background, soft even lighting."
+        }
+      }
+    },
+    {
+      "id": "dio",
+      "status": "draft",
+      "label": "联名：DIO 装（JOJO）",
+      "costume": "a bright yellow short jacket cropped at the middle of the ball, open at the front so the logo stays visible, with dark piping on the cuffs and the collar; a green heart-shaped headband around the top of the ball above the logo, the heart at the front; green straps wrapped around the short black legs above the sneakers",
+      "notes": "联名皮肤（JOJO），授权确认之前只在 ?collab 时出现。服装照计划文档的文字描述（亮黄色短外套：短到球身中间，袖口和领口深色滚边；球顶绿色心形头箍；绿色绑带），没有用同人图。外套写成敞开（不然盖住 logo）；「绿色的绑带」计划里没写位置，这里放在腿上（球鞋上面）。不拿路牌：模板里的「手里不拿东西」管着，提示词里不提路牌，免得反而画出来。2026-10-29：第一段只出换装草图，等用户挑图。 2026-10-29 草图（eaa94d2e，10 积分）：球身还是圆的，logo 全露；黄外套短到球身中线略下，短袖、袖口和领口黑滚边；绿色头箍的心在正上方；绿绑带在两条腿上交叉缠。外套更像左右两片，后背看不出来，要等四视图。",
+      "overrides": {
+        "costume": {
+          "$comment": "和 jotaro 用同一条联名换装提示词（说明见 jotaro）。",
+          "promptTemplate": "Dress this character in a Halloween costume: {costume}. It must stay clearly the same mascot: a round matte-black ball body with its gold-and-white logo on the front still visible, short black legs, translucent grey arms and yellow sneakers; do not give it a face or a human torso. Colours faithful to the source costume, not muted; every piece fits the ball like a vinyl toy accessory; no glow, no added text, nothing held in the hands. Keep exactly the same T-pose, camera angle and framing, full body visible from top to sneakers, facing the viewer. Both legs stay visible and separate. Plain light grey seamless background, soft even lighting."
         }
       }
     }
