@@ -220,8 +220,9 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
       watching = false;
       return;
     }
-    if (camMoved()) setHover(idAt(mouse.x, mouse.y));
+    // 先排下一帧、再发回调：订阅者抛了异常，循环也不会就此停掉（停了的话 watching 还卡在 true，之后 pointermove 再也起不了这个循环）
     requestAnimationFrame(watchTick);
+    if (camMoved()) setHover(idAt(mouse.x, mouse.y));
   };
   const watch = () => {
     if (watching || disposed) return;
@@ -344,13 +345,14 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
     onArm: (id) => { for (const cb of armCbs) cb(id); },
   });
 
-  // 镜头每帧都在动（跟随、转向），悬停每帧重算一次：8 个盒子的一条射线，很便宜。按住时也在这里看有没有按满、准星有没有移开
+  // 镜头每帧都在动（跟随、转向），悬停每帧重算一次：8 个盒子的一条射线，很便宜。按住时也在这里看有没有按满、准星有没有移开。
+  // 先排下一帧、再算和发回调：订阅者（悬停、附身、设机关的回调）抛了异常，每帧的循环也不会就此停掉
   const tick = () => {
     if (disposed) return;
+    requestAnimationFrame(tick);
     const id = aimed();
     setHover(id);
     input.frame(id);
-    requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
   // 丢了锁定：下一帧 aimed() 返回 null，悬停自己收起；按着的手势也作废（Esc 之后松手，松手事件到不了这里）

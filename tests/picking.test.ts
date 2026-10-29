@@ -679,6 +679,37 @@ describe('DOM 接线：假画布派发指针事件，真的 createPicker', () =>
       expect(e.arms).toEqual([]);
     });
 
+    // P-2：每帧的循环要先排下一帧、再发回调。订阅者（悬停、附身、设机关的回调）抛了异常，循环不能就此停掉
+    it('悬停的订阅者抛了异常：下一帧已经排好，循环不会就此停掉，之后按满照样设机关（以前这里排不上下一帧，悬停和按住设机关从此全没了）', () => {
+      const e = ghostEnv();
+      let boom = true;
+      e.picker.onHover((id) => {
+        if (boom && id === 'bed') throw new Error('hover boom');
+      });
+      expect(() => runFrame()).toThrow('hover boom'); // 第一帧：准星对着床，悬停回调抛了
+      expect(queued).toHaveLength(1); // 下一帧已经排好
+      boom = false;
+      e.down();
+      clock = 1000 + TRAP.holdToArm * 1000;
+      runFrame();
+      expect(e.arms).toEqual(['bed']);
+    });
+
+    it('设机关的订阅者抛了异常：下一帧也已经排好，之后悬停照样跟着准星走', () => {
+      const e = ghostEnv();
+      e.picker.onArm(() => {
+        throw new Error('arm boom');
+      });
+      runFrame();
+      e.down();
+      clock = 1000 + TRAP.holdToArm * 1000;
+      expect(() => runFrame()).toThrow('arm boom');
+      expect(queued).toHaveLength(1);
+      e.look(20, 1.5, -3); // 转开
+      runFrame();
+      expect(e.hovers).toEqual(['bed', null]);
+    });
+
     it('dispose：画布上的监听和 window 上的 blur 都摘掉，排着的那一帧跑完不再续排，之后的事件不再有反应', () => {
       const e = ghostEnv();
       expect(e.canvas.listeners).toBeGreaterThan(0);
@@ -794,6 +825,25 @@ describe('DOM 接线：假画布派发指针事件，真的 createPicker', () =>
       expect(e.hovers).toEqual(['bed', null]);
       runFrame();
       expect(e.hovers).toEqual(['bed', null]);
+      e.look(0, 1.5, -3);
+      runFrame();
+      expect(e.hovers).toEqual(['bed', null, 'bed']);
+    });
+
+    // P-2：看镜头的循环也一样，先排下一帧再发回调；以前回调一抛，循环停了，watching 还卡成 true，之后 pointermove 再也起不了这个循环
+    it('悬停的订阅者抛了异常：看镜头的循环不会停，镜头再动悬停照样跟着变（以前 watching 卡成 true，再也起不来）', () => {
+      const e = topEnv();
+      let boom = false;
+      e.picker.onHover((id) => {
+        if (boom && id === null) throw new Error('hover boom');
+      });
+      e.move(); // 悬停到床上，开始每帧看镜头
+      expect(e.hovers).toEqual(['bed']);
+      boom = true;
+      e.look(20, 1.5, -3); // 镜头转开，光标下没有物件了：回调抛
+      expect(() => runFrame()).toThrow('hover boom');
+      expect(queued).toHaveLength(1);
+      boom = false;
       e.look(0, 1.5, -3);
       runFrame();
       expect(e.hovers).toEqual(['bed', null, 'bed']);
