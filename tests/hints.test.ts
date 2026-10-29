@@ -15,7 +15,7 @@ import { angleOf } from '../src/lib/angle';
 import { createWorld } from '../src/sim/world';
 import type { ManifestState, ScareObjectState, SimEvent, Vec2, World, WorldState } from '../src/sim/types';
 import { HINT, bottomLine, createHintCore, createMissWatch, manifestRefusal, trapsFull, type HintEnv } from '../src/ui/hints';
-import { KEYS, beginLabel, hudLines } from '../src/ui/hud';
+import { KEYS, TICKER, beginLabel, hudLines, pushLine, type TickerRow } from '../src/ui/hud';
 
 const DT = 1 / 60;
 const prop = (id: string) => propCenter(PROPS.find((p) => p.id === id)!);
@@ -33,7 +33,7 @@ function run(w: World, seconds: number, feed: (e: SimEvent) => void, after: () =
 afterEach(() => {
   bottomLine.release('keys');
   bottomLine.release('hint');
-  setGhostUi({ active: false, engaged: false, locked: false, pending: false, aim: null, held: false });
+  setGhostUi({ active: false, engaged: false, locked: false, pending: false, aim: null, aimFar: null, held: false });
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -359,6 +359,90 @@ describe('播报：天亮自己走的人（exit 带 calm）', () => {
   });
 });
 
+// ── 播报不让尖叫传染把正事挤掉（2026-10-30 手感分析 FEEL-6）：合并、挤出的判断是纯函数（pushLine），hud.ts 的 DOM 跟着它走 ──
+
+describe('播报：尖叫传染合并成一行、先挤安静的行（pushLine，FEEL-6）', () => {
+  type Row = TickerRow;
+  const rows = (...lines: [string, Row['tone'], number][]): Row[] =>
+    lines.map(([text, tone, born]) => ({ text, tone, born, fading: false, scream: null }));
+
+  it('尖叫传染那一行（startle、object 为 null）带着名字，好让播报合并', () => {
+    const w = createWorld({ seed: 5, autoSpawn: false });
+    const hugo = w.spawn({ name: 'Hugo' });
+    expect(hudLines({ type: 'startle', npc: hugo.id, object: null, amount: 7, scream: false }, w.state)).toEqual({
+      lines: [{ text: 'Hugo flinched at a scream', tone: 'quiet', scream: 'Hugo' }],
+      count: null,
+    });
+  });
+
+  it(`${TICKER.merge} 秒内的传染并成一行（改写同一行，名字用 STRINGS.names 连起来、不重复）；过了就另起一行`, () => {
+    const r: Row[] = [];
+    const a = pushLine(r, { text: 'Hugo flinched at a scream', tone: 'quiet', scream: 'Hugo' }, 10);
+    expect(a.added).not.toBeNull();
+    const b = pushLine(r, { text: 'Iris flinched at a scream', tone: 'quiet', scream: 'Iris' }, 10.5);
+    expect(b.merged).toBe(a.added);
+    expect(r.map((x) => x.text)).toEqual(['Hugo and Iris flinched at a scream']);
+    pushLine(r, { text: 'Hugo flinched at a scream', tone: 'quiet', scream: 'Hugo' }, 10.6);
+    pushLine(r, { text: 'Mia flinched at a scream', tone: 'quiet', scream: 'Mia' }, 10.7);
+    pushLine(r, { text: 'Sam flinched at a scream', tone: 'quiet', scream: 'Sam' }, 10.8);
+    expect(r.map((x) => x.text)).toEqual(['Hugo, Iris and 2 others flinched at a scream']);
+    const late = pushLine(r, { text: 'June flinched at a scream', tone: 'quiet', scream: 'June' }, 10 + TICKER.merge + 0.05);
+    expect(late.merged).toBeNull();
+    expect(r.map((x) => x.text)).toEqual(['Hugo, Iris and 2 others flinched at a scream', 'June flinched at a scream']);
+  });
+
+  it('别的行不合并（只合并传染）；正在淡出的传染行不再往里并', () => {
+    const r: Row[] = [];
+    pushLine(r, { text: 'Hugo flinched at a scream', tone: 'quiet', scream: 'Hugo' }, 0);
+    r[0].fading = true;
+    pushLine(r, { text: 'Iris flinched at a scream', tone: 'quiet', scream: 'Iris' }, 0.5);
+    pushLine(r, { text: 'Mia let themselves in', tone: 'quiet' }, 0.6);
+    pushLine(r, { text: 'Mia let themselves in', tone: 'quiet' }, 0.7);
+    expect(r.map((x) => x.text)).toEqual(['Hugo flinched at a scream', 'Iris flinched at a scream', 'Mia let themselves in', 'Mia let themselves in']);
+  });
+
+  it(`超过 ${TICKER.max} 行：先挤最旧的安静行（quiet）；scare、flee、exit 留到自然淡出；没有安静行才挤最旧的一行`, () => {
+    const r = rows(['a', 'scare', 0], ['b', 'quiet', 1], ['c', 'flee', 2], ['d', 'quiet', 3]);
+    expect(pushLine(r, { text: 'e', tone: 'exit' }, 4).evicted.map((x) => x.text)).toEqual(['b']);
+    expect(r.map((x) => x.text)).toEqual(['a', 'c', 'd', 'e']);
+    pushLine(r, { text: 'f', tone: 'scare' }, 5);
+    expect(r.map((x) => x.text)).toEqual(['a', 'c', 'e', 'f']);
+    pushLine(r, { text: 'g', tone: 'scare' }, 6);
+    expect(r.map((x) => x.text)).toEqual(['c', 'e', 'f', 'g']);
+    // 满是要紧的行时来一行安静的：它自己就是最旧的安静行，不进栏（要紧的不让位）
+    const q = pushLine(r, { text: 'h', tone: 'quiet' }, 7);
+    expect(q.evicted.map((x) => x.text)).toEqual(['h']);
+    expect(r.map((x) => x.text)).toEqual(['c', 'e', 'f', 'g']);
+  });
+
+  it('现身落下那一步（手感分析 E 段 f09d）：3 行「saw you in the dark」都在，传染并成 1 行；原来的 4 行进门先让开', () => {
+    const w = createWorld({ seed: 5, autoSpawn: false });
+    const [ezra, theo, june, nora, mia, hugo] = ['Ezra', 'Theo', 'June', 'Nora', 'Mia', 'Hugo'].map((name) => w.spawn({ name }));
+    const s = w.state;
+    const r: Row[] = [];
+    let now = 0;
+    for (const n of [ezra, theo, june, mia]) for (const l of hudLines({ type: 'spawn', npc: n.id }, s).lines) pushLine(r, l, (now += 0.5));
+    now += 1;
+    const step: SimEvent[] = [
+      { type: 'manifest', phase: 'drop', pos: { x: 8, z: 6 }, scared: [ezra.id, june.id, mia.id] },
+      { type: 'startle', npc: ezra.id, object: 'ghost', amount: 47, scream: true },
+      { type: 'startle', npc: june.id, object: 'ghost', amount: 34, scream: true },
+      { type: 'startle', npc: mia.id, object: 'ghost', amount: 34, scream: true },
+      { type: 'startle', npc: theo.id, object: null, amount: 7, scream: false },
+      { type: 'startle', npc: june.id, object: null, amount: 7, scream: false },
+      { type: 'startle', npc: nora.id, object: null, amount: 7, scream: false },
+      { type: 'startle', npc: hugo.id, object: null, amount: 7, scream: false },
+    ];
+    for (const e of step) for (const l of hudLines(e, s).lines) pushLine(r, l, now);
+    expect(r.map((x) => x.text)).toEqual([
+      'Ezra saw you in the dark',
+      'June saw you in the dark',
+      'Mia saw you in the dark',
+      'Theo, June and 2 others flinched at a scream',
+    ]);
+  });
+});
+
 // ── 鬼魂镜头的 hold（开场遮罩挂着时不收输入） ───────────────────────
 
 /** 假的 window / document / 画布：EventTarget 加上 createGhostRig、createPicker 会读的几个字段 */
@@ -551,6 +635,36 @@ describe('够不着（picking 判断：准星对着一个物件，但够不着�
     e.press();
     expect(e.picks).toEqual(['lamp-living']);
     expect(e.far).toEqual([]);
+  });
+
+  it('每帧把够不着的那个发给界面（GhostUi.aimFar，FEEL-7：标签写 Too far away.、准星外圈变虚线），不用等按下', () => {
+    let ui: { aim: string | null; aimFar: string | null } | null = null;
+    const off = watchGhostUi((s) => { ui = { aim: s.aim, aimFar: s.aimFar }; });
+    corridor(6);
+    runFrame();
+    expect(ui).toEqual({ aim: null, aimFar: 'lamp-living' });
+    off();
+  });
+
+  it('够得着（2.5 米）：aim 是它，aimFar 为 null；拾取器收起时两个都清掉', () => {
+    let ui: { aim: string | null; aimFar: string | null } | null = null;
+    const off = watchGhostUi((s) => { ui = { aim: s.aim, aimFar: s.aimFar }; });
+    corridor(2.5);
+    runFrame();
+    expect(ui).toEqual({ aim: 'lamp-living', aimFar: null });
+    for (const p of live.splice(0)) p.dispose();
+    expect(ui).toEqual({ aim: null, aimFar: null });
+    off();
+  });
+
+  it('开场遮罩挂着（held）：够不着的也不发（准星还没出来）', () => {
+    let far: string | null | undefined;
+    const off = watchGhostUi((s) => { far = s.aimFar; });
+    corridor(6);
+    setGhostUi({ held: true });
+    runFrame();
+    expect(far).toBeNull();
+    off();
   });
 
   it('开场遮罩挂着（held）：不悬停、不附身，也不回应够不着', () => {

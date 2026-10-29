@@ -6,13 +6,22 @@
 // 镜头差不多平视，标记改挂在每种物件的顶上（俯视时统一 1.2 米就够了）
 // 机关（2026-10-28）：设下了的物件（armed > 0），眼睛换成空心的，不管有没有人看着它都亮着（只有玩家看得到的提示）
 // 悬停标签的第二行说实话（2026-10-30 试玩报告 P1-2 a，见 tipState）：惊吓类写谁在看着它 / 没人看着，和眼睛说的是同一件事
+// 瞄准和反馈（2026-10-30 手感分析，用户：「不知道在什么范围内可以吓到他」）：
+// - FEEL-1 名牌上的小眼睛：名字前面一只和物件上同一个图形的眼睛，亮着 = 这个人会被你下一个动作影响（pendingAct：准星 / 手指对着的物件，
+//   没对着物件时是在鬼魂所在处现身）。谁会被影响按 sim/reach.ts 的 reachOf 算，规则照搬结算；每 REACH_EVERY 秒算一次。
+//   物件在冷却中时眼睛是灰的（人在范围里，但还不能出手）。现身蓄力、停留、冷却时不亮；收夜以后的静场、光收回、登记簿那几段屋里没人，自然没有
+// - FEEL-3 结果写在准星对着的地方：附身以后准星还对着它时，标签第二行先报结果（谁跳了、谁听见了、没人看见），停 OUTCOME.hold 秒再回到冷却秒数
+// - FEEL-7 够不着：准星对着 4–10 米外看得见的物件（拾取器发的 GhostUi.aimFar），标签写名字和 Too far away.
 import { CHARACTER } from '../config/character';
 import { SCARES } from '../config/scares';
 import { STRINGS } from '../config/strings';
 import { FEAR } from '../config/visitors';
-import { ghostSees } from '../engine/ghostRig';
+import { ghostSees, watchGhostUi } from '../engine/ghostRig';
 import { isGhostRig, type CameraRig, type FrameCtx, type Module } from '../engine/types';
-import type { NpcState, ScareObjectState, ScareType, Vec2 } from '../sim/types';
+import { Grid } from '../sim/grid';
+import { reachOf, type ReachAct } from '../sim/reach';
+import type { ManifestState, NpcState, ScareObjectState, ScareType, SimEvent, Vec2, WorldState } from '../sim/types';
+import { createMissWatch } from '../ui/hints';
 
 /** 名牌、物件标记离地多高（米）——计划 Task 7 */
 const PLATE_Y = 1.45;
@@ -43,6 +52,13 @@ const RING_R = 13;
 const RING_C = 2 * Math.PI * RING_R;
 /** 悬停标签离屏幕边缘至少留多少像素 */
 const EDGE = 8;
+/** 名牌上的小眼睛（FEEL-1）：多久算一次「此刻待出手的动作会影响谁」（秒）。对准的物件变了立刻重算，不等这一下 */
+const REACH_EVERY = 0.1;
+/**
+ * 结果（FEEL-3）：停多久（秒，真实时间）。有人：从最后一个名字算起（每多一个名字从头计时）；没人：从生效窗口结束算起。
+ * 之后回到冷却秒数
+ */
+export const OUTCOME = { hold: 1.6 };
 
 const BONE = [220, 210, 189];
 const EMBER = [255, 122, 26];
@@ -75,22 +91,45 @@ const div = (cls: string, parent: HTMLElement) => {
 };
 const at = (x: number, y: number) => `translate3d(${Math.round(x)}px,${Math.round(y)}px,0)`;
 
-/** 悬停标签第二行的口气：ready 幽绿小型大写（现在出手正好）、unseen 灰烬色小型大写（没人看着）、cooling 秒数、armed 机关 */
-export type TipTone = 'ready' | 'unseen' | 'cooling' | 'armed';
+/**
+ * 悬停标签第二行的口气：ready 幽绿小型大写（现在出手正好）、unseen 灰烬色小型大写（没人看着 / 没人看见）、cooling 秒数、armed 机关、
+ * outcome 骨白小型大写（结果：谁跳了、谁听见了）、far 灰烬色斜体（够不着）
+ */
+export type TipTone = 'ready' | 'unseen' | 'cooling' | 'armed' | 'outcome' | 'far';
+
+/** 一次附身的结果（createOutcomeWatch 给）：被吓到 / 听见的人的名字，空 = 生效窗口结束都没人 */
+export interface Outcome {
+  names: readonly string[];
+}
 
 /**
  * 悬停标签的第二行（2026-10-30「标签说实话」）。原来惊吓类物件只要不在冷却就写幽绿的 Ready，没人看着时点下去白白落空，
  * Ready 还和「有人看着」的那只绿眼睛同一个颜色。现在：
+ * - 刚附身过、结果还挂着（opts.outcome，FEEL-3）：先报结果——惊吓类「Theo jumped」、引诱类「Theo and Mia heard it」（骨白），
+ *   没人写 No one saw it / No one heard it（灰烬色）。冷却中也是它先，过了 OUTCOME.hold 秒才回到秒数
+ * - 够不着（opts.far，FEEL-7：准星对着 4–10 米外的它）：Too far away.（灰烬色）。冷却中、设了机关也这么写：从这里点不了
  * - 设了机关：Trap set（这时点一下附身会把机关用掉）；冷却中：剩几秒。这两种和原来一样，有没有人看着都这么写
  * - 引诱类：Ready（引诱靠声音，模拟不给它算谁看得见）
  * - 惊吓类：有人看着写「Theo is watching」，几个人写「Theo and one other / others are watching」（名字取 seenBy 里的第一个，
  *   也就是先进门的那位，人走动时名字不来回换）；没人看着写 No one is watching。
  *   只认名单上还在的人（seenBy 是模拟这一步算的，名字从 npcs 里找）；天亮自己往外走（leaving）的人看着它也照常写，他只是在看
  */
-export function tipState(o: ScareObjectState, npcs: readonly NpcState[]): { text: string; tone: TipTone } {
+export function tipState(
+  o: ScareObjectState,
+  npcs: readonly NpcState[],
+  opts: { outcome?: Outcome | null; far?: boolean } = {},
+): { text: string; tone: TipTone } {
+  const lure = SCARES[o.type].kind === 'lure';
+  const out = opts.outcome;
+  if (out) {
+    if (out.names.length === 0) return { text: lure ? STRINGS.outcome.noneHeard : STRINGS.outcome.noneSaw, tone: 'unseen' };
+    const who = STRINGS.names(out.names);
+    return { text: lure ? STRINGS.outcome.heard(who) : STRINGS.outcome.jumped(who), tone: 'outcome' };
+  }
+  if (opts.far) return { text: STRINGS.onboarding.refused.tooFar, tone: 'far' };
   if (o.armed > 0) return { text: STRINGS.trapSet, tone: 'armed' };
   if (o.cooldown > 0) return { text: STRINGS.cooldown(o.cooldown), tone: 'cooling' };
-  if (SCARES[o.type].kind === 'lure') return { text: STRINGS.ready, tone: 'ready' };
+  if (lure) return { text: STRINGS.ready, tone: 'ready' };
   let first: string | null = null;
   let count = 0;
   for (const id of o.seenBy) {
@@ -101,6 +140,88 @@ export function tipState(o: ScareObjectState, npcs: readonly NpcState[]): { text
   }
   if (first === null) return { text: STRINGS.onboarding.noOneWatching, tone: 'unseen' };
   return { text: count === 1 ? STRINGS.onboarding.watching(first) : STRINGS.onboarding.watchingMany(first, count - 1), tone: 'ready' };
+}
+
+/**
+ * 此刻待出手的动作（FEEL-1，名牌上的小眼睛按它亮）：准星 / 手指对着够得着的物件（hover）就是附身它；
+ * 没对着物件、有鬼魂（第三人称）、现身就绪（idle、冷却为 0）时是在鬼魂所在处现身；别的时候（现身蓄力、停留、冷却中，娃娃屋没悬停）没有。
+ * 准星对着够不着的物件时 hover 是 null：那一下点不了，能出手的仍然只有现身，眼睛照旧按现身亮
+ */
+export function pendingAct(hover: string | null, ghost: Vec2 | null, m: ManifestState): ReachAct | null {
+  if (hover) return { kind: 'object', id: hover };
+  if (ghost && m.phase === 'idle' && m.cooldown <= 0) return { kind: 'manifest', at: { x: ghost.x, z: ghost.z } };
+  return null;
+}
+
+/**
+ * 附身的结果（FEEL-3）：谁被吓到（惊吓类的 startle）、谁听见（引诱类的 heard），或者生效窗口结束都没人。
+ * 用法同主循环：每个事件 onEvent，这一帧的事件都分发完以后 settle；current 给标签用。时间 now 是真实时间（秒）。
+ * - 惊吓类「没人看见」直接用 OB 的 createMissWatch（生效窗口结束都没有这个物件的 startle；机关自己发作的那一下不算）
+ * - 引诱类在触发后的第一步结算（world.ts）：settle 时模拟时间比触发那一刻往前走过了就算结算完；没人听见就是 No one heard it。
+ *   这一帧模拟没走（帧率高于 60、hit-stop）就再等一帧，不急着说没人
+ * - 机关自己发作的那一下，吓到人照写，没吓到人不写（同 createMissWatch）
+ */
+export function createOutcomeWatch(hold = OUTCOME.hold) {
+  const misses = createMissWatch();
+  /** 刚发作的机关：紧跟着的那个 trigger 是它的 */
+  const sprung = new Set<string>();
+  /** 物件 id → 这一次附身：lure 引诱类；ids / names 吓到 / 听见的人；at 最近一次有新内容的时刻；none 窗口结束都没人；open 窗口还开着 */
+  const recs = new Map<string, { lure: boolean; ids: number[]; names: string[]; at: number; none: boolean; open: boolean; simAt: number; trap: boolean }>();
+  /** 上一次 settle 时的模拟时间：引诱看它判断结算了没有 */
+  let sim = 0;
+  return {
+    onEvent(e: SimEvent, s: Readonly<WorldState>, now: number): void {
+      misses.onEvent(e);
+      if (e.type === 'trap') {
+        if (e.phase === 'sprung') sprung.add(e.object);
+      } else if (e.type === 'trigger') {
+        const lure = SCARES[e.scareType].kind === 'lure';
+        recs.set(e.object, { lure, ids: [], names: [], at: -Infinity, none: false, open: true, simAt: sim, trap: sprung.delete(e.object) });
+      } else if ((e.type === 'startle' || e.type === 'heard') && e.object !== null) {
+        const r = recs.get(e.object);
+        if (!r || r.lure !== (e.type === 'heard') || r.ids.includes(e.npc)) return;
+        const name = s.npcs.find((n) => n.id === e.npc)?.name;
+        if (name === undefined) return;
+        r.ids.push(e.npc);
+        r.names.push(name);
+        r.at = now;
+      }
+    },
+    settle(s: Readonly<WorldState>, now: number): void {
+      for (const m of misses.settle(s.objects)) {
+        const r = recs.get(m.object);
+        if (r && r.ids.length === 0) {
+          r.none = true;
+          r.at = now;
+        }
+      }
+      for (const [id, r] of recs) {
+        if (r.open) {
+          if (!r.lure) r.open = (s.objects.find((o) => o.id === id)?.active ?? 0) > 0;
+          else if (s.time > r.simAt + 1e-9) {
+            r.open = false;
+            if (r.ids.length === 0 && !r.trap) {
+              r.none = true;
+              r.at = now;
+            }
+          }
+        }
+        if (!r.open && now - r.at >= hold) recs.delete(id);
+      }
+      sim = s.time;
+    },
+    /** 物件 id 此刻要报的结果；没有（没附身过、窗口里还没人、已经报完了）为 null */
+    current(id: string, now: number): Outcome | null {
+      const r = recs.get(id);
+      if (!r || now - r.at >= hold || (r.ids.length === 0 && !r.none)) return null;
+      return { names: r.names };
+    },
+    /** 物件 id 附身过、结果还没报完（生效窗口还开着，或者结果还挂着） */
+    pending(id: string, now: number): boolean {
+      const r = recs.get(id);
+      return r !== undefined && (r.open || now - r.at < hold);
+    },
+  };
 }
 
 /**
@@ -132,6 +253,9 @@ interface Plate {
   w: number;
   /** 为了不和别的名牌重叠而上移的距离（平滑追赶目标值） */
   lift: number;
+  /** 名字前面的小眼睛（FEEL-1）：这个人会被下一个动作影响（is-reach）；物件还在冷却（is-cool，眼睛灰的）。只在变化时写类名 */
+  reach: boolean;
+  cool: boolean;
 }
 
 interface Mark {
@@ -155,6 +279,17 @@ export function createOverlays(
 ): Module & { setHover(id: string | null): void; setHidden(hidden: boolean): void } {
   root.classList.add('ov');
   const ghost = isGhostRig(rig) ? rig.ghost : null;
+  /** 名牌上的小眼睛（FEEL-1）按模拟同一张格子图算视线、听觉（只读，格子只和布局有关） */
+  const grid = new Grid();
+  /** 准星此刻对着的够不着的物件（FEEL-7，拾取器每帧发）；第三人称才有 */
+  let farId: string | null = null;
+  const unwatchUi = watchGhostUi((s) => {
+    farId = s.aimFar;
+  });
+  /** 附身的结果（FEEL-3） */
+  const outcomes = createOutcomeWatch();
+  /** 最近一帧的真实时间：事件在 update 之前分发，按它记 */
+  let now = 0;
   const plateY = ghost ? GHOST_PLATE_Y : PLATE_Y;
   const markY = (o: ScareObjectState) => (ghost ? GHOST_MARK_Y[o.type] : MARK_Y);
   /**
@@ -177,6 +312,8 @@ export function createOverlays(
     const el = div('ov-plate', root);
     const inner = div('ov-plate-in', el);
     const line = div('ov-plate-name', inner);
+    // 名字前面的小眼睛（FEEL-1）：和物件上的眼睛同一个图形；平时 scaleY(0) 收着，占位不变（名牌宽度只在进门时量一次，之后不跳）
+    line.innerHTML = `<svg class="ov-plate-mark" viewBox="0 0 24 14" aria-hidden="true" focusable="false">${EYE_SOLID}</svg>`;
     const name = document.createElement('span');
     name.className = 'ov-name';
     const tag = document.createElement('span');
@@ -186,7 +323,7 @@ export function createOverlays(
     const fill = div('ov-bar-fill', bar);
     // 「紧张」门槛的刻度：过了这条线访客走得更快、手电发抖
     div('ov-bar-tick', bar).style.left = `${(FEAR.nervous / FEAR.max) * 100}%`;
-    return { el, inner, fade: 1, name, tag, fill, shown: 0, color: '', fleeing: false, frame: -1, w: 0, lift: 0 };
+    return { el, inner, fade: 1, name, tag, fill, shown: 0, color: '', fleeing: false, frame: -1, w: 0, lift: 0, reach: false, cool: false };
   };
 
   const acquire = (n: NpcState): Plate => {
@@ -196,7 +333,8 @@ export function createOverlays(
     p.shown = n.fear;
     p.color = '';
     p.fleeing = false;
-    p.el.classList.remove('is-fleeing');
+    p.reach = p.cool = false;
+    p.el.classList.remove('is-fleeing', 'is-reach', 'is-cool');
     p.el.classList.add('is-on');
     // 只在访客进门时读一次布局：名字定了宽度就不变，之后每帧只改 transform
     const box = (p.el.firstElementChild as HTMLElement).getBoundingClientRect();
@@ -232,6 +370,12 @@ export function createOverlays(
   card.append(tipName, tipStateEl);
   div('ov-tip-string', tipIn);
   let hoverId: string | null = null;
+  /**
+   * 触屏（娃娃屋、没有精确指针）：轻点附身以后手指抬起 1.5 秒悬停就收了（picking.ts 的 TOUCH_HOVER_MS），台灯的生效窗口正好 1.5 秒，
+   * 「No one saw it」永远来不及出来。所以刚点过的那个物件，结果报完之前标签留着（FEEL-3 在手机上的样子）。鼠标的悬停照常跟着鼠标走
+   */
+  const touch = !ghost && typeof matchMedia === 'function' && !matchMedia('(pointer: fine)').matches;
+  let stickId: string | null = null;
   // classList.add / remove 即使类名没变也会改写属性，所以显隐状态自己记着，只在变化时写
   let tipShown = false;
   const showTip = (on: boolean) => {
@@ -252,6 +396,23 @@ export function createOverlays(
   let frame = 0;
   /** 名牌内容的高度（像素），第一次 acquire 时量到 */
   let plateH = 26;
+
+  // ── 名牌上的小眼睛（FEEL-1）：此刻待出手的动作会影响谁 ───────────────────
+  /** 会被影响的访客 id；reachCool = 那个动作是附身一个还在冷却的物件（眼睛灰的） */
+  let reachIds = new Set<number>();
+  let reachCool = false;
+  let reachTimer = Infinity;
+  /** 上一次算的时候对准的是哪个物件：变了立刻重算 */
+  let reachHover: string | null = null;
+  const updateReach = (state: WorldState, dt: number) => {
+    reachTimer += dt;
+    if (reachTimer < REACH_EVERY && hoverId === reachHover) return;
+    reachTimer = 0;
+    reachHover = hoverId;
+    const act = pendingAct(hoverId, ghost, state.manifest);
+    reachIds = new Set(act ? reachOf(grid, state, act) : []);
+    reachCool = act?.kind === 'object' && (state.objects.find((o) => o.id === act.id)?.cooldown ?? 0) > 0;
+  };
   const placed: { x: number; y: number; w: number }[] = [];
   const pending: { p: Plate; x: number; y: number }[] = [];
 
@@ -308,6 +469,16 @@ export function createOverlays(
         p.fleeing = fleeing;
         p.el.classList.toggle('is-fleeing', fleeing);
       }
+      const reach = reachIds.has(n.id);
+      if (reach !== p.reach) {
+        p.reach = reach;
+        p.el.classList.toggle('is-reach', reach);
+      }
+      const cool = reach && reachCool;
+      if (cool !== p.cool) {
+        p.cool = cool;
+        p.el.classList.toggle('is-cool', cool);
+      }
     }
     layoutPlates(dt);
     // 这一帧没被用到的名牌：访客已经离开，收回池子
@@ -361,14 +532,19 @@ export function createOverlays(
   };
 
   const updateTip = (objects: ScareObjectState[], npcs: NpcState[]) => {
-    const o = hoverId ? objects.find((x) => x.id === hoverId) : undefined;
+    // 准星对着够得着的物件（hoverId）；没有的话，第三人称准星对着 4–10 米外看得见的物件（farId，FEEL-7）：写名字和 Too far away.
+    const far = !hoverId && ghost !== null && farId !== null;
+    if (stickId && (hoverId || !outcomes.pending(stickId, now))) stickId = null;
+    const id = hoverId ?? (far ? farId : stickId);
+    const o = id ? objects.find((x) => x.id === id) : undefined;
     const s = o ? rig.toScreen(o.pos, markY(o)) : null;
     if (!o || !s || !Number.isFinite(s.x) || !Number.isFinite(s.y)) {
       showTip(false);
       return;
     }
     const name = STRINGS.propName[o.type];
-    const st = tipState(o, npcs);
+    // 刚附身过、结果还挂着（FEEL-3）：第二行先报结果
+    const st = tipState(o, npcs, { outcome: outcomes.current(o.id, now), far });
     let measure = false;
     if (name !== tipNameText) {
       tipNameText = name;
@@ -384,6 +560,8 @@ export function createOverlays(
       tipTone = st.tone;
       tip.classList.toggle('is-ready', st.tone === 'ready');
       tip.classList.toggle('is-unseen', st.tone === 'unseen');
+      tip.classList.toggle('is-outcome', st.tone === 'outcome');
+      tip.classList.toggle('is-far', st.tone === 'far');
       measure = true;
     }
     showTip(true);
@@ -400,13 +578,20 @@ export function createOverlays(
   };
 
   return {
-    update({ dt, state }: FrameCtx) {
+    update({ dt, time, state }: FrameCtx) {
       frame++;
+      now = time;
+      outcomes.settle(state, time);
+      updateReach(state, dt);
       updatePlates(state.npcs, dt);
       updateMarks(state.objects);
       updateTip(state.objects, state.npcs);
     },
+    onEvent(e: SimEvent, state: WorldState) {
+      outcomes.onEvent(e, state, now);
+    },
     setHover(id) {
+      if (touch && !id && hoverId) stickId = hoverId;
       hoverId = id;
     },
     // 电影段落（吓跑黑边）期间整层淡出：名牌、眼睛、冷却圆环、悬停标签都先让开
@@ -415,6 +600,7 @@ export function createOverlays(
     },
     dispose() {
       removeEventListener('resize', onResize);
+      unwatchUi();
       root.replaceChildren();
       root.classList.remove('ov');
       plates.clear();

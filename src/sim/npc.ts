@@ -348,7 +348,18 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
   return npc;
 }
 
-export const canBeScared = (n: Npc) => n.s.mode !== 'fleeing' && n.s.mode !== 'gone';
+/**
+ * 能不能被吓：逃跑中、已离开的不算。只看 n.s，所以参数只要 { s }——画面那边（sim/reach.ts「这一下会吓到谁」）拿着 NpcState
+ * 也能直接问，不用假装成整个 Npc；以后这里要读 Npc 别的字段，类型会逼着调用处一起改
+ */
+export const canBeScared = (n: Pick<Npc, 's'>) => n.s.mode !== 'fleeing' && n.s.mode !== 'gone';
+
+/**
+ * 能不能察觉（notice 那一拍的门槛）：能被吓、不在受惊僵着、不是天亮往外走（leaving：心里只有出门）。
+ * 正在察觉的来源优先级更高时不接管，那一条看来源的种类，在 notice 里。
+ * sim/reach.ts 用它判断「现身蓄力时这个人会不会转过来」，和结算是同一条规则
+ */
+export const canNotice = (n: Pick<Npc, 's'>) => canBeScared(n) && n.s.mode !== 'startled' && n.s.mode !== 'leaving';
 
 /**
  * 天亮要走的人（leaving；受惊僵住前是 leaving 的也算）：心里只有出门，不理会声音、不察觉、不后退，
@@ -466,7 +477,7 @@ function listen(npc: Npc, ctx: NpcCtx, amount: number, source: Vec2, event: SimE
  */
 export function notice(npc: Npc, ctx: NpcCtx, kind: NoticeKind, src: Vec2, hold?: number): boolean {
   const s = npc.s;
-  if (!canBeScared(npc) || s.mode === 'startled' || s.mode === 'leaving') return false;
+  if (!canNotice(npc)) return false;
   const cur = s.notice;
   if (cur && NOTICE.priority[kind] < NOTICE.priority[cur.kind]) return false;
   // 接着上一次察觉（或者还没转回去）时，记的仍是最早的朝向

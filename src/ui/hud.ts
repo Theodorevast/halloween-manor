@@ -11,6 +11,9 @@
 // - 触屏：按钮写 Tap to begin、标题页提示多半句怎么点；竖屏时标题页和开场各说一句「把手机横过来」
 // 天亮自己走的人（exit 带 calm，2026-10-30「一夜」）：播报写 walked out into the morning（安静的灰字），不跳计数；
 // 收夜时最后再来的那一位（spawn 带 last）不播进门那一行（收夜的控制器播 lastArrival）
+// 瞄准和反馈（2026-10-30 手感分析）：
+// - FEEL-6 播报不让尖叫传染把正事挤掉：同一阵的传染并成一行（Hugo and Iris flinched at a scream），满了先挤安静的行（pushLine）
+// - FEEL-7 准星对着够不着的物件（GhostUi.aimFar）：外圈变虚线
 import { STRINGS } from '../config/strings';
 import { watchGhostUi } from '../engine/ghostRig';
 import type { FrameCtx, Module, Quality } from '../engine/types';
@@ -38,10 +41,11 @@ export interface Hud extends Module {
   say(text: string, tone?: 'quiet' | 'scare'): void;
 }
 
-/** 播报最多几条、每条停留多久、淡出多久（秒）——计划 Task 7 */
-const TICKER_MAX = 4;
-const TICKER_LIFE = 6;
-const TICKER_FADE = 1.2;
+/**
+ * 播报最多几条（max）、每条停留多久（life）、淡出多久（fade，秒）——计划 Task 7；
+ * 尖叫传染在 merge 秒内并成一行（2026-10-30 手感分析 FEEL-6，见 pushLine）
+ */
+export const TICKER = { max: 4, life: 6, fade: 1.2, merge: 1.2 };
 /** 开场遮罩淡出（秒），和 styles.css 里 .hud-start 的 transition 一致 */
 const START_FADE = 0.8;
 /**
@@ -103,10 +107,17 @@ const TEMPLATE = `
   </div>
 </div>`;
 
-type Tone = 'quiet' | 'scare' | 'flee' | 'exit';
+export type Tone = 'quiet' | 'scare' | 'flee' | 'exit';
+
+/** 播报的一行：文字、口气；尖叫传染那一行另带被传染的人的名字（scream），播报栏据此把同一阵的传染并成一行 */
+export interface TickerLine {
+  text: string;
+  tone: Tone;
+  scream?: string;
+}
 
 /** 播报文案：名字从 state.npcs 里按 id 找（exit 自带名字），物件名用 STRINGS.propName */
-function tickerLine(e: SimEvent, s: WorldState): { text: string; tone: Tone } | null {
+function tickerLine(e: SimEvent, s: WorldState): TickerLine | null {
   const who = (id: number) => s.npcs.find((n) => n.id === id)?.name;
   const prop = (id: string) => {
     const o = s.objects.find((x) => x.id === id);
@@ -126,7 +137,7 @@ function tickerLine(e: SimEvent, s: WorldState): { text: string; tone: Tone } | 
     case 'startle': {
       const n = who(e.npc);
       if (!n) return null;
-      if (e.object === null) return { text: STRINGS.ticker.startleScream(n), tone: 'quiet' };
+      if (e.object === null) return { text: STRINGS.ticker.startleScream(n), tone: 'quiet', scream: n };
       const p = prop(e.object);
       return p ? { text: STRINGS.ticker.startle(n, p), tone: 'scare' } : null;
     }
@@ -153,10 +164,10 @@ function tickerLine(e: SimEvent, s: WorldState): { text: string; tone: Tone } | 
  * 现身落下：被吓到的每人一行（同一步的 startle 是 object = 'ghost'，tickerLine 不播）；
  * 出门：被吓跑的计数跳到 total、数字压印一下；天亮自己走的（calm）不算吓跑，计数不动
  */
-export function hudLines(e: SimEvent, s: WorldState): { lines: { text: string; tone: Tone }[]; count: number | null } {
+export function hudLines(e: SimEvent, s: WorldState): { lines: TickerLine[]; count: number | null } {
   if (e.type === 'manifest') {
     if (e.phase !== 'drop') return { lines: [], count: null };
-    const lines: { text: string; tone: Tone }[] = [];
+    const lines: TickerLine[] = [];
     for (const id of e.scared) {
       const n = s.npcs.find((x) => x.id === id)?.name;
       if (n) lines.push({ text: STRINGS.ticker.seen(n), tone: 'scare' });
@@ -165,6 +176,61 @@ export function hudLines(e: SimEvent, s: WorldState): { lines: { text: string; t
   }
   const l = tickerLine(e, s);
   return { lines: l ? [l] : [], count: e.type === 'exit' && !e.calm ? e.total : null };
+}
+
+/** 播报栏里的一行（数据；hud.ts 另记它对应的 <li>）：fading = 已经在淡出；scream = 尖叫传染那一行：并进来的名字、还能并到什么时候 */
+export interface TickerRow {
+  text: string;
+  tone: Tone;
+  born: number;
+  fading: boolean;
+  scream: { names: string[]; until: number } | null;
+}
+
+/** 尖叫传染的那一行（scream 不为 null） */
+type ScreamRow = TickerRow & { scream: NonNullable<TickerRow['scream']> };
+
+/** 尖叫传染那一行（line.scream）要并进哪一行：TICKER.merge 秒内开的、还没淡出的传染行；别的行、没有可并的，null */
+export function mergeTarget(rows: readonly TickerRow[], line: TickerLine, now: number): ScreamRow | null {
+  if (line.scream === undefined) return null;
+  for (let k = rows.length - 1; k >= 0; k--) {
+    const r = rows[k];
+    if (r.scream && !r.fading && now <= r.scream.until) return r as ScreamRow;
+  }
+  return null;
+}
+
+/**
+ * 播报栏加一行（2026-10-30 手感分析 FEEL-6：现身落下那一步，3 行 saw you in the dark 被同一步的 4 行尖叫传染挤掉了）。
+ * 纯函数，原地改 rows（tests/hints.test.ts 直接测），返回 DOM 要做的事：
+ * - 尖叫传染那一行（line.scream）：TICKER.merge 秒内开的、还没淡出的传染行还在，就并进去——改写同一行，
+ *   名字用 STRINGS.names 连起来（Hugo and Iris flinched at a scream），套原来的 STRINGS.ticker.startleScream，不加新句子
+ * - 否则新起一行；超过 TICKER.max 行时先挤最旧的安静行（quiet），没有安静行才挤最旧的一行。
+ *   scare、flee、exit 这些要紧的行留到自然淡出；满是要紧的行时新来的安静行自己就是最旧的安静行，不进栏
+ */
+export function pushLine(rows: TickerRow[], line: TickerLine, now: number): { merged: TickerRow | null; added: TickerRow | null; evicted: TickerRow[] } {
+  const into = mergeTarget(rows, line, now);
+  if (into && line.scream !== undefined) {
+    if (!into.scream.names.includes(line.scream)) {
+      into.scream.names.push(line.scream);
+      into.text = STRINGS.ticker.startleScream(STRINGS.names(into.scream.names));
+    }
+    return { merged: into, added: null, evicted: [] };
+  }
+  const added: TickerRow = {
+    text: line.text,
+    tone: line.tone,
+    born: now,
+    fading: false,
+    scream: line.scream !== undefined ? { names: [line.scream], until: now + TICKER.merge } : null,
+  };
+  rows.push(added);
+  const evicted: TickerRow[] = [];
+  while (rows.length > TICKER.max) {
+    const k = rows.findIndex((r) => r.tone === 'quiet');
+    evicted.push(...rows.splice(k < 0 ? 0 : k, 1));
+  }
+  return { merged: null, added: rows.includes(added) ? added : null, evicted };
 }
 
 /**
@@ -231,7 +297,9 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   let now = 0;
   let count = -1;
   let hideTimer = 0;
-  const lines: { li: HTMLLIElement; born: number; fading: boolean }[] = [];
+  /** 播报栏里的行（合并、挤出的判断在 pushLine）和它们的 <li> */
+  const rows: TickerRow[] = [];
+  const liOf = new Map<TickerRow, HTMLLIElement>();
   /** 附身落空：判断见 hints.ts 的 createMissWatch；播报过几次 */
   const misses = createMissWatch();
   let missedSaid = 0;
@@ -274,7 +342,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   }
 
   // ── 第三人称：准星、操作提示、「点一下继续」 ─────────────────────
-  const ghost = { active: false, engaged: false, locked: false, pending: false, aiming: false, cool: 0 };
+  const ghost = { active: false, engaged: false, locked: false, pending: false, aiming: false, far: false, cool: 0 };
   let resumeOn = false;
   // toggle 带第二个参数时，类名没变就不写属性，状态变化时整体刷一遍即可
   function refreshGhost() {
@@ -282,6 +350,8 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     left.hidden = right.hidden = ghost.active;
     aim.classList.toggle('is-on', live && ghost.locked);
     aim.classList.toggle('is-aiming', live && ghost.locked && ghost.aiming);
+    // 够不着（2026-10-30 手感分析 FEEL-7）：准星对着 4–10 米外看得见的物件，外圈浮出来但是虚线（styles.css 的 .hud-aim.is-far）
+    aim.classList.toggle('is-far', live && ghost.locked && !ghost.aiming && ghost.far);
     cool.classList.toggle('is-on', live && ghost.locked && ghost.cool > 0);
     const r = live && ghost.engaged && !ghost.locked && !ghost.pending;
     if (r === resumeOn) return;
@@ -353,6 +423,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     ghost.locked = s.locked;
     ghost.pending = s.pending;
     ghost.aiming = s.aim !== null;
+    ghost.far = s.aimFar !== null;
     // 现身的冷却环：剩多少画多少（一段弧），用完了淡出（淡出时弧停在最后的长度，不跳）
     if (s.manifestCooldown > 0) cool.style.setProperty('--cool', s.manifestCooldown.toFixed(3));
     ghost.cool = s.manifestCooldown;
@@ -424,20 +495,41 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   setCount(0, false);
 
   // ── 播报 ────────────────────────────────────────────
-  const push = (text: string, tone: Tone) => {
+  const push = (line: TickerLine) => {
+    // 改之前每一行在屏幕上的位置：挤掉的可能是中间那一行（先挤安静的），之后每一行各自从原来的位置滑到新位置（FLIP）。
+    // 并进已有那一行的（一阵传染同一帧来好几个）只改字、不推栏，不用量
+    const animate = !reduced.matches && !mergeTarget(rows, line, now);
+    const before = animate ? new Map(rows.map((r) => [r, liOf.get(r)?.getBoundingClientRect().top ?? 0])) : null;
+    const { merged, added, evicted } = pushLine(rows, line, now);
+    if (merged) {
+      // 尖叫传染并进同一行：只改字，不推栏
+      const li = liOf.get(merged);
+      if (li) li.textContent = merged.text;
+      return;
+    }
+    for (const r of evicted) {
+      liOf.get(r)?.remove();
+      liOf.delete(r);
+    }
+    if (!added) return;
     const li = document.createElement('li');
-    li.className = `hud-line is-${tone}`;
-    li.textContent = text;
+    li.className = `hud-line is-${added.tone}`;
+    li.textContent = added.text;
     ticker.append(li);
-    lines.push({ li, born: now, fading: false });
-    while (lines.length > TICKER_MAX) lines.shift()!.li.remove();
-    if (!reduced.matches) {
-      // 整栏从下往上推一行（底部对齐，最旧的一条在顶上被移走时不会跳）
-      ticker.animate([{ transform: `translateY(${li.offsetHeight}px)` }, { transform: 'none' }], {
-        duration: 320,
-        easing: 'cubic-bezier(.2,.7,.2,1)',
-      });
-      li.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 420, easing: 'ease-out' });
+    liOf.set(added, li);
+    if (!animate || !before) return;
+    // 新的一行从下面推上来、淡入；原有的行从原来的位置滑过去（底部对齐：一般是整栏往上推一行，挤掉中间一行时它上面的不动）
+    const ease = { duration: 320, easing: 'cubic-bezier(.2,.7,.2,1)' };
+    for (const r of rows) {
+      const el = liOf.get(r);
+      if (!el) continue;
+      if (r === added) {
+        el.animate([{ transform: `translateY(${el.offsetHeight}px)` }, { transform: 'none' }], ease);
+        el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 420, easing: 'ease-out' });
+        continue;
+      }
+      const d = (before.get(r) ?? 0) - el.getBoundingClientRect().top;
+      if (Math.abs(d) > 0.5) el.animate([{ transform: `translateY(${d}px)` }, { transform: 'none' }], ease);
     }
   };
 
@@ -468,7 +560,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     },
     setQuality: setQualityUi,
     say(text, tone = 'quiet') {
-      push(text, tone);
+      push({ text, tone });
     },
     setReady(r) {
       ready = r;
@@ -481,7 +573,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     onEvent(e, state) {
       misses.onEvent(e);
       const { lines: out, count: n } = hudLines(e, state);
-      for (const l of out) push(l.text, l.tone);
+      for (const l of out) push(l);
       if (n !== null) setCount(n, true);
     },
     update(ctx: FrameCtx) {
@@ -491,20 +583,21 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
       for (const m of misses.settle(ctx.state.objects)) {
         if (missedSaid >= MISSED_LINES) break;
         missedSaid++;
-        push(STRINGS.onboarding.missed(STRINGS.propName[m.type]), 'quiet');
+        push({ text: STRINGS.onboarding.missed(STRINGS.propName[m.type]), tone: 'quiet' });
       }
       // 计数以事件为准；万一漏了事件（调试快进等），从 state 补上，只增不减
       if (ctx.state.scaredOff > count) setCount(ctx.state.scaredOff, false);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const l = lines[i];
-        const age = now - l.born;
-        if (!l.fading && age > TICKER_LIFE) {
-          l.fading = true;
-          l.li.classList.add('is-fading');
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const r = rows[i];
+        const age = now - r.born;
+        if (!r.fading && age > TICKER.life) {
+          r.fading = true;
+          liOf.get(r)?.classList.add('is-fading');
         }
-        if (age > TICKER_LIFE + TICKER_FADE) {
-          l.li.remove();
-          lines.splice(i, 1);
+        if (age > TICKER.life + TICKER.fade) {
+          liOf.get(r)?.remove();
+          liOf.delete(r);
+          rows.splice(i, 1);
         }
       }
     },

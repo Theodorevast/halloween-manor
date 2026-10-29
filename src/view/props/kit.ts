@@ -1,7 +1,7 @@
 // 物件共用的小工具：把基础几何体拼成「一个刚体部件 = 一个网格」、幽光外壳、拾取盒、缓动。
 // 每个会单独动的部件合并成一个带顶点色的几何体，整套物件只有三十来个 draw call（手电阴影每盏还要再画一遍）。
 import * as THREE from 'three/webgpu';
-import { abs, color, normalLocal, normalViewGeometry, positionLocal, uniform } from 'three/tsl';
+import { abs, dot, float, mix, normalLocal, normalView, positionLocal, positionView, positionViewDirection, smoothstep, uniform } from 'three/tsl';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { Quality } from '../../engine/types';
 import type { ScareObjectState, SimEvent, WorldState } from '../../sim/types';
@@ -123,13 +123,25 @@ export function mesh(geo: THREE.BufferGeometry, mat: THREE.Material, name: strin
 }
 
 // ── 幽光外壳 ──────────────────────────────────────────────────────────
+/** 第三人称、没对准时：离镜头这么近（米）的外壳淡掉（从前一个数到后一个数由无到有），见 createGlow 的 focus */
+export const GLOW_NEAR: [number, number] = [0.9, 1.8];
+
 /**
  * 每个物件一份外壳材质：背面、加法混合、沿法线鼓出 thickness 米。
  * 外壳只在物体轮廓外一圈露出来（物体本身挡住了中间），朝向镜头越正的地方越亮、轮廓外缘渐隐，像一圈软光。
+ * 朝向按每个片元自己的视线算（2026-10-30 美术分析 ART-5）：原来按正交相机算（|观察空间法线的 z|），第三人称的透视镜头下
+ * 不对，画面偏边上的物件轮廓上会留一圈亮边。正交相机下 positionViewDirection 就是 (0, 0, 1)，和原来一模一样。
+ * tint：外壳的颜色；soft：0 = 原来的曲线（朝向 × 0.75 + 0.25，轮廓最外那一圈还留 25%），1 = smoothstep(0.15, 0.6, 朝向)，
+ * 轮廓最外那一圈淡到 0。第三人称用 1 和降饱和的颜色，娃娃屋保持原样（props.ts 按镜头设）。
+ * focus（只在 soft 时起作用）：0 = 平时，离镜头 GLOW_NEAR 米以内的那一截不画——镜头擦着一个物件时（走廊里镜头贴着厨房门），
+ * 外壳在画面边上是一条几个像素宽、贯穿画面的亮带（美术分析的 d50 机位）；1 = 悬停、附身那一下，照原样
  */
 export function createGlow() {
   const amount = uniform(0);
   const thickness = uniform(0.022);
+  const tint = uniform(new THREE.Color(PALETTE.possess));
+  const soft = uniform(0);
+  const focus = uniform(0);
   const material = new THREE.MeshBasicNodeMaterial({
     side: THREE.BackSide,
     transparent: true,
@@ -138,11 +150,14 @@ export function createGlow() {
     fog: false,
   });
   material.positionNode = positionLocal.add(normalLocal.mul(thickness));
-  // 正交相机：视线就是观察空间的 z，|n.z| 越大越靠近物体轮廓内侧 → 越亮；外缘 → 0
-  const facing = abs(normalViewGeometry.z);
-  material.colorNode = color(PALETTE.possess).mul(amount).mul(facing.mul(0.75).add(0.25));
-  return { material, amount, thickness };
+  // |n·v| 越大越靠近物体轮廓内侧 → 越亮；外缘 → 0
+  const facing = abs(dot(normalView, positionViewDirection));
+  const near = smoothstep(GLOW_NEAR[0], GLOW_NEAR[1], positionView.length());
+  const rim = smoothstep(0.15, 0.6, facing).mul(mix(near, float(1), focus));
+  material.colorNode = tint.mul(amount).mul(mix(facing.mul(0.75).add(0.25), rim, soft));
+  return { material, amount, thickness, tint, soft, focus };
 }
+
 export type Glow = ReturnType<typeof createGlow>;
 
 /** 由部件几何体生成外壳几何体：去掉颜色、焊接重合顶点、重算平滑法线（鼓出时才不会裂开） */
