@@ -1,6 +1,6 @@
 {
   "$comment": "由 scripts/tripo/visitors.mjs 生成，重跑 export 会覆盖对应条目。url 相对于 import.meta.env.BASE_URL；clips 的键对应 src/config/character.ts 的 clips，值是 GLB 里的片段原名（null = 没有）",
-  "updatedAt": "2026-10-29T11:31:21.295Z",
+  "updatedAt": "2026-10-29T14:04:14.173Z",
   "visitors": [
     {
       "id": "lantern-explorer",
@@ -244,7 +244,7 @@
           "animate2": "179c6bbe-17e2-42e5-9198-b0548776b7d9"
         },
         "credits": 245,
-        "exportedAt": "2026-10-28T15:47:33.967Z"
+        "exportedAt": "2026-10-29T14:03:53.144Z"
       }
     },
     {
@@ -321,7 +321,7 @@
           "animate2": "1b8dadad-9781-4042-bf8e-5f458ef68edb"
         },
         "credits": 245,
-        "exportedAt": "2026-10-28T15:48:39.256Z"
+        "exportedAt": "2026-10-29T14:04:03.775Z"
       }
     },
     {
@@ -482,7 +482,7 @@
           "animate2": "e955a856-d352-4a88-a310-2540b578e18d"
         },
         "credits": 245,
-        "exportedAt": "2026-10-29T08:34:58.444Z"
+        "exportedAt": "2026-10-29T14:04:14.172Z"
       }
     }
   ]
