@@ -389,8 +389,11 @@ export function buildGhostGeometry(): THREE.BufferGeometry {
 
 // ───────────────────────── 材质 ─────────────────────────
 
-/** 鬼魂材质共用的 uniform（每帧由 createGhostView 写） */
-function makeGhostUniforms() {
+/**
+ * 鬼魂材质共用的 uniform（每帧由 createGhostView 写）。
+ * 导出给墙上多一个影子（otherShadow.ts）：它用 createGhostShadowMaterial 再做一份影子，给自己一组（不飘、不跟玩家）
+ */
+export function makeGhostUniforms() {
   return {
     time: uniform(0),
     /** 总不透明度倍数：镜头太近时变小、呼吸起伏 */
