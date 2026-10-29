@@ -63,7 +63,7 @@
 //     open [0.3–1.6]：一声长长的合页吱呀（门、摇椅用的那套嘎吱合成：窄脉冲 + 被它调制的噪声，过四只高 Q 带通，最低一只 190 Hz 是柜体的空腔），
 //       脉冲频率 34 → 19 → 12 Hz，先快后慢（门越慢，声音越暗），再叠一路慢速的随机抖动，音量开头起得快、结束时还剩四成，到 open 结束那一刻硬停 [门停死，不回弹、不晃]；
 //     hold [1.6–2.2] 加上门关上的 slamTime（0.12 秒）：什么声音都没有（共 0.72 秒空白，调研原则 11：先抽空再落下；实测 hold 这段 RMS 比吱呀低 25 dB 以上，只剩混响尾巴）。
-//       门从 slamAt 起关、slamTime 秒后撞上门框（画面 view/props/wardrobe.ts 的 SHUT），slamAt 那一刻门还开着 25°，所以砰的一声不放在 slamAt
+//       门从 slamAt 起关、slamTime 秒后撞上门框（config/scares.ts 的 WARDROBE_SHUT，画面、模拟也是这一刻），slamAt 那一刻门还开着 25°，所以砰的一声不放在 slamAt
 //       （那样比画面早 slamTime 秒，音频领先 120 毫秒是听得出来的），放在门撞上门框的那一刻；
 //     撞上门框 slamAt + slamTime [2.32]：只响这一次 —— 门板撞上柜体：木头的「啪」（3.5 kHz 低通噪声，20 毫秒）+ 闷响（92 → 50 Hz 的正弦下沉 + 低通噪声）
 //       + 门板和柜体的共鸣（150 / 360 Hz）+ 锁舌咔哒 + 低频冲击（braamFn，和床塌下的 BED_HIT 一个分量：D1 + D2 + 一丝 E♭2，小二度）[门撞上门框]；
@@ -75,7 +75,7 @@
 //     疏疏落落的 3–5 下小裂声（越来越轻）；每颗随机走 3.2 / 4.8 / 6.6 kHz 三条宽带通之一（冰裂不会每一下都一样亮），Q 0.9，没有共鸣、没有音高（调研 A7）；
 //     再垫一丝 6 kHz 以上的「嘶」（结晶，0.3 秒起落，很轻）。sprung 走物件本来的声音，expired 无声
 import { CELL, FURNITURE } from '../config/house';
-import { SCARES, WARDROBE } from '../config/scares';
+import { SCARES, WARDROBE, wardrobeShut } from '../config/scares';
 import type { ScareType } from '../sim/types';
 import { isPort, type Place, type Port, type Space, type Vec3 } from './space';
 import { DOOR_T_LINE } from '../view/props/door';
@@ -1378,7 +1378,7 @@ export const WARDROBE_SFX = {
   },
   /** 柜体被带得抖一下：几颗木头的颗粒，在撞上之后 [from, to] 秒里越来越轻，过 hz 的带通 */
   rattle: { from: 0.03, to: 0.3, n: 6, amp: 0.16, hz: 800 },
-  /** 柜顶落灰的「嘶」：撞上之后 [from, to] 秒（上限是 slamAt + settle）、峰值、起音和衰减时间常数（秒）、高通和低通截止（灰的声音在 3 kHz 到 9 kHz 之间，再往上是空气的嘶嘶声）；再加稀疏的细颗粒（个数、峰值） */
+  /** 柜顶落灰的「嘶」：撞上之后 [from, to] 秒（上限是撞上之后 WARDROBE.settle 秒）、峰值、起音和衰减时间常数（秒）、高通和低通截止（灰的声音在 3 kHz 到 9 kHz 之间，再往上是空气的嘶嘶声）；再加稀疏的细颗粒（个数、峰值） */
   dust: { from: 0.06, to: 2.4, amp: 0.04, attack: 0.15, tau: 0.5, hp: 3200, lp: 9000, grains: 48, grainAmp: 0.06 },
   wet: 0.3,
 };
@@ -1408,9 +1408,9 @@ export interface WardrobeCues {
 export function wardrobeCues(): WardrobeCues {
   const W = WARDROBE;
   const K = WARDROBE_SFX;
-  // 门从 slamAt 起关，slamTime 秒后撞上门框（画面 view/props/wardrobe.ts 的 SHUT）：砰的一声落在接触那一刻。
-  // slamAt 那一刻门还开着，声音放在那里会比画面早 slamTime 秒
-  const shut = W.slamAt + W.slamTime;
+  // 门从 slamAt 起关，slamTime 秒后撞上门框（config/scares.ts 的 wardrobeShut / WARDROBE_SHUT，画面、模拟也是这一刻）：砰的一声落在接触那一刻。
+  // slamAt 那一刻门还开着，声音放在那里会比画面早 slamTime 秒。这里每次现算（时间轴改了就跟着变）
+  const shut = wardrobeShut();
   return {
     latch: W.latch[0] + K.click.lag,
     push: W.latch[0] + (W.latch[1] - W.latch[0]) * K.push.at,
@@ -1419,8 +1419,8 @@ export function wardrobeCues(): WardrobeCues {
     slamLatch: shut + K.slam.latchLag,
     hit: shut,
     rattle: [shut + K.rattle.from, shut + K.rattle.to],
-    // 灰最迟在 slamAt + settle 落完（settle 是「环境声回来」的期限，从 slamAt 算，不跟着 slamTime 后移）
-    dust: [shut + K.dust.from, Math.min(shut + K.dust.to, W.slamAt + W.settle)],
+    // 灰最迟在撞上之后 settle 秒落完：和画面的落灰（particles.ts，从撞上那一刻起落 settle 秒）同一个起点（WARDROBE 的 settle）
+    dust: [shut + K.dust.from, Math.min(shut + K.dust.to, shut + W.settle)],
   };
 }
 

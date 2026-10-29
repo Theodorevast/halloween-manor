@@ -1,13 +1,14 @@
 // 灯闪（view/lightfx.ts）：节奏表的亮度、现身那一串灯闪守不守规矩（不全灭、不白闪、任意 1 秒最多暗 3 下）、
-// 灯的强度被主人每帧改写时照样压得暗、效果结束后原样还回去；灯罩、灯笼的自发光跟着一起暗（评审 I3）。
-// 用真的 three 场景（不渲染），按 ghost.ts 现身时的调用顺序走一遍
+// 灯的强度被主人每帧改写时照样压得暗、效果结束后原样还回去；灯罩、灯笼的自发光跟着一起暗（评审 I3）；
+// 带 skipOwned 的效果不碰会自己演闪烁的灯（最终审查 I1）。
+// 用真的 three 场景（不渲染），现身走 ghost.ts 的 manifestLights（和 onManifest 同一个调用）
 import * as THREE from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { describe, expect, it } from 'vitest';
 import { MANIFEST } from '../src/config/visitors';
 import type { RenderCore } from '../src/engine/types';
 import type { WorldState } from '../src/sim/types';
-import { GHOST } from '../src/view/ghost';
+import { GHOST, manifestLights } from '../src/view/ghost';
 import { LIGHTFX, countDips, createLightFx, dipStarts, letterLevel, patternDips, patternLevel } from '../src/view/lightfx';
 import { TORCH_COUNT, torchDim, torches } from '../src/view/torches';
 
@@ -43,16 +44,15 @@ function makeScene() {
   return { scene, lamp, far, untagged, fx, run };
 }
 
-/** 按 ghost.ts 的 onManifest 走一遍现身：蓄力 → 落下（暗一下 + 停留时压着）→ 收（放开 + 暗一下）→ 再走 1 秒 */
+/** 按 ghost.ts 的 onManifest 走一遍现身（manifestLights）：蓄力 → 落下（暗一下 + 停留时压着）→ 收（放开 + 暗一下）→ 再走 1 秒 */
 function playManifest(s: ReturnType<typeof makeScene>, pos = { x: 1.6, z: 1.2 }) {
   const levels: number[] = [];
-  s.fx.pulse(pos, M.radius, M.windup, MANIFEST.windup);
+  manifestLights(s.fx, 'windup', pos);
   s.run(MANIFEST.windup, levels);
-  s.fx.dipAll(pos, M.radius, M.drop.depth, M.drop.ms);
-  const release = s.fx.pulse(pos, M.radius, M.hold, MANIFEST.hold + M.holdSlack);
+  const release = manifestLights(s.fx, 'drop', pos);
   s.run(MANIFEST.hold, levels);
-  release();
-  s.fx.dipAll(pos, M.radius, M.end.depth, M.end.ms);
+  release?.();
+  manifestLights(s.fx, 'end', pos);
   s.run(1, levels);
   return levels;
 }
@@ -300,5 +300,60 @@ describe('主人自己在闪的灯不叠加压暗（2026-10-29：附身台灯的
     run(0.3);
     expect(lamp.intensity).toBeLessThan(4.2 * 0.3);
     fx.dispose();
+  });
+});
+
+describe('skipOwned（最终审查 I1：台灯的附身、复原和现身前后接上，busy 只挡得住同时叠上的）', () => {
+  it('带 skipOwned 的效果：带 busy 字段的灯（不管此刻真假）整段不跟着；门廊灯（标记是对象、没有 busy）、标 true 的灯、手电照旧；鬼魂跟着的 level(p) 照旧算它', () => {
+    const scene = new THREE.Scene();
+    const houseRoot = new THREE.Group();
+    scene.add(houseRoot);
+    const tag = { glow: uniform(1), busy: false };
+    const lamp = new THREE.PointLight(0xffb35c, 4.2, 4.8, 2);
+    lamp.position.set(1, 1.3, 1);
+    lamp.userData.lightfx = tag;
+    const lantern = new THREE.MeshBasicNodeMaterial({ color: new THREE.Color(0xffb35c).multiplyScalar(0.55) });
+    const porch = new THREE.PointLight(0xffb35c, 1.8, 2.4, 2);
+    porch.position.set(2, 1.35, 1);
+    porch.userData.lightfx = { emissive: lantern };
+    const plain = new THREE.PointLight(0xffb35c, 3, 4, 2);
+    plain.position.set(1.5, 1.3, 2);
+    plain.userData.lightfx = true;
+    houseRoot.add(lamp, porch, plain);
+    const fx = createLightFx({ scene, houseRoot } as unknown as RenderCore);
+    const saved = { ...torches[0] };
+    Object.assign(torches[0], { x: 1.5, z: 1.5, power: 1 });
+    let time = 0;
+    const run = (seconds: number) => {
+      for (let k = 0; k < Math.round(seconds / DT); k++) {
+        time += DT;
+        fx.update({ dt: DT, time, state: {} as WorldState });
+      }
+    };
+    try {
+      const at = { x: 1.5, z: 1.2 };
+      fx.dipAll(at, 5, 0.2, 500, { skipOwned: true });
+      run(0.3);
+      expect(lamp.intensity).toBe(4.2);
+      expect(tag.glow.value).toBe(1);
+      expect(porch.intensity).toBeLessThan(1.8 * 0.3);
+      expect(plain.intensity).toBeLessThan(3 * 0.3);
+      expect(torchDim[0]).toBeLessThan(0.3);
+      expect(fx.level(at)).toBeCloseTo(0.2, 9);
+      // busy 真假都一样：带 busy 字段就是「会自己演闪烁的灯」
+      tag.busy = true;
+      run(0.1);
+      expect(lamp.intensity).toBe(4.2);
+      tag.busy = false;
+      run(0.5);
+      // 不带 skipOwned 的照旧压台灯（现身的落下、停留）
+      fx.dipAll(at, 5, 0.2, 500);
+      run(0.3);
+      expect(lamp.intensity).toBeLessThan(4.2 * 0.3);
+      expect(tag.glow.value).toBeLessThan(0.3);
+    } finally {
+      Object.assign(torches[0], saved);
+      fx.dispose();
+    }
   });
 });

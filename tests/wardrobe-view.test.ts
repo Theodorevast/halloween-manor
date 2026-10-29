@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { CELL, FURNITURE, PROPS, propCenter } from '../src/config/house';
-import { SCARES, WARDROBE } from '../src/config/scares';
+import { SCARES, WARDROBE, WARDROBE_SHUT } from '../src/config/scares';
 import { idleManifest } from '../src/sim/manifest';
 import type { ScareObjectState, SimEvent, WorldState } from '../src/sim/types';
 import { FURNITURE_TOP, WARDROBE_BOX } from '../src/view/furniture';
@@ -12,7 +12,7 @@ import { PLASTER, burstLife } from '../src/view/particles/plaster';
 import { BED_TIMELINE, bedDustSpot } from '../src/view/props/bed';
 import { PORTRAIT_TIMELINE } from '../src/view/props/portrait';
 import {
-  WARDROBE_LOOK, WARDROBE_SHUT, coatSwing, createWardrobe, doorDeg, fingerGrip, hasFingers, slamShake, wardrobeDustSpot, wardrobeLayout,
+  WARDROBE_LOOK, coatSwing, createWardrobe, doorDeg, fingerGrip, hasFingers, slamShake, wardrobeDustSpot, wardrobeLayout,
 } from '../src/view/props/wardrobe';
 
 const W = WARDROBE;
@@ -34,12 +34,11 @@ describe('衣柜：时间轴本身（画面按这个顺序接）', () => {
     expect(W.hold[1]).toBe(W.slamAt);
     expect(W.fingers[0]).toBeGreaterThanOrEqual(W.hold[0]);
     expect(W.fingers[1]).toBe(W.slamAt);
-    // 惊吓落下的时刻：现在是 slamAt；合并时主会话会改成门撞上的那一刻（WARDROBE_SHUT），两种都在门开始关到撞上之间
-    expect(SCARES.wardrobe.hitAt).toBeGreaterThanOrEqual(W.slamAt);
-    expect(SCARES.wardrobe.hitAt).toBeLessThanOrEqual(WARDROBE_SHUT);
+    // 惊吓落下的时刻就是门撞上门框的那一刻（WARDROBE_SHUT）：访客的受惊、尖叫和那一声撞在一起（像床那样：BED_TIMELINE.collapse === SCARES.bed.hitAt）
+    expect(SCARES.wardrobe.hitAt).toBe(WARDROBE_SHUT);
   });
 
-  it('门撞上门框的那一刻只算一处：WARDROBE_SHUT = slamAt + slamTime', () => {
+  it('门撞上门框的那一刻只算一处（config/scares.ts）：WARDROBE_SHUT = slamAt + slamTime', () => {
     expect(WARDROBE_SHUT).toBe(W.slamAt + W.slamTime);
   });
 });

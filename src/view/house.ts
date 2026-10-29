@@ -49,6 +49,13 @@ const MOON = {
  */
 const PORCH = { pos: { x: 9.55, y: 1.35, z: 12.6 }, intensity: 1.8, distance: 2.4 };
 
+/**
+ * 门廊灯极轻的油灯式摇曳：t 秒时的亮度（乘 PORCH.intensity）。0.95 ± 0.045，峰谷差 0.09，比 countDips 的门槛（0.1）小：
+ * 单独一下都数不出来，附近现身时也不会多数出一下（tests/flicker.test.ts）。原来是 0.93 ± 0.08（峰谷差 0.16），
+ * 自己就被数成每秒 1–2 下，附近现身时最坏 4 下（2026-10-29 最终审查 M2；思路和紧张手电压到 0.08 一样）
+ */
+export const porchFlicker = (t: number) => 0.95 + 0.03 * Math.sin(t * 7.3) + 0.015 * Math.sin(t * 17.9 + 1.3);
+
 const C = (hex: number) => new THREE.Color(hex);
 const mixC = (a: number, b: number, t: number) => C(a).lerp(C(b), t);
 
@@ -491,9 +498,9 @@ export function createHouseView(core: RenderCore, rig: CameraRig): Module {
         walls.update(ctx.dt, rig.viewDir);
         aimMoon();
       }
-      // 门廊灯：极轻的油灯式摇曳
+      // 门廊灯：极轻的油灯式摇曳（porchFlicker）
       flicker += ctx.dt;
-      outdoors.porch.intensity = PORCH.intensity * (0.93 + 0.05 * Math.sin(flicker * 7.3) + 0.03 * Math.sin(flicker * 17.9 + 1.3));
+      outdoors.porch.intensity = PORCH.intensity * porchFlicker(flicker);
     },
     setQuality: applyQuality,
     dispose() {

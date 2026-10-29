@@ -66,6 +66,8 @@ export const FLICKER_END = 1.2;
 export const LAMP_RELIGHT: [number, number][] = [
   [0.0, 0.0], [0.08, 1.1], [0.14, 0.0], [0.3, 0.9], [0.36, 0.05], [0.5, 1.0],
 ];
+/** 附身、复原以后，平时的轻闪至少隔这么多秒（从复原亮回、回到平时那一刻起算）再来，见 createLamp 里的 quietBlips */
+export const BLIP_QUIET = 1.3;
 
 /** 查表：t 秒时所在那一段的亮度（每一段持续到下一段开始；t 比第一项还早就取第一项） */
 export const sampleTable = (tab: [number, number][], t: number) => {
@@ -116,7 +118,8 @@ export function createLamp(seed: number): PropRig {
   light.position.y = LIGHT_Y;
   light.castShadow = false;
   // 现身时跟着附近的灯一起暗，灯罩、灯泡的自发光（glow）也一起（lightfx.ts 收集）；自己在闪（附身、复原）时标 busy，
-  // lightfx 这段时间不再叠加压暗：两套闪叠起来会超过每秒 3 下
+  // lightfx 这段时间不再叠加压暗：两套闪叠起来会超过每秒 3 下。带着 busy 这个字段，现身的蓄力、收也整段不碰它
+  // （lightfx 的 skipOwned，见 ghost.ts 的 manifestLights）：只跟着落下、停留暗
   const fxTag = { glow, busy: false };
   light.userData.lightfx = fxTag;
   model.add(light);
@@ -131,6 +134,17 @@ export function createLamp(seed: number): PropRig {
   let nextBlip = 2 + rand() * 6;
   let blip = -1, blipLen = 0.2, blipDepth = 0.1;
   let level = 1;
+  /**
+   * 附身、复原一开始：正在进行的轻闪作废，下一次轻闪至少隔 BLIP_QUIET 秒（只在平时那一段里倒数，也就是复原亮回以后）。
+   * 不然附身那一刻轻闪快来了（或者正闪到一半），它会留到复原亮回的那一刻接着闪：复原自己暗 2 下，紧接着一下轻闪，
+   * 附近再有现身落下就是任意 1 秒 4 下（2026-10-29 最终审查 I1 / 路 F Minor 3）。1.3 秒：离复原的第二下（0.36 秒）超过 1 秒还有余量。
+   * 管不到的：附身之前 0.13–0.2 秒刚闪完、深到数得出来的一下，加上附身自己的 3 下还是 4 下（只看台灯，约万分之七的附身时刻，
+   * 和现身无关）。要根治得把轻闪压到数不出来（峰谷差 < 0.1，像门廊灯那样），会改平时的样子，等看样定
+   */
+  const quietBlips = () => {
+    blip = -1;
+    nextBlip = Math.max(nextBlip, BLIP_QUIET);
+  };
 
   return {
     model,
@@ -142,17 +156,22 @@ export function createLamp(seed: number): PropRig {
     trigger() {
       t = 0;
       r = -1;
+      quietBlips();
     },
     reset() {
       r = 0;
       t = -1;
+      quietBlips();
     },
     update(f: PropFrame) {
       const { dt, obj } = f;
-      // 兜底：错过事件时按 state 对齐
+      // 兜底：错过事件时按 state 对齐（兜底开始的复原和 reset 一样，先把轻闪压住）
       if (t < 0 && r < 0) {
         if (!off && obj.broken > 0) off = true;
-        else if (off && obj.broken <= 0) r = 0;
+        else if (off && obj.broken <= 0) {
+          r = 0;
+          quietBlips();
+        }
       }
 
       fxTag.busy = t >= 0 || r >= 0;
