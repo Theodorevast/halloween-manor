@@ -41,7 +41,7 @@ export function clockAt(t: number, meridiem = true): string {
   const m = ((minuteOf(t) % DAY) + DAY) % DAY;
   const h = Math.floor(m / 60);
   const text = `${h % 12 || 12}:${String(m % 60).padStart(2, '0')}`;
-  return meridiem ? `${text} ${h < 12 ? 'am' : 'pm'}` : text;
+  return meridiem ? `${text} ${h < 12 ? R.meridiem.am : R.meridiem.pm}` : text;
 }
 
 /** 两个时刻在同一天的同一个半天（都是上午或都是下午） */
@@ -49,14 +49,10 @@ const sameHalf = (a: number, b: number) => Math.floor(minuteOf(a) / 720) === Mat
 
 // ── 数字、造型的名字 ─────────────────────────────────────
 
-const WORDS = [
-  '', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
-  'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty',
-];
-
-/** 数字写进句子：one 到 twenty 写英文单词，再多写阿拉伯数字。capital：句首大写 */
+/** 数字写进句子：one 到 twenty 写英文单词（STRINGS.register.numbers），再多写阿拉伯数字。capital：句首大写 */
 export function inWords(n: number, capital = false): string {
-  const w = Number.isInteger(n) && n >= 1 && n < WORDS.length ? WORDS[n] : String(n);
+  const words = R.numbers;
+  const w = Number.isInteger(n) && n >= 1 && n < words.length ? words[n] : String(n);
   return capital ? w.charAt(0).toUpperCase() + w.slice(1) : w;
 }
 

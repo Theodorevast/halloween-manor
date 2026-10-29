@@ -1,5 +1,7 @@
 // 访客状态机：进门 → 闲逛 ⇄ 警觉，被吓 → 受惊（僵住后恢复原状态），恐惧值满 → 逃跑 → 离开。
 // 对外的 NpcState 就是这里的 npc.s（同一个对象放进 WorldState.npcs），内部状态放在 Npc 的其他字段里。
+// 2026-10-30「一夜」的天亮（World.dawn → beginLeave）：屋里不在逃跑的人改成 leaving，按走路的速度走出前门，出门时 exit 带 calm（不算吓跑）。
+// 路上照样能被吓到（恐惧涨满照常逃跑，受惊僵住完回到 leaving），但不再被声音引走、不察觉、不后退；没人调 dawn 时这些分支都走不到
 // 2026-10-28 第三人称改版加了三样（参数都在 config/visitors.ts）：
 // - 鬼魂贴近时发毛（feelGhost，每步在状态机之前）：恐惧值慢慢上涨、走慢，贴得够久是「后颈一凉」（GHOST）
 // - 走路的加减速（walk / stand）：沿路径的速度平滑变化，拐弯前提前转身、降速，快到终点时刹住（MOTION）
@@ -146,7 +148,7 @@ type HabitKey = ScareType | 'ghost' | 'ghostWall' | 'manifest';
 
 /** 受惊结束后要恢复的状态 */
 interface Resume {
-  mode: 'entering' | 'wander' | 'alert';
+  mode: 'entering' | 'wander' | 'alert' | 'leaving';
   act: Act;
   lookLeft: number;
   lookT: number;
@@ -255,6 +257,8 @@ export interface Npc {
   litGhost: boolean;
   /** 穿墙声：听见一次以后到什么时候（模拟时间）之前不再算（GHOST.hearCooldown） */
   wallReadyAt: number;
+  /** 天亮自己走出前门（leaving 走到了）：world.ts 发 exit 时带 calm、不算吓跑。逃跑出门的、还在屋里的都是 false */
+  calm: boolean;
 }
 
 export interface NpcInit {
@@ -332,6 +336,7 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     afterRetreat: null,
     litGhost: false,
     wallReadyAt: -Infinity,
+    calm: false,
   };
   if (o.mode === 'entering') {
     const inside = { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z };
@@ -345,10 +350,17 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
 
 export const canBeScared = (n: Npc) => n.s.mode !== 'fleeing' && n.s.mode !== 'gone';
 
+/**
+ * 天亮要走的人（leaving；受惊僵住前是 leaving 的也算）：心里只有出门，不理会声音、不察觉、不后退，
+ * 只会被吓（恐惧值照涨，涨满照常逃跑，僵住完回到 leaving）
+ */
+const leavingNow = (n: Npc) => n.s.mode === 'leaving' || (n.s.mode === 'startled' && n.resume?.mode === 'leaving');
+
 /** 吓呆了：受惊僵住，或者被蓄势的惊吓物件、现身定住。这时不走、不被挤开 */
 const isFrozen = (n: Npc) =>
   n.s.mode === 'startled' ||
-  ((n.transfixOn !== null || n.transfixPos !== null) && (n.s.mode === 'entering' || n.s.mode === 'wander' || n.s.mode === 'alert'));
+  ((n.transfixOn !== null || n.transfixPos !== null) &&
+    (n.s.mode === 'entering' || n.s.mode === 'wander' || n.s.mode === 'alert' || n.s.mode === 'leaving'));
 
 /**
  * 这个人这次被 type 吓到的量：base × 性格倍率 × habituation^n，n = 之前被这种物件吓过的有效次数。
@@ -433,6 +445,7 @@ function listen(npc: Npc, ctx: NpcCtx, amount: number, source: Vec2, event: SimE
     beginFlee(npc, ctx);
     return;
   }
+  if (leavingNow(npc)) return; // 天亮要走的人：恐惧值涨了，但不停下、不改道去查看
   if (s.mode !== 'startled') {
     // 正在察觉更要紧的（现身蓄力）时不转过来，但声音记下了：那一拍完了照样去查看
     notice(npc, ctx, 'sound', source);
@@ -453,7 +466,7 @@ function listen(npc: Npc, ctx: NpcCtx, amount: number, source: Vec2, event: SimE
  */
 export function notice(npc: Npc, ctx: NpcCtx, kind: NoticeKind, src: Vec2, hold?: number): boolean {
   const s = npc.s;
-  if (!canBeScared(npc) || s.mode === 'startled') return false;
+  if (!canBeScared(npc) || s.mode === 'startled' || s.mode === 'leaving') return false;
   const cur = s.notice;
   if (cur && NOTICE.priority[kind] < NOTICE.priority[cur.kind]) return false;
   // 接着上一次察觉（或者还没转回去）时，记的仍是最早的朝向
@@ -660,7 +673,7 @@ const RETREAT_SAMPLE = 0.1;
  */
 export function retreat(npc: Npc, ctx: NpcCtx, from: Vec2, dist: number): void {
   const s = npc.s;
-  if (!canBeScared(npc)) return;
+  if (!canBeScared(npc) || leavingNow(npc)) return; // 天亮要走的人不后退，吓完接着往外走
   if (s.mode === 'startled') {
     npc.pendingRetreat = { from: { x: from.x, z: from.z }, dist };
     return;
@@ -721,7 +734,7 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
   // 被惊吓物件的蓄势、现身的停留定住：只转向它，别的都不动（受惊、逃跑照常走下面的分支）
   if (npc.transfixOn && !windingUp(npc.transfixOn)) npc.transfixOn = null;
   const fix = npc.transfixOn ? npc.transfixOn.state.pos : npc.transfixPos;
-  if (fix && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert')) {
+  if (fix && (s.mode === 'entering' || s.mode === 'wander' || s.mode === 'alert' || s.mode === 'leaving')) {
     freeze(npc);
     const b = bearing(s.pos, fix);
     if (b !== null) {
@@ -801,6 +814,18 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
         s.mode = 'gone';
         s.modeTime = 0;
         s.speed = 0;
+      } else if (r === 'stuck') unstick(npc, ctx);
+      break;
+    }
+    case 'leaving': {
+      // 天亮自己走：和闲逛一样的速度（紧张时快一点）、一样的加减速和避让，不在终点停下，走到门外就算出去了（calm）
+      const r = walk(npc, ctx, s.nervous ? SPEED.nervous : SPEED.wander, false);
+      walkSweep(npc, dt);
+      if (r === 'arrived') {
+        s.mode = 'gone';
+        s.modeTime = 0;
+        s.speed = 0;
+        npc.calm = true;
       } else if (r === 'stuck') unstick(npc, ctx);
       break;
     }
@@ -1001,10 +1026,38 @@ function beginFlee(npc: Npc, ctx: NpcCtx) {
   ctx.onScream(npc);
 }
 
+/**
+ * 天亮（World.dawn）：不是被吓跑，是该走了——手上的事一概放下（进门、闲逛、警觉查看、察觉那一拍、后退、被定住盯着、受惊僵住），
+ * 寻路到前门两格中间，再直线走到门外，按走路的速度（updateNpc 的 leaving）。还在门外（刚进门）就直接回头。
+ * 逃跑中、已离开、已经在走的人不动；恐惧值照旧留着，路上被吓满照常逃跑（beginFlee）。不发事件
+ */
+export function beginLeave(npc: Npc, ctx: NpcCtx): void {
+  const s = npc.s;
+  if (s.mode === 'fleeing' || s.mode === 'gone' || s.mode === 'leaving') return;
+  // 正在受惊僵住的（FEAR.startleTime 很短，速度早就清零了）也算：不让他僵完再走，天亮这一刻谁都往外走
+  s.mode = 'leaving';
+  s.modeTime = 0;
+  npc.resume = null;
+  npc.source = null;
+  npc.startleLeft = 0;
+  npc.lastScareSrc = null;
+  npc.act = 'walk';
+  npc.transfixOn = null;
+  npc.transfixPos = null;
+  npc.pendingRetreat = null;
+  npc.retreatFrom = null;
+  npc.afterRetreat = null;
+  clearNotice(npc);
+  const [i, j] = cellOf(s.pos.x, s.pos.z);
+  const path = inGrid(i, j) ? pathFor(npc, ctx, DOOR_POINT) ?? [{ ...DOOR_POINT }] : [];
+  path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
+  setPath(npc, path);
+}
+
 function snapshot(npc: Npc): Resume {
   const mode = npc.s.mode;
   return {
-    mode: mode === 'entering' || mode === 'alert' ? mode : 'wander',
+    mode: mode === 'entering' || mode === 'alert' || mode === 'leaving' ? mode : 'wander',
     act: npc.act,
     lookLeft: npc.lookLeft,
     lookT: npc.lookT,
@@ -1040,7 +1093,8 @@ function restore(npc: Npc, ctx: NpcCtx) {
   resumeAfterStartle(npc, ctx);
   const src = npc.lastScareSrc, p = TRAITS[npc.s.personality].recheck;
   npc.lastScareSrc = null;
-  if (src && p > 0 && ctx.rng.next() < p) notice(npc, ctx, 'sound', src, RECHECK_HOLD);
+  // 天亮要走的人不回头再照一眼（notice 也不接，这里连随机数都不抽）
+  if (npc.s.mode !== 'leaving' && src && p > 0 && ctx.rng.next() < p) notice(npc, ctx, 'sound', src, RECHECK_HOLD);
 }
 
 function resumeAfterStartle(npc: Npc, ctx: NpcCtx) {
@@ -1292,16 +1346,17 @@ function freeze(npc: Npc) {
 
 /**
  * 被挤偏以后，直线去下一个路点会碰到墙角（门框边上最常见）：从这里重新寻路到原来的终点（不管别人），
- * 新路先回到格子中心再走。逃跑的人先到前门两格中间。在门外那一段或者寻路失败返回 false
+ * 新路先回到格子中心再走。逃跑、天亮出门的人先到前门两格中间。在门外那一段或者寻路失败返回 false
  */
 function reroute(npc: Npc, ctx: NpcCtx): boolean {
   const s = npc.s;
   const [ci, cj] = cellOf(s.pos.x, s.pos.z);
   if (!inGrid(ci, cj) || s.path.length === 0) return false;
-  const fleeing = s.mode === 'fleeing';
-  const path = pathFor(npc, ctx, fleeing ? DOOR_POINT : s.path[s.path.length - 1]);
+  // 逃跑、天亮出门的路线都是先到前门两格中间、再走到门外
+  const outing = s.mode === 'fleeing' || s.mode === 'leaving';
+  const path = pathFor(npc, ctx, outing ? DOOR_POINT : s.path[s.path.length - 1]);
   if (!path || path.length === 0) return false;
-  if (fleeing) path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
+  if (outing) path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
   s.path = path;
   sideToWorld(npc);
   return true;
@@ -1504,6 +1559,8 @@ function senseCrowd(npc: Npc, ctx: NpcCtx, fx: number, fz: number, walking: bool
       push += (ux * rx + uz * rz) * k;
     }
     if (!walking) continue;
+    // 天亮一起往外走的两个人：离出口近的先走，远的那个才跟着 / 让。不然在门口谁都把对方当成「前面有人」，一个也不肯先动
+    if (s.mode === 'leaving' && o.s.mode === 'leaving' && exitsFirst(npc, o)) continue;
     const along = dx * fx + dz * fz, lat = dx * rx + dz * rz;
     if (along > 0 && Math.abs(lat) < min) {
       const gap = along - Math.sqrt(min * min - lat * lat) - FOLLOW_MARGIN;
@@ -1540,6 +1597,15 @@ function senseCrowd(npc: Npc, ctx: NpcCtx, fx: number, fz: number, walking: bool
 }
 
 /**
+ * 天亮往外走的两个人谁先出门：到出口剩下的路程短的先走，差不多远的 id 小的先走（用这一步开始时的位置，和更新顺序无关）。
+ * 先走的那个不把后面的当成挡路的，后面的照常跟着、让着他
+ */
+function exitsFirst(me: Npc, o: Npc): boolean {
+  const mine = remaining(me.px, me.pz, me.s.path), his = remaining(o.px, o.pz, o.s.path);
+  return Math.abs(mine - his) > 0.05 ? mine < his : me.s.id < o.s.id;
+}
+
+/**
  * 走着的两个人快要挨上时谁让：逃跑的人从不让、别人都让他；对方站着不动时不算（交给「跟着走」和侧身）；
  * 对方在我前面、我不在他前面（我在后面合流）就我让；两人都在对方前面（迎面、正交叉）时 id 大的让。两边算出来正好一方让
  */
@@ -1567,9 +1633,9 @@ function contactTime(rx: number, rz: number, wx: number, wz: number, min: number
 
 /**
  * 被挡住没有进展（walk 返回 'stuck'）：
- * 1. 离终点不到 CROWD.closeEnough（别人正站在自己要去的地方）：就当作到了（逃跑的人除外）
+ * 1. 离终点不到 CROWD.closeEnough（别人正站在自己要去的地方）：就当作到了（逃跑的人除外；天亮出门的终点在门外，到了就是出去了）
  * 2. 否则把挡路的人身边的格子当作走不通，重新寻路绕过去
- * 3. 绕不开：闲逛的换个地方去，警觉的就地查看；进门、逃跑的接着等（逃跑的人会把挡路的人挤开）
+ * 3. 绕不开：闲逛的换个地方去，警觉的就地查看；进门、逃跑、天亮出门的接着等（逃跑的人会把挡路的人挤开）
  */
 function unstick(npc: Npc, ctx: NpcCtx): void {
   const s = npc.s;
@@ -1587,14 +1653,14 @@ function unstick(npc: Npc, ctx: NpcCtx): void {
   else if (s.mode === 'alert') startInvestigate(npc);
 }
 
-/** 绕开身边的人重新寻路到原来的终点（逃跑：先到前门两格中间再出门）。在门外那一段、或者绕不开时返回 false */
+/** 绕开身边的人重新寻路到原来的终点（逃跑、天亮出门：先到前门两格中间再出门）。在门外那一段、或者绕不开时返回 false */
 function replan(npc: Npc, ctx: NpcCtx): boolean {
   const s = npc.s;
   if (s.path.length === 0) return false;
   const [ci, cj] = cellOf(s.pos.x, s.pos.z);
   if (!inGrid(ci, cj)) return false;
-  const fleeing = s.mode === 'fleeing';
-  const goal = fleeing ? DOOR_POINT : s.path[s.path.length - 1];
+  const outing = s.mode === 'fleeing' || s.mode === 'leaving';
+  const goal = outing ? DOOR_POINT : s.path[s.path.length - 1];
   const tiles = ctx.nav.grid.tiles.slice();
   for (const o of ctx.crowd) {
     if (o === npc || o.s.mode === 'gone') continue;
@@ -1611,7 +1677,7 @@ function replan(npc: Npc, ctx: NpcCtx): boolean {
   }
   const path = pathFor(npc, ctx, goal, new Grid(tiles));
   if (!path || path.length === 0) return false;
-  if (fleeing) path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
+  if (outing) path.push({ x: FRONT_DOOR.outside.x, z: FRONT_DOOR.outside.z });
   setPath(npc, path);
   return true;
 }

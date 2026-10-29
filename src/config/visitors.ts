@@ -7,9 +7,17 @@ export const PERSONALITIES: Record<Personality, { fearMult: number; weight: numb
   brave: { fearMult: 0.6, weight: 25 },
 };
 
+/**
+ * 访客的名字池。一夜里要尽量不重名（spawner.ts 的 pickName 避开屋里的人和最近进来的 RECENT_NAMES 个），所以池子要比那个数大得多：
+ * 现在 48 个，英文常见的名，男女都有，都不长（界面上排得下），不用名人。前 16 个是原来的，顺序不动
+ */
 export const NAMES = [
   'Mia', 'Theo', 'Priya', 'Ollie', 'June', 'Sam', 'Nora', 'Leo',
   'Ada', 'Felix', 'Iris', 'Hugo', 'Maya', 'Ezra', 'Lena', 'Otis',
+  'Ruby', 'Jack', 'Cleo', 'Finn', 'Tess', 'Owen', 'Edie', 'Eli',
+  'Wren', 'Jonah', 'Molly', 'Arlo', 'Nell', 'Milo', 'Cora', 'Rhys',
+  'Vera', 'Jude', 'Gwen', 'Gus', 'Maeve', 'Ned', 'Sadie', 'Seth',
+  'Alma', 'Ravi', 'Opal', 'Omar', 'Zoe', 'Nico', 'Hattie', 'Toby',
 ];
 
 export const SPEED = { wander: 1.3, nervous: 1.7, alert: 1.1, flee: 3.2, enter: 1.2 };

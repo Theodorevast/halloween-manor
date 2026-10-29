@@ -2,6 +2,10 @@
 // 往前、往上飘一点，一秒多散掉；越接近 100 喘得越急，人跑起来白气留在身后；尖叫时呼出一大口。平静的人没有。
 // 要读出来的是「这屋子很冷」和「他们在喘」，不是卡通的蒸汽：很淡、很小、只有被手电（或手电打在地上的反光）照着才看得清。
 // 2026-10-28 做减法：每口气的团数、不透明度、尖叫那一大口都收了一些，第三人称离得近时也只是若有若无的一缕。
+// 2026-10-30（ART-8）加回一档：减过头了——访客面朝镜头、2.6 米外被另一支手电从侧面照着，连呼三口，整幅前后只差 0.35/255，嘴前那一缕又小又淡、散得也快。
+// 不透明度、受光、溢光、长大以后的大小各往上提一点（只改数，粒子数不变）；maxLit、ambient 不动：还是只有被光照着才看得清，没灯的地方仍然只是一点点暗影，也不会亮成发光的球。
+// 2026-10-30（FEEL-8）贴近发毛时也呼：鬼魂贴在身边（NpcState.uneasy ≥ BREATH.chillFrom）的人，恐惧值还没到紧张线也会呼白气，
+// 贴得越近越勤（breathLevel）。冷点让人呼出白气，是现实里「闹鬼」的征兆；样子用现有的，只改「什么时候呼」。
 //
 // 做法：一个实例化精灵 + 环形缓冲。每呼一口气，CPU 往缓冲里写 3–6 个槽位（起点、出生时刻、初速、强度），
 // 只上传这一点数据；之后的轨迹（指数减速的喷出 + 暖气上浮 + 随年龄出现的噪声扰动）、长大、淡出全在顶点着色器里按年龄算。
@@ -14,7 +18,7 @@ import {
 } from 'three/tsl';
 import { FEAR } from '../../config/visitors';
 import type { FrameCtx, Quality } from '../../engine/types';
-import type { NpcState, SimEvent, WorldState } from '../../sim/types';
+import type { SimEvent, WorldState } from '../../sim/types';
 import { FOG } from '../fog';
 import { lightAt, type LightUniforms } from './light';
 import { ge, lt, makeSprite, protectMRT, rnd } from './common';
@@ -29,6 +33,13 @@ export const BREATH = {
   jitter: 0.25,
   /** 刚害怕起来，第一口气在这么久之内出来（秒） */
   first: [0.3, 0.9] as const,
+  /**
+   * 贴近发毛（FEEL-8）：发毛程度（NpcState.uneasy，0–1）从 chillFrom 起，恐惧值没到紧张线的人也呼白气；
+   * 强度从 chillFrom 处的 0 线性涨到发毛 1 时的 chillMax（比吓破胆的 1 淡得多：间隔约 1.4 秒一口，吓破胆是 0.72 秒）。
+   * 发毛只在鬼魂的发毛范围里才大于 0（GHOST.radius 1.5 米，胆小 1.8 米），所以白气出现的地方正好是范围：一靠近就开始，离开约 1–2 秒后停
+   */
+  chillFrom: 0.25,
+  chillMax: 0.6,
   /** 每口气几团：[最少, 最多]，恐惧越高越多 */
   puffs: { high: [3, 5], low: [2, 3] } as Record<Quality, [number, number]>,
   /** 一口气呼出的时长（秒）：几团在这段时间里依次出来，连成一缕（不是一团） */
@@ -51,21 +62,21 @@ export const BREATH = {
   turbTau: 0.5,
   /** 大小（米）：出口时 size0，长到 size1（时间常数 growTau 秒） */
   size0: [0.04, 0.06] as const,
-  size1: [0.14, 0.22] as const,
+  size1: [0.16, 0.26] as const,
   growTau: 0.45,
   /** 寿命（秒），从 fadeFrom 比例处开始淡出 */
   life: [1.1, 1.5] as const,
   fadeFrom: 0.22,
   /** 不透明度峰值；长大以后按 (size0 / size)^thin 变稀 */
-  alpha: [0.3, 0.4] as const,
+  alpha: [0.42, 0.55] as const,
   thin: 0.4,
   /** 尖叫：一口大的——团数、速度、大小、不透明度的倍数 */
   scream: { puffs: 5, speed: 1.5, size: 1.2, alpha: 1.05 },
   /** 底色（线性）：凝结的小水滴，淡白偏冷 */
   albedo: new THREE.Color(0.74, 0.78, 0.84),
   /** 受到的光 × gain；光锥外的溢光（手电打在身前地上反弹回来，见 light.ts）；月光底色的倍数（× FOG.ambient） */
-  gain: 0.03,
-  spill: 0.35,
+  gain: 0.05,
+  spill: 0.55,
   ambient: 2.4,
   /** 前向散射：顺着手电光看过去白气更亮 */
   phaseG: 0.35,
@@ -112,6 +123,19 @@ export interface Breath {
   /** 调试：一共呼了几口、每个人下一口的时刻 */
   debugStats(): { exhales: number; next: Record<number, number> };
   dispose(): void;
+}
+
+/**
+ * 这个访客此刻呼气的强度（0..1，给 interval 和每口气几团用）；null = 不呼。纯函数，没有随机、不碰渲染。
+ * - 恐惧值过了紧张线（FEAR.nervous）：按它到 FEAR.max 之间的位置，线性 0 → 1（以前就是这样）；
+ * - 鬼魂贴着（uneasy ≥ BREATH.chillFrom）：从 chillFrom 处的 0 线性涨到 uneasy = 1 时的 BREATH.chillMax；
+ * - 两样都有取大的，不相加；两样都没有（不怕、鬼魂也没贴近）不呼。uneasy 缺省（娃娃屋没有鬼魂）按 0。
+ */
+export function breathLevel(fear: number, uneasy: number = 0): number | null {
+  if (fear < FEAR.nervous && uneasy < BREATH.chillFrom) return null;
+  const fearLevel = Math.min(1, Math.max(0, (fear - FEAR.nervous) / (FEAR.max - FEAR.nervous)));
+  const chill = Math.min(1, Math.max(0, (uneasy - BREATH.chillFrom) / (1 - BREATH.chillFrom))) * BREATH.chillMax;
+  return Math.max(fearLevel, chill);
 }
 
 export function createBreath(light: LightUniforms, time: THREE.UniformNode<'float', number>): Breath {
@@ -271,7 +295,6 @@ export function createBreath(light: LightUniforms, time: THREE.UniformNode<'floa
 
   const interval = (fear01: number) =>
     (B.every[0] + (B.every[1] - B.every[0]) * fear01) * (1 + B.jitter * (2 * Math.random() - 1)) * (reduced ? B.reducedMotion.every : 1);
-  const fear01Of = (n: NpcState) => Math.min(1, Math.max(0, (n.fear - FEAR.nervous) / (FEAR.max - FEAR.nervous)));
 
   return {
     object,
@@ -290,9 +313,9 @@ export function createBreath(light: LightUniforms, time: THREE.UniformNode<'floa
           if (rig.vel.lengthSq() > 25) rig.vel.set(0, 0, 0); // 瞬移（刚建好、调试放人）不算
           rig.last.copy(rig.root.position);
         }
-        if (npc.fear < FEAR.nervous) { em.next = -1; em.scream = false; continue; }
+        const f = breathLevel(npc.fear, npc.uneasy ?? 0);
+        if (f === null) { em.next = -1; em.scream = false; continue; }
         if (!rig) continue;
-        const f = fear01Of(npc);
         if (em.scream) {
           em.scream = false;
           exhale(rig, houseRoot, now, f, true);
@@ -324,7 +347,7 @@ export function createBreath(light: LightUniforms, time: THREE.UniformNode<'floa
       const npc = state.npcs.find((n) => n.id === id);
       const rig = rigOf(id, houseRoot);
       if (!npc || !rig) return false;
-      exhale(rig, houseRoot, now, fear01Of(npc), scream);
+      exhale(rig, houseRoot, now, breathLevel(npc.fear, npc.uneasy ?? 0) ?? 0, scream);
       return true;
     },
     debugMouths(houseRoot) {

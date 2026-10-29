@@ -9,7 +9,7 @@ import type { NpcMode, NpcState, SimEvent, WorldState } from '../src/sim/types';
 
 /** 几个替身被调了多少次、要不要让它们抛异常（vi.mock 的工厂在导入时就跑，所以放进 hoisted） */
 const h = vi.hoisted(() => ({
-  calls: { crowd: 0, breath: 0, space: 0, braam: 0 },
+  calls: { crowd: 0, breath: 0, space: 0, braam: 0, door: 0 },
   fail: { crowd: false, breath: false },
 }));
 vi.mock('../src/audio/ambience', async (importOriginal) => ({
@@ -68,6 +68,8 @@ vi.mock('../src/audio/sfx', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/audio/sfx')>()),
   // 挂起时的吓跑不该攒着、恢复后补放：数一数 braam
   braam: (_bus: unknown, t: number) => (h.calls.braam++, t),
+  // 前门的关门声（远处那声闷响 + 锁舌）：数一数响了几次
+  exitDoor: (_bus: unknown, t: number) => (h.calls.door++, t),
 }));
 
 // ── 假的 AudioContext 和节点 ──────────────────────────────────────────────────────────────
@@ -178,7 +180,7 @@ async function boot3d() {
 
 beforeEach(() => {
   fades.length = 0;
-  h.calls.crowd = h.calls.breath = h.calls.space = h.calls.braam = 0;
+  h.calls.crowd = h.calls.breath = h.calls.space = h.calls.braam = h.calls.door = 0;
   h.fail.crowd = h.fail.breath = false;
   vi.stubGlobal('window', { AudioContext: FakeAC });
   for (const name of ['GainNode', 'DynamicsCompressorNode', 'WaveShaperNode', 'ConvolverNode', 'BiquadFilterNode', 'StereoPannerNode', 'OscillatorNode', 'AudioBufferSourceNode', 'ConstantSourceNode']) {
@@ -295,5 +297,43 @@ describe('每帧 3D 的几步（脚步、喘气、space.update）各用各的 gu
     expect(h.calls.breath).toBe(2);
     expect(h.calls.space).toBe(2);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('前门的关门声跟着画面（集成，FD 审查 Minor 1）：画面上真的甩门的那一下才响', () => {
+  const exit = (id: number, calm = false): SimEvent => ({ type: 'exit', npc: id, name: `N${id}`, total: 1, ...(calm ? { calm: true } : {}) });
+
+  it('接了前门（setFrontDoor）：每个 exit 问它这一下门甩上了没有，只有甩上的那一下响；一群人出门只响最后那一声', async () => {
+    const audio = await boot();
+    audio.setFrontDoor({ slammed: (id) => id === 3 });
+    for (const id of [1, 2, 3]) send(audio, exit(id), world());
+    step(audio);
+    expect(h.calls.door).toBe(1);
+  });
+
+  it('天亮平静出门（exit 带 calm）照同一条规则：甩上了才响，不另加声音', async () => {
+    const audio = await boot();
+    audio.setFrontDoor({ slammed: (id) => id === 2 });
+    send(audio, exit(1, true), world());
+    step(audio);
+    expect(h.calls.door).toBe(0);
+    send(audio, exit(2, true), world());
+    step(audio);
+    expect(h.calls.door).toBe(1);
+  });
+
+  it('没接前门（开发页 dev/audio.ts、离线测量）：每个 exit 都响，和原来一样；setFrontDoor(null) 也回到这样', async () => {
+    const audio = await boot();
+    for (const id of [1, 2]) send(audio, exit(id), world());
+    step(audio);
+    expect(h.calls.door).toBe(2);
+    audio.setFrontDoor({ slammed: () => false });
+    send(audio, exit(3), world());
+    step(audio);
+    expect(h.calls.door).toBe(2);
+    audio.setFrontDoor(null);
+    send(audio, exit(4), world());
+    step(audio);
+    expect(h.calls.door).toBe(3);
   });
 });

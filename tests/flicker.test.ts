@@ -573,7 +573,7 @@ describe('门廊灯自己的微抖（最终审查 M2）：单独数不出来，�
 // ── 最终审查顺手修的两处（V-M4、V-M5）──────────────────────────────────────
 
 describe('手电镜片跟着 torchDim 一起暗（V-M4）', () => {
-  it('镜片的颜色 = 亮芯那盏灯此刻的颜色（暗下去时往暖红偏）× torchDim；亮回 1 就原样还原', async () => {
+  it('镜片的颜色 = 亮芯那盏灯此刻的颜色（暗下去时往暖红偏）× torchDim × 增益；亮回 1 就原样还原', async () => {
     const f = await fresh();
     const parent = new f.three.Group();
     const fl = f.flash.createFlashlight(parent, 'high', 1);
@@ -583,21 +583,28 @@ describe('手电镜片跟着 torchDim 一起暗（V-M4）', () => {
     const pose = { x: 5, y: 0.8, z: 5, dir: 0, power: 1, nervous: false };
     const base = new f.three.Color(PALETTE.torchCore);
 
+    // 第二波 ART-7：镜片是光源，亮度要留在泛光阈值上面，所以颜色 = 亮芯色 × 增益（flashlight.ts 里初值、update 里各写一处）。
+    // 这条只管「跟着 torchDim 暗、偏色」，不钉增益是几：先在 torchDim = 1（沿用初值）时量出来，之后 update 重算的那一处必须是同一个增益
     f.reg.torchDim.fill(1);
     fl.update(pose, 1 / 60, 0);
-    expect(lensColor.equals(base)).toBe(true);
+    const gain = lensColor.r / base.r;
+    expect(gain).toBeGreaterThanOrEqual(1);
+    expect(lensColor.g / base.g).toBeCloseTo(gain, 6);
+    expect(lensColor.b / base.b).toBeCloseTo(gain, 6);
 
     f.reg.torchDim.fill(0.3);
     fl.update(pose, 1 / 60, 1 / 60);
-    expect(lensColor.r).toBeCloseTo(core.color.r * 0.3, 6);
-    expect(lensColor.g).toBeCloseTo(core.color.g * 0.3, 6);
-    expect(lensColor.b).toBeCloseTo(core.color.b * 0.3, 6);
-    expect(Math.max(lensColor.r, lensColor.g, lensColor.b)).toBeLessThan(Math.max(base.r, base.g, base.b) * 0.35);
+    expect(lensColor.r).toBeCloseTo(core.color.r * 0.3 * gain, 6);
+    expect(lensColor.g).toBeCloseTo(core.color.g * 0.3 * gain, 6);
+    expect(lensColor.b).toBeCloseTo(core.color.b * 0.3 * gain, 6);
+    expect(Math.max(lensColor.r, lensColor.g, lensColor.b)).toBeLessThan(Math.max(base.r, base.g, base.b) * gain * 0.35);
     expect(lensColor.b / lensColor.r).toBeLessThan(base.b / base.r); // 越暗越偏红，和两盏灯一致
 
     f.reg.torchDim.fill(1);
     fl.update(pose, 1 / 60, 2 / 60);
-    expect(lensColor.equals(base)).toBe(true);
+    expect(lensColor.r).toBeCloseTo(base.r * gain, 6);
+    expect(lensColor.g).toBeCloseTo(base.g * gain, 6);
+    expect(lensColor.b).toBeCloseTo(base.b * gain, 6);
   });
 
   it('镜片材质所有手电共用一份（每支一份材质会各编一份着色器，开场多编几个）', async () => {

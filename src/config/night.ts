@@ -29,6 +29,8 @@ export const NIGHT = {
 /**
  * 墙上多一个影子（The Other One）：一晚最多 max 次，after 秒以后（或者吓跑 afterScared 个以后，哪个先到）才可能出现。
  * 只在没有手电照着的时候出现在某面墙上，被某个访客的手电照到约 litFor 秒以后、下一次没被照着时消失；有访客走近 near 米就提前撤。
+ * 一次出现最长 maxShown 秒（真实时间，从第一次被照到算起）：到了就在接下来约 1.2 秒（otherShadow.ts 的 OTHER_LOOK.fade）里
+ * 慢慢化掉，不管有没有被照着——访客一直照着它时原来会一直在（实测一次 16 秒，访客盯着却没反应，显得怪），墙上的影子在光里化掉才是对的样子。
  * 访客没反应，播报不提
  */
 export const OTHER_SHADOW = {
@@ -37,4 +39,5 @@ export const OTHER_SHADOW = {
   afterScared: 3,
   litFor: 1,
   near: 1.2,
+  maxShown: 5,
 };
