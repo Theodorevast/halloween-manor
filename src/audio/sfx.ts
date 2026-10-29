@@ -39,9 +39,10 @@
 //     4.12 盖子砸上：一声闷的木头「啪」，同时把还在响的音按死 [砸上 4.12]，再弹一下 [4.2]
 //   吓跑 braam（hit-stop 0.15 秒静音之后，1.5 秒）：D1 D2 E♭2 D3 E♭3 锯齿波（每个音两根、±7 音分）→ tanh 失真 → 低通
 //     3500 → 700 → 280 Hz 收拢（共振 Q 2.2，这是 braam 的「张嘴闭嘴」，不是音高滑动）+ 噪声爆发 + 52→30 Hz 下沉；大量送混响
-//   离开 exit（0.4 秒 + 尾巴）：远处闷闷的关门声 —— 60→42 Hz 闷响 + 低通噪声，全部过 320 Hz 低通，九成是混响；不是「叮」
-//   进门 spawn（1.6 秒）：两下敲门（210 / 640 Hz 门板共鸣 + 一点「嗒」，过 2.2 kHz 低通显得在门外）[0, 0.24]，
-//     然后前门吱呀一声（0.55–1.55，20→28→18 Hz 摩擦，520 / 1180 / 2350 Hz 共鸣）
+//   离开 exit（0.4 秒 + 尾巴）：远处闷闷的关门声 —— 60→42 Hz 闷响 + 低通噪声，全部过 320 Hz 低通，九成是混响；不是「叮」。
+//     闷响落在 exit 事件之后 exit.contact 秒（画面里门撞上门框那一刻），锁舌的「嗒」再过 exit.latch 秒（时刻读 config/frontDoor.ts）
+//   进门 spawn（1.6 秒）：两下敲门（210 / 640 Hz 门板共鸣 + 一点「嗒」，过 2.2 kHz 低通显得在门外）[config/frontDoor.ts 的 knocks：0, 0.24]，
+//     然后前门吱呀一声（creak，画面里的门就在这一段里推开；0.55–1.55，20→28→18 Hz 摩擦，520 / 1180 / 2350 Hz 共鸣）
 //   后颈一凉 chillSwell（chill 事件 neck 为真；不定位，是配乐的一层；约 1 秒涌起 + 3 秒退掉）：低沉的小二度 D2 + E♭2
 //     锯齿波（各两根 ±5 音分，4.4 Hz 的拍，二次谐波 D3 / E♭3 再打 8.7 Hz 的拍）+ 一点 D1 正弦，过低通 160 → 520 Hz
 //     （跟着音量开、跟着音量收）；指数渐强 0.7 秒（越到后面涨得越快，像反向的音头）、撑 0.25 秒、0.55 秒时间常数退掉。
@@ -74,6 +75,7 @@
 //   机关设下 trapArm（trap 事件 armed；不定位，只有玩家听得见）：极轻的冰裂声 —— 一小簇主裂声（3–5 个 0.5–3 毫秒的噪声颗粒，25 毫秒内）+ 后面 0.28 秒里
 //     疏疏落落的 3–5 下小裂声（越来越轻）；每颗随机走 3.2 / 4.8 / 6.6 kHz 三条宽带通之一（冰裂不会每一下都一样亮），Q 0.9，没有共鸣、没有音高（调研 A7）；
 //     再垫一丝 6 kHz 以上的「嘶」（结晶，0.3 秒起落，很轻）。sprung 走物件本来的声音，expired 无声
+import { FRONT_DOOR_TIMELINE } from '../config/frontDoor';
 import { CELL, FURNITURE } from '../config/house';
 import { SCARES, WARDROBE, wardrobeShut } from '../config/scares';
 import type { ScareType } from '../sim/types';
@@ -1155,37 +1157,46 @@ const bedHit: SfxFn = braamFn(BED_HIT, 'bedHit');
 // ── 前门：离开、进门 ─────────────────────────────────────────────────────────────
 
 export const FRONT = {
-  /** 离开：远处闷闷的关门声（全部过 320 Hz 低通，大量混响） */
+  /** 离开：远处闷闷的关门声（全部过 320 Hz 低通，大量混响）。什么时候响见 config/frontDoor.ts 的 exit：落在画面里门撞上门框那一刻 */
   exitThud: 0.5,
   exitNoise: 0.35,
   exitLp: 320,
   exitWet: 0.9,
-  /** 进门：两下敲门 + 前门吱呀 */
+  /** 进门：两下敲门 + 前门吱呀（音量；什么时候响见 config/frontDoor.ts 的 knocks、creak） */
   knock: 0.4,
-  knockGap: 0.24,
   creak: 0.18,
   creakSpec: { rate: [20, 28, 18], res: [[520, 8, 1], [1180, 10, 0.7], [2350, 8, 0.35]], grit: 0.4 } as CreakSpec,
 };
 
+/**
+ * 离开：t 是 exit 事件的时刻。画面里的门（view/frontDoor.ts）从 t 起甩上，exit.contact 秒后撞上门框，这声闷响就落在撞上那一刻；
+ * 锁舌的「嗒」在撞上之后 exit.latch 秒。时刻都在 config/frontDoor.ts，画面读同一份
+ */
 export const exitDoor: SfxFn = (bus, t, at) => {
+  const { contact, latch } = FRONT_DOOR_TIMELINE.exit;
   const s = new Snd(bus, { at, level: LEVEL.exit, wet: FRONT.exitWet });
   const far = s.bq('lowpass', FRONT.exitLp, 0.7);
   far.connect(s.out);
-  thud(s, far, t, FRONT.exitThud, 60, 42, 0.12, 500, FRONT.exitNoise);
-  knock(s, far, t + 0.14, 0.12, 300, 0.02, 0);
-  return s.end(t + 0.4 + 2.4);
+  thud(s, far, t + contact, FRONT.exitThud, 60, 42, 0.12, 500, FRONT.exitNoise);
+  knock(s, far, t + contact + latch, 0.12, 300, 0.02, 0);
+  return s.end(t + contact + 0.4 + 2.4);
 };
 
+/**
+ * 进门：t 是 spawn 事件的时刻。两下敲门、门轴吱呀的起止都在 config/frontDoor.ts（knocks、creak）；
+ * 画面里的门（view/frontDoor.ts）就在吱呀这一段里往屋里推开
+ */
 export const spawnDoor: SfxFn = (bus, t, at) => {
+  const [creakFrom, creakTo] = FRONT_DOOR_TIMELINE.creak;
   const s = new Snd(bus, { at, level: LEVEL.spawn, wet: 0.35 });
   const outside = s.bq('lowpass', 2200, 0.7);
   outside.connect(s.out);
-  for (const at of [0, FRONT.knockGap]) {
-    knock(s, outside, t + at, FRONT.knock, 210, 0.05, 0.25);
-    knock(s, outside, t + at, FRONT.knock * 0.4, 640, 0.03, 0);
+  for (const k of FRONT_DOOR_TIMELINE.knocks) {
+    knock(s, outside, t + k, FRONT.knock, 210, 0.05, 0.25);
+    knock(s, outside, t + k, FRONT.knock * 0.4, 640, 0.03, 0);
   }
-  creak(s, s.out, t + 0.55, 1.0, FRONT.creak, FRONT.creakSpec, 0.25);
-  return s.end(t + 1.6 + 2.4);
+  creak(s, s.out, t + creakFrom, creakTo - creakFrom, FRONT.creak, FRONT.creakSpec, 0.25);
+  return s.end(t + creakTo + 0.05 + 2.4);
 };
 
 // ── 现身：灯暗一下的咔哒 ─────────────────────────────────────────────────────────
