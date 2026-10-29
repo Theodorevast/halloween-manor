@@ -10,13 +10,13 @@ import { createGhostRig, setGhostUi } from './engine/ghostRig';
 import { createCinematic, type Cinematic } from './engine/cinematic';
 import { createJuice } from './engine/juice';
 import { createPicker } from './engine/picking';
-import { createRenderCore, watchFrameTime } from './engine/renderer';
+import { createRenderCore, watchFrameTime, type EngineCore } from './engine/renderer';
 import { isGhostRig, type CameraRig, type FrameCtx, type Module, type Quality, type RenderCore } from './engine/types';
 import type { Object3D } from 'three/webgpu';
 import type { ManifestState, SimEvent } from './sim/types';
 import { createWorld } from './sim/world';
 import { createHud } from './ui/hud';
-import { createCharactersView } from './view/characters';
+import { createCharactersView, loadFirstOutfit } from './view/characters';
 import { createFrost } from './view/frost';
 import { GHOST, createGhostView, loadGhostModel } from './view/ghost';
 import { createFogView } from './view/fog';
@@ -36,7 +36,7 @@ let rig: CameraRig | undefined;
 let cinematic: Cinematic | undefined;
 let quality: Quality = 'high';
 let qualityPicked = false;
-/** boot 全部完成（模型加载完）才算 ready；开场点击可能早于 ready，先记下 wantBegin */
+/** boot 全部完成（第一套访客造型等模型加载完、开场前那次预编译编完）才算 ready；开场点击可能早于 ready，先记下 wantBegin */
 let ready = false;
 let wantBegin = false;
 let started = false;
@@ -119,9 +119,20 @@ function start() {
 const bootMark = (what: string) => { if (new URLSearchParams(location.search).has('debug')) console.info(`[boot] ${what} ${Math.round(performance.now())} ms`); };
 
 async function boot() {
+  // 有鼠标和键盘的设备用第三人称操控鬼魂；触屏设备（没有精确指针）继续用娃娃屋俯视。?dollhouse 强制俯视
+  const ghostMode = matchMedia('(pointer: fine)').matches && !new URLSearchParams(location.search).has('dollhouse');
+  // 开场按钮要等的模型最先开始下载，和下面建渲染器、搭房子同时进行（解析、摆正都不用渲染器）：
+  // 第一个访客穿的那套造型（其余几套开场按钮可用之后才下载，见 ready 之后的 streamOutfits）；第三人称时还有鬼魂的模型
+  // （config/ghost.ts 的 url 为 null 时用程序化的人形，不下载）
+  const firstOutfit = loadFirstOutfit();
+  const ghostModel = ghostMode ? loadGhostModel().catch((err) => {
+    console.warn('鬼魂模型加载失败，改用程序化的人形', err);
+    return null;
+  }) : Promise.resolve(null);
+  let engine: EngineCore;
   try {
     // ?webgl 强制走 WebGL2：排查「是不是 WebGPU 的问题」时用，冒烟测试也靠它测回退路径
-    core = await createRenderCore(canvas, { forceWebGL: new URLSearchParams(location.search).has('webgl') });
+    core = engine = await createRenderCore(canvas, { forceWebGL: new URLSearchParams(location.search).has('webgl') });
   } catch (err) {
     console.error(err);
     hud.showError(STRINGS.noWebGL);
@@ -138,8 +149,6 @@ async function boot() {
     hud.showError(STRINGS.deviceLost);
     addEventListener('pointerdown', () => location.reload(), { once: true });
   };
-  // 有鼠标和键盘的设备用第三人称操控鬼魂；触屏设备（没有精确指针）继续用娃娃屋俯视。?dollhouse 强制俯视
-  const ghostMode = matchMedia('(pointer: fine)').matches && !new URLSearchParams(location.search).has('dollhouse');
   const r = (rig = ghostMode ? createGhostRig(canvas) : createCameraRig(canvas));
   const fit = () => {
     c.resize(canvas.clientWidth, canvas.clientHeight);
@@ -157,14 +166,11 @@ async function boot() {
   const props = createPropsView(c, { dissolve: isGhostRig(r) && !new URLSearchParams(location.search).has('noghostfx') });
   const overlays = createOverlays(document.getElementById('overlay')!, r);
   bootMark('渲染器就绪');
-  const characters = await createCharactersView(c);
-  bootMark('访客模型加载完');
+  const characters = await createCharactersView(c, firstOutfit);
+  bootMark('第一套访客造型加载完');
   const cine = (cinematic = createCinematic(r, c));
   // 第三人称：鬼魂现身时借附近的灯闪（lightfx）、脚下结霜（frost）；鬼魂的模型按 config/ghost.ts（url 为 null 用程序化的人形）
-  const ghostFx = isGhostRig(r) ? { lights: createLightFx(c), frost: createFrost(c), model: await loadGhostModel().catch((err) => {
-    console.warn('鬼魂模型加载失败，改用程序化的人形', err);
-    return null;
-  }) } : null;
+  const ghostFx = isGhostRig(r) ? { lights: createLightFx(c), frost: createFrost(c), model: await ghostModel } : null;
   // ?solid=0.1：现身时「实」的那份没被照着时的暗度（默认 0.03 是暗色剪影，0.1 是偏灰的实雾；看样时对比用）。建鬼魂之前改
   const solid = Number(new URLSearchParams(location.search).get('solid') || NaN);
   if (Number.isFinite(solid) && solid >= 0) GHOST.solid.dark = solid;
@@ -298,10 +304,13 @@ async function boot() {
   // ?nobgcompile：不做后台预编译（对比卡顿用）
   const precompiled = new URLSearchParams(location.search).has('nobgcompile') ? Promise.resolve() : c.precompileAll(r.camera);
   for (const [i, o] of deferred.entries()) o.visible = deferredVisible[i];
-  // 访客造型（开场前只编了第一套、镜头看得见的部分）：上面收集完物体之后放临时访客（站在地板下面），
-  // 留到下面那一帧整栋真画时编好再收走（见动画循环）；玩家在那之前就开始了，开始时收走、直接都放出来
+  // 第一套访客造型（开场前只编了镜头看得见的部分）：上面收集完物体之后放临时访客（站在地板下面），
+  // 留到下面那一帧整栋真画时把阴影图、手电这些编好再收走（见动画循环）；玩家在那之前就开始了，开始时收走
   const outfitsDone = characters.stageOutfits();
   releaseStaged = outfitsDone;
+  // 其余几套访客造型现在才开始下载（开场按钮只等第一套）：一套一套下载，下载好一套、异步编好管线，才放进轮换，
+  // 在那之前进门的人只穿已经能用的（见 characters.ts 的 streamOutfits）。编要等上面整栋房子的后台预编译编完：点了开始要等它，别跟它抢
+  void characters.streamOutfits({ camera: r.camera, sceneTarget: () => engine.post?.sceneTarget(r.camera) ?? null, hidden: () => !started }, precompiled);
   precompiled.then(
     () => {
       bgDone = true;
@@ -311,7 +320,7 @@ async function boot() {
       if (new URLSearchParams(location.search).has('debug')) console.info(`[boot] 后台预编译完成 ${Math.round(performance.now() - t0)} ms`);
     },
     (err) => {
-      // 编不成也照样把其余几套放出来、照样开场：大不了画到的时候现编、卡一下
+      // 编不成也照样收走临时访客、照样开场：大不了画到的时候现编、卡一下
       releaseStaged?.();
       bgDone = true;
       console.warn('[boot] 后台预编译失败，改为边画边编', err);
