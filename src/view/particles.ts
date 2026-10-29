@@ -3,13 +3,14 @@
 // - 浮尘（particles/motes.ts）：两千颗，只在手电光锥里、墙这一侧亮；
 // - 粉尘（particles/plaster.ts）：肖像砸地那一刻从画框四周喷出一团灰褐色的灰 + 几粒碎屑；
 //   床（被子下面的人塌下去那一刻，2026-10-28）从被子面中间扬起一小团灰，没有碎屑，同一套粒子换一套形状；
-//   衣柜（门被从里面拉上、撞上的那一下，2026-10-29）柜顶积的灰被震起来。三处都在 DUST_BURSTS 一张表里；
+//   衣柜（门被从里面拉上、撞上的那一下，2026-10-29）柜顶积的灰从边上翻下去，几秒里慢慢落到门前的地上（plaster 的 fall）。
+//   三处都在 DUST_BURSTS 一张表里；
 // - 白气（particles/breath.ts）：恐惧值过了紧张线的人隔一会儿呼一小口，越怕喘得越急。
 // 灯光不走 three 的灯光系统（particles/light.ts，和雾同一套光锥和挡墙算法），材质都不受光照：灯的数量变了不重新编译。
 //
 // 材质、几何体开局一次建好，之后只改 uniform 和一小段实例缓冲；三个物体都标了 deferCompile（全部粒子缩成 0），
 // main.ts 在开场按钮可用之后把它们显示出来真画一帧编好管线，第一次 update 起再按需要藏起来（没有粒子时不画；
-// 粉尘的软粒子要每帧拷一次深度，只在扬灰的两秒里拷）。
+// 粉尘的软粒子要每帧拷一次深度，只在扬灰的那几秒里拷：按这一次最长的一颗算，床约 2 秒、肖像 3.6 秒（碎屑）、衣柜 5 秒）。
 // 粒子着色器里不用 select()（见 particles/common.ts 的 ge / lt）。
 // 娃娃屋（正交相机）和第三人称（透视相机）都要对：尺寸、软粒子、前向散射在每次画之前按这一次的相机换算（common.ts、light.ts）。
 // 性能（2026-10-27，本机 WebGPU，4 个访客，High，DPR 2，不锁帧率，同页轮流开关 16 轮）：常态（浮尘 + 呼气）±1% 以内，测不出；
@@ -29,7 +30,7 @@ import { MOTES, createMotes } from './particles/motes';
 import { PLASTER, createPlaster, type BurstShape } from './particles/plaster';
 import { BED_TIMELINE, bedDustSpot } from './props/bed';
 import { PORTRAIT_TIMELINE } from './props/portrait';
-import { wardrobeDustSpot, wardrobeLayout } from './props/wardrobe';
+import { WARDROBE_SHUT, wardrobeDustSpot, wardrobeLayout } from './props/wardrobe';
 
 export { BREATH } from './particles/breath';
 export { MOTES } from './particles/motes';
@@ -41,11 +42,15 @@ export interface DustBurst {
   at: number;
   /** 从哪里扬：落点中心（物件局部坐标，米；props.ts 摆放：根在 propCenter、rotation.y = yawFor(facing)，正面朝局部 +z） */
   spot: () => { x: number; y: number; z: number };
-  /** 扬成什么样（particles/plaster.ts 的 BurstShape）；不给就是肖像砸地那一套 */
-  shape?: BurstShape;
+  /**
+   * 扬成什么样（particles/plaster.ts 的 BurstShape）；不给就是肖像砸地那一套。
+   * 要按布局算的（衣柜）写成函数，扬灰那一刻才算：导入期不调布局函数（它在家具表改错时会抛错，导入期抛错整页白屏）
+   */
+  shape?: BurstShape | (() => BurstShape);
 }
 
-const wardrobeBox = wardrobeLayout();
+/** 这一行此刻的形状（函数就调一次） */
+export const dustShape = (d: DustBurst): BurstShape | undefined => (typeof d.shape === 'function' ? d.shape() : d.shape);
 
 /**
  * 物件「落下」时扬的灰，一张表（最终审查 P-6：原来肖像、床各抄一份同样的换算，加衣柜时并起来）。
@@ -61,14 +66,18 @@ export const DUST_BURSTS: Partial<Record<ScareType, DustBurst>> = {
     spot: bedDustSpot,
     shape: { halfW: 0.22, halfL: 0.26, edgeShare: 0.4, count: 0.5, size: 0.75, speed: 0.6, chips: false },
   },
-  // 衣柜：门被从里面拉上、撞上门框的那一下（slamAt + slamTime；slamAt 那一刻门才开始关），柜顶积的灰被震起来。
-  // 落点是整个柜顶，大半从四边翻出去（前沿最多，见 PLASTER.dust.far），灰少、细、慢，没有碎屑
+  // 衣柜：门被从里面拉上、撞上门框的那一下（WARDROBE_SHUT = slamAt + slamTime；slamAt 那一刻门才开始关）。
+  // 落点是整个柜顶（到顶檐外沿）；大半从四边翻出去（前沿最多，见 PLASTER.dust.far），在 WARDROBE.settle 秒里慢慢落到
+  // 门前、柜子两边的地上（fall；靠墙那条边的、顶面上震起来的照旧悬一会儿就淡掉）；灰细、不崩碎屑
   wardrobe: {
-    at: WARDROBE.slamAt + WARDROBE.slamTime,
+    at: WARDROBE_SHUT,
     spot: wardrobeDustSpot,
-    shape: {
-      halfW: wardrobeBox.w / 2 - 0.04, halfL: (wardrobeBox.zf - wardrobeBox.zb) / 2 - 0.04,
-      edgeShare: 0.7, count: 0.45, size: 0.7, speed: 0.5, chips: false,
+    shape: () => {
+      const L = wardrobeLayout();
+      return {
+        halfW: L.w / 2, halfL: (L.zf - L.zb) / 2,
+        edgeShare: 0.85, count: 0.7, size: 0.5, speed: 0.5, chips: false, fall: WARDROBE.settle,
+      };
     },
   },
 };
@@ -130,8 +139,8 @@ export function createParticlesView(core: RenderCore): Module {
     axisW.set(Math.cos(yaw), 0, -Math.sin(yaw));
     axisL.set(Math.sin(yaw), 0, Math.cos(yaw));
     center.set(c.x, s.y, c.z).addScaledVector(axisW, s.x).addScaledVector(axisL, s.z);
-    plaster.burst(t0, center, axisW, axisL, d.shape);
-    plasterUntil = t0 + plaster.maxLife;
+    // 这一次最长的一颗活多久按这一行的形状算（没有碎屑的床不再白画 1.5 秒空的；衣柜的落灰要 5 秒）
+    plasterUntil = t0 + plaster.burst(t0, center, axisW, axisL, dustShape(d));
     return true;
   };
 

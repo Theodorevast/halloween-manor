@@ -1,15 +1,17 @@
 // 衣柜：被从里面拉上（设计文档 4.3，调研 3.3 的 A 版）。卧室北墙那个衣柜：柜体是家具（furniture.ts，门洞留空），
 // 这里是两扇门和门里的东西。被附身时：
 // - 锁舌「咔哒」一声，门板轻轻一震，像有人从里面推了一下，还没开；
-// - 右边那扇（+x，合页在它外侧）自己慢慢开出一条缝：先快后慢，到 WARDROBE.openDeg 一下子停死，不回弹、不晃；
+// - 左边那扇（−x，西边，合页在它外侧）自己慢慢开出一条缝：先快后慢，到 WARDROBE.openDeg 一下子停死，不回弹、不晃。
+//   门往西南转出来，门缝朝东南：默认的娃娃屋机位（东南）正好看进门缝（开右边那扇的话，门板正好挡在这个机位前面）；
 // - 停住。门缝里是吃光的黑（调研 S3），手电照进去只照亮挂着的外套靠门的那条边，其中一件轻轻晃一下；
-// - WARDROBE.slamAt：门被从里面猛地拉上，硬停，门和门里的东西震一下（2 毫米以内），柜顶落灰（particles.ts 的扬灰）。
+// - WARDROBE.slamAt：门被从里面猛地拉上，WARDROBE_SHUT 撞上门框、硬停，门和门里的东西震一下（2 毫米以内），
+//   柜顶的灰从边上翻下去，几秒里慢慢落到门前的地上（particles.ts 的扬灰，plaster.ts 的 fall）。
 // 约三分之一的时候（trigger 事件的 variant < WARDROBE.fingersChance），合上之前先有四根苍白的手指从门缝里伸出来、
 // 弯过门边扶住它，合上时缩回去；看不见手后面连着什么。不露脸、不发光、不扑出来；B 版（柜顶的剪影、手电抬高）不在这里。
 // 时间轴全在 config/scares.ts 的 WARDROBE（声音也读它），这里只有画面自己的幅度和形状（WARDROBE_LOOK）。
 //
 // 局部坐标（props.ts 摆放：根在 propCenter，转 yawFor(facing)）：衣柜朝南，yaw = 0；物件格是衣柜三格里中间那一格，
-// 原点正好在衣柜正中的地面，局部坐标就是衣柜的模型坐标（furniture.ts 的 WARDROBE_BOX、furnitureFrame），正面 +z、x 向东。
+// 原点正好在衣柜正中的地面，局部坐标就是衣柜的模型坐标（furniture.ts 的 WARDROBE_BOX、furnitureFrame），正面 +z（南）、x 向东。
 //
 // 吃光的黑：门洞里一个不受光的纯黑内衬（背面朝外的盒子，从门洞看进去看到的是它的里面）。外套是受光的布，
 // 但顶点色按离门洞多深压暗，所以手电照进去也只照亮外套靠门的那一条边，再往里就没进黑里了。
@@ -57,14 +59,18 @@ export const WARDROBE_LOOK = {
 
 const W = WARDROBE;
 const LK = WARDROBE_LOOK;
-/** 门撞上门框的那一刻（秒，从 trigger 算起） */
-const SHUT = W.slamAt + W.slamTime;
+/**
+ * 门撞上门框的那一刻（秒，从 trigger 算起）= slamAt + slamTime：硬停、震、柜顶落灰都从这一刻起；
+ * 声音的闷响也放在这一刻（合并时 SCARES.wardrobe.hitAt 也改成它）。particles.ts、测试都读这一个，不各算一遍
+ */
+export const WARDROBE_SHUT = W.slamAt + W.slamTime;
+const SHUT = WARDROBE_SHUT;
 /** 演完：撞上、震完，再留一点给门里那件外套晃完（门已经关上，看不见），之后回到静止 */
 const END = SHUT + 0.3;
 
 // ───────────────────────── 时间曲线（纯函数，tests/wardrobe-view.test.ts 钉着） ─────────────────────────
 
-/** 右边那扇门开了多少度（t：trigger 以后的秒数；< 0 = 没在表演） */
+/** 开的那扇门开了多少度（t：trigger 以后的秒数；< 0 = 没在表演）。门往外开为正，合页那边按方向换算成 rotation.y */
 export function doorDeg(t: number): number {
   if (t <= W.latch[0]) return 0;
   if (t < W.latch[1]) {
@@ -125,8 +131,14 @@ export interface WardrobeLayout {
   zBack: number;
 }
 
-/** 衣柜在物件局部坐标里的布局（从家具表和 furniture.ts 换算，不建任何东西） */
+let layoutCache: WardrobeLayout | null = null;
+
+/**
+ * 衣柜在物件局部坐标里的布局（从家具表和 furniture.ts 换算，不建任何东西）。算一次就记住（家具表不会在运行时变）。
+ * 别的模块不要在导入时就调它：家具表改错时它会抛错，导入期抛错整页白屏、走不到 main.ts 的报错界面
+ */
 export function wardrobeLayout(): WardrobeLayout {
+  if (layoutCache) return layoutCache;
   const f = FURNITURE.find((x) => x.id === 'bedroom-wardrobe');
   const p = PROPS.find((x) => x.type === 'wardrobe');
   if (!f || !p) throw new Error('wardrobe: 家具表里没有 bedroom-wardrobe，或者 PROPS 里没有衣柜');
@@ -138,11 +150,12 @@ export function wardrobeLayout(): WardrobeLayout {
   }
   const fr = furnitureFrame(f, buildTiles());
   const B = WARDROBE_BOX;
-  return {
+  layoutCache = {
     w: fr.w, zb: fr.zb, zf: fr.zf,
     xo: fr.w / 2 - B.inset, y0: B.y0, y1: FURNITURE_TOP.wardrobe - B.top,
     zFace: fr.zf - B.front, zBack: fr.zb + B.back,
   };
+  return layoutCache;
 }
 
 /** 落灰的位置：柜顶面正中（物件局部坐标）。particles.ts 按物件的摆放换算成房屋坐标 */
@@ -158,13 +171,13 @@ const RAIL = { y: 1.8, r: 0.011 };
 
 /**
  * 挂着的外套：外套侧着挂（肩宽沿进深），从门缝里看见的是外套靠门的那条边（袖子、前襟）。
- * x：挂在哪（都在开的那扇门后面：左半边那扇门一直关着，看不见，不挂）；len：衣架到下摆多长；col：颜色（暗、旧、去饱和）。
- * 第一件离门缝最近，就是 hold 里晃的那件
+ * x：挂在哪（都在开的那扇门后面，也就是西半边：东半边那扇门一直关着，看不见，不挂）；len：衣架到下摆多长；
+ * col：颜色（暗、旧、去饱和）。第一件离门缝最近，就是 hold 里晃的那件
  */
 const COATS = [
-  { x: 0.13, len: 1.0, col: 0x2e2c2a }, // 炭灰的呢大衣
-  { x: 0.31, len: 0.82, col: 0x352327 }, // 褪了色的暗酒红短外套（调色板的 fabric 压暗、去饱和）
-  { x: 0.49, len: 0.95, col: 0x302b22 }, // 橄榄褐的风衣
+  { x: -0.13, len: 1.0, col: 0x2e2c2a }, // 炭灰的呢大衣
+  { x: -0.31, len: 0.82, col: 0x352327 }, // 褪了色的暗酒红短外套（调色板的 fabric 压暗、去饱和）
+  { x: -0.49, len: 0.95, col: 0x302b22 }, // 橄榄褐的风衣
 ];
 
 type V3 = [number, number, number];
@@ -231,32 +244,35 @@ function shadeByDepth(g: THREE.BufferGeometry, dz: number, zFace: number) {
 
 /**
  * 四根手指（食指到小指，从上往下；手横着伸出来，四指弯过门边）：高度（米）、各节的半径和长度（掌骨、近节、中节、远节），
- * lift：中节离开门面翘起多少、bend：远节再往门面弯多少、splay：掌骨往门后斜多少（弧度；每根略有不同，不像一排复制出来的）。
- * 手指在把手（1.1–1.22 米）上面一点
+ * lift：中节离开门面翘起多少、bend：远节再往门面弯多少（弧度；每根略有不同，不像一排复制出来的）。手指在把手（1.1–1.22 米）上面一点。
+ * 掌骨只留指根后面一小截（不到 2 厘米），splay：往门后（合页那边）斜多少。门开到 25° 以后，门后那一块是露在外面的楔形空间、
+ * 不在柜子里，掌骨一长就在亮的外套边上显出一截黑桩（审查 Minor-3）
  */
 const HAND = [
-  { y: 1.369, r: [0.0095, 0.0088, 0.0081, 0.0074], len: [0.06, 0.041, 0.025, 0.02], lift: 0.12, bend: 0.26, splay: 0.5 },
-  { y: 1.35, r: [0.0098, 0.0091, 0.0084, 0.0076], len: [0.062, 0.045, 0.028, 0.021], lift: 0.16, bend: 0.28, splay: 0.58 },
-  { y: 1.331, r: [0.0094, 0.0086, 0.0079, 0.0072], len: [0.06, 0.042, 0.026, 0.02], lift: 0.13, bend: 0.27, splay: 0.66 },
-  { y: 1.314, r: [0.0085, 0.0076, 0.007, 0.0065], len: [0.055, 0.033, 0.019, 0.018], lift: 0.2, bend: 0.3, splay: 0.78 },
+  { y: 1.369, r: [0.0095, 0.0088, 0.0081, 0.0074], len: [0.017, 0.041, 0.025, 0.02], lift: 0.12, bend: 0.26, splay: 1.1 },
+  { y: 1.35, r: [0.0098, 0.0091, 0.0084, 0.0076], len: [0.018, 0.045, 0.028, 0.021], lift: 0.16, bend: 0.28, splay: 1.15 },
+  { y: 1.331, r: [0.0094, 0.0086, 0.0079, 0.0072], len: [0.017, 0.042, 0.026, 0.02], lift: 0.13, bend: 0.27, splay: 1.2 },
+  { y: 1.314, r: [0.0085, 0.0076, 0.007, 0.0065], len: [0.016, 0.033, 0.019, 0.018], lift: 0.2, bend: 0.3, splay: 1.3 },
 ];
 
 /**
  * 手指的其余几个数。skin：苍白发灰、偏冷的底色（手电是暖光，底色不冷一点照出来就成了肉色）；gap：离门板留的缝（米）；
  * pull：缩回去时整只手往门后退多少（米）；
  * slide：伸出来的前这一段（0..1）是「从门缝里探出来」，后面是「弯过门边扶住」（缩回去倒过来：先松开、再退回去）；
+ * droop：掌骨往下斜多少（弧度）：和娃娃屋镜头的仰角（35°）差不多，从默认的东南机位看，掌骨正好藏在指节后面；
  * dark / lit：颜色按合页坐标的 z（门板里面是 0，往柜子里为负）压暗，dark 米全黑、lit 米不压：指根以后没进黑里
  */
-const FINGER = { skin: 0xa1a7a5, gap: 0.0015, pull: 0.11, slide: 0.5, dark: -0.045, lit: 0.02 };
+const FINGER = { skin: 0xa1a7a5, gap: 0.0015, pull: 0.11, slide: 0.5, droop: 0.55, dark: -0.035, lit: 0.02 };
 
 /**
- * 手指的网格（合页坐标：原点在合页轴上，门板占 x ∈ [门缝那条边, 0]、z ∈ [0, 门板厚]）。
- * 每节一个胶囊，基础形状沿 +y 从 0 到这一节的长度；pose 按关节角把每节转到位写进顶点
+ * 手指的网格（合页坐标：原点在合页轴上，门板占 x ∈ [0, 门缝那条边]、z ∈ [0, 门板厚]；合页在门的西边，
+ * 所以门缝那条边在 +x，「往合页那边」是 −x）。
+ * 每节一个胶囊，基础形状沿 +y 从 0 到这一节的长度；pose 按关节角把每节转到位写进顶点（只转不镜像，三角形绕向不变）
  */
 function createFingers(L: WardrobeLayout) {
   const B = WARDROBE_BOX;
   /** 门缝那条边（合页坐标的 x） */
-  const xe = B.gap / 2 - L.xo;
+  const xe = L.xo - B.gap / 2;
   const bones: { off: number; base: Float32Array; nbase: Float32Array }[] = [];
   const pos: number[] = [], nrm: number[] = [], index: number[] = [];
   for (const f of HAND) {
@@ -290,19 +306,25 @@ function createFingers(L: WardrobeLayout) {
   m.userData.deferCompile = true;
 
   const out = posAttr.array as Float32Array, nout = nrmAttr.array as Float32Array;
-  /** 把第 b 节放到 (sx, sy, sz)、沿水平方向 (dx, dz)（单位向量）：基础形状的 +y 转到这个方向，绕轴怎么转无所谓（胶囊是圆的） */
-  const place = (b: number, sx: number, sy: number, sz: number, dx: number, dz: number) => {
+  /**
+   * 把第 b 节放到 (sx, sy, sz)、沿方向 (dx, dy, dz)（单位向量，离竖直方向远着呢）：基础形状的 +y 转到这个方向，
+   * 绕轴怎么转无所谓（胶囊是圆的）
+   */
+  const place = (b: number, sx: number, sy: number, sz: number, dx: number, dy: number, dz: number) => {
     const { off, base, nbase } = bones[b];
-    // 基 X' = (dz, 0, -dx)，Y' = (dx, 0, dz)，Z' = X' × Y' = (0, -1, 0)：正交、右手，三角形的绕向不变
+    // 基 Y' = d，X' = d × 上 再归一（= (−dz, 0, dx) / |…|），Z' = X' × Y'：正交、右手，三角形的绕向不变
+    const h = Math.hypot(dx, dz);
+    const ax = -dz / h, az = dx / h; // X'（水平）
+    const zx = -dy * az, zy = az * dx - ax * dz, zz = dy * ax; // Z' = X' × Y'
     for (let i = 0, j = off * 3; i < base.length; i += 3, j += 3) {
       const vx = base[i], vy = base[i + 1], vz = base[i + 2];
-      out[j] = sx + vx * dz + vy * dx;
-      out[j + 1] = sy - vz;
-      out[j + 2] = sz - vx * dx + vy * dz;
+      out[j] = sx + vx * ax + vy * dx + vz * zx;
+      out[j + 1] = sy + vy * dy + vz * zy;
+      out[j + 2] = sz + vx * az + vy * dz + vz * zz;
       const nx = nbase[i], ny = nbase[i + 1], nz = nbase[i + 2];
-      nout[j] = nx * dz + ny * dx;
-      nout[j + 1] = -nz;
-      nout[j + 2] = -nx * dx + ny * dz;
+      nout[j] = nx * ax + ny * dx + nz * zx;
+      nout[j + 1] = ny * dy + nz * zy;
+      nout[j + 2] = nx * az + ny * dz + nz * zz;
     }
   };
 
@@ -311,17 +333,19 @@ function createFingers(L: WardrobeLayout) {
     HAND.forEach((f, i) => {
       const s = outCubic(clamp01(grip[i] / FINGER.slide));
       const c = outCubic(clamp01((grip[i] - FINGER.slide) / (1 - FINGER.slide)));
-      // 近节顺着门缝那条边的端面往前（+z）伸，伸过门板正面再弯过来：中节、远节趴在门板正面上，指尖朝合页
+      // 近节在门缝那条边的端面外头往前（+z）伸，伸过门板正面再弯过来：中节、远节趴在门板正面上，指尖朝合页（−x）
       const back = (1 - s) * FINGER.pull;
-      const px = xe - f.r[1] - FINGER.gap, pz = B.door + f.r[1] + FINGER.gap - back; // 中间那个指节
+      const px = xe + f.r[1] + FINGER.gap, pz = B.door + f.r[1] + FINGER.gap - back; // 中间那个指节
       const mz = pz - f.len[1]; // 指根
-      const sa = Math.sin(f.splay), ca = Math.cos(f.splay);
+      // 掌骨：从门后的黑里（往合页那边、往下斜）伸到指根
+      const ch = Math.cos(FINGER.droop), sh = Math.sin(FINGER.droop);
+      const ux = Math.sin(f.splay) * ch, uz = Math.cos(f.splay) * ch; // 掌骨方向（指向指根）的水平部分
       const am = c * (Math.PI / 2 - f.lift), ad = am + c * f.bend; // 中节、远节从 +z 往合页那边转过去多少
-      const dx = px + f.len[2] * Math.sin(am), dz = pz + f.len[2] * Math.cos(am);
-      place(i * 4, px + f.len[0] * sa, f.y, mz - f.len[0] * ca, -sa, ca); // 掌骨：从门后的黑里斜着伸到指根
-      place(i * 4 + 1, px, f.y, mz, 0, 1);
-      place(i * 4 + 2, px, f.y, pz, Math.sin(am), Math.cos(am));
-      place(i * 4 + 3, dx, f.y, dz, Math.sin(ad), Math.cos(ad));
+      const dx = px - f.len[2] * Math.sin(am), dz = pz + f.len[2] * Math.cos(am);
+      place(i * 4, px - f.len[0] * ux, f.y - f.len[0] * sh, mz - f.len[0] * uz, ux, sh, uz);
+      place(i * 4 + 1, px, f.y, mz, 0, 0, 1);
+      place(i * 4 + 2, px, f.y, pz, -Math.sin(am), 0, Math.cos(am));
+      place(i * 4 + 3, dx, f.y, dz, -Math.sin(ad), 0, Math.cos(ad));
     });
     posAttr.needsUpdate = true;
     nrmAttr.needsUpdate = true;
@@ -341,9 +365,9 @@ export function createWardrobe(): PropRig {
   model.name = 'wardrobe';
   const body = bodyMaterial(0.6);
 
-  // 不动的部分（一个网格）：左边那扇门（一直关着）、衣杆、不晃的两件外套
+  // 不动的部分（一个网格）：右边（东边）那扇门（一直关着）、衣杆、不晃的两件外套
   const sp = new Parts();
-  addDoor(sp, L, -L.xo, -half, L.zFace, [-0.05, -0.03]);
+  addDoor(sp, L, half, L.xo, L.zFace, [0.03, 0.05]);
   sp.rod([-L.xo + 0.01, RAIL.y, railZ], [L.xo - 0.01, RAIL.y, railZ], RAIL.r, C.brass);
   for (const c of COATS.slice(1)) addCoat(sp, [c.x, RAIL.y, railZ], c.len, c.col);
   const stillGeo = sp.build();
@@ -352,9 +376,10 @@ export function createWardrobe(): PropRig {
   model.add(still);
 
   // 吃光的黑：门洞里一个不受光的纯黑盒子，只画里面（背面）。比柜体的里面往里缩 2 毫米，免得和侧板、背板的里面打架
-  const e = 0.002;
-  const zf = L.zFace - 0.001, zb = L.zBack + e;
-  const darkGeo = new THREE.BoxGeometry(2 * (L.xo - e), L.y1 - L.y0 - 2 * e, zf - zb).translate(0, (L.y0 + L.y1) / 2, (zf + zb) / 2);
+  const inset = 0.002;
+  const zFront = L.zFace - 0.001, zRear = L.zBack + inset;
+  const darkGeo = new THREE.BoxGeometry(2 * (L.xo - inset), L.y1 - L.y0 - 2 * inset, zFront - zRear)
+    .translate(0, (L.y0 + L.y1) / 2, (zFront + zRear) / 2);
   const dark = new THREE.Mesh(darkGeo, new THREE.MeshBasicNodeMaterial({ color: 0x000000, side: THREE.BackSide }));
   dark.name = 'wardrobe-dark';
   dark.castShadow = false;
@@ -374,13 +399,14 @@ export function createWardrobe(): PropRig {
   pivot.add(coat);
   model.add(pivot);
 
-  // 右边那扇门：合页在它外侧（门洞右沿、柜体正面），门板在合页坐标里占 x ∈ [门缝那条边, 0]
+  // 左边（西边）那扇门：合页在它外侧（门洞左沿、柜体正面），门板在合页坐标里占 x ∈ [0, 门缝那条边]。
+  // 往外开（门缝那条边往 +z 走、往西南转）是绕 y 转负角：rotation.y = −doorDeg
   const hinge = new THREE.Group();
   hinge.name = 'wardrobe-hinge';
-  hinge.position.set(L.xo, 0, L.zFace);
-  const xe = half - L.xo;
+  hinge.position.set(-L.xo, 0, L.zFace);
+  const xe = L.xo - half;
   const dp = new Parts();
-  addDoor(dp, L, xe, 0, 0, [0.03 - L.xo, 0.05 - L.xo]);
+  addDoor(dp, L, 0, xe, 0, [L.xo - 0.05, L.xo - 0.03]);
   const door = mesh(dp.build(), body, 'wardrobe-door');
   hinge.add(door);
   // 手指扶着这扇门的门边，跟着门一起动
@@ -403,7 +429,7 @@ export function createWardrobe(): PropRig {
     fingers.mesh.visible = false;
   };
   const pose = (s: number) => {
-    hinge.rotation.y = THREE.MathUtils.degToRad(doorDeg(s));
+    hinge.rotation.y = -THREE.MathUtils.degToRad(doorDeg(s));
     pivot.rotation.x = coatSwing(s);
     const [sx, sz] = slamShake(s);
     model.position.set(sx, 0, sz);
@@ -421,8 +447,8 @@ export function createWardrobe(): PropRig {
     // 拾取盒盖住整个衣柜（柜体是家具，但玩家看到的就是一个衣柜）；幽光只在两扇门上
     hit: { size: [L.w, FURNITURE_TOP.wardrobe, 2 * L.zf], center: [0, FURNITURE_TOP.wardrobe / 2, 0] },
     shells: [
-      { parent: still, geometry: doorShell(-L.xo, -half, L.zFace) },
-      { parent: door, geometry: doorShell(xe, 0, 0) },
+      { parent: still, geometry: doorShell(half, L.xo, L.zFace) },
+      { parent: door, geometry: doorShell(0, xe, 0) },
     ],
     trigger(_state: WorldState, e: TriggerEvent) {
       t = 0;

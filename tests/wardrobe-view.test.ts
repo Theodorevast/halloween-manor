@@ -6,15 +6,18 @@ import { CELL, FURNITURE, PROPS, propCenter } from '../src/config/house';
 import { SCARES, WARDROBE } from '../src/config/scares';
 import { idleManifest } from '../src/sim/manifest';
 import type { ScareObjectState, SimEvent, WorldState } from '../src/sim/types';
-import { FURNITURE_TOP } from '../src/view/furniture';
-import { DUST_BURSTS } from '../src/view/particles';
+import { FURNITURE_TOP, WARDROBE_BOX } from '../src/view/furniture';
+import { DUST_BURSTS, dustShape } from '../src/view/particles';
+import { PLASTER, burstLife } from '../src/view/particles/plaster';
+import { BED_TIMELINE, bedDustSpot } from '../src/view/props/bed';
+import { PORTRAIT_TIMELINE } from '../src/view/props/portrait';
 import {
-  WARDROBE_LOOK, coatSwing, createWardrobe, doorDeg, fingerGrip, hasFingers, slamShake, wardrobeDustSpot, wardrobeLayout,
+  WARDROBE_LOOK, WARDROBE_SHUT, coatSwing, createWardrobe, doorDeg, fingerGrip, hasFingers, slamShake, wardrobeDustSpot, wardrobeLayout,
 } from '../src/view/props/wardrobe';
 
 const W = WARDROBE;
 /** 门撞上门框的那一刻 */
-const SHUT = W.slamAt + W.slamTime;
+const SHUT = WARDROBE_SHUT;
 const FRAME = 1 / 60;
 /** [a, b] 按 step 采样（含两端） */
 const samples = (a: number, b: number, step = 0.001) => {
@@ -31,7 +34,13 @@ describe('衣柜：时间轴本身（画面按这个顺序接）', () => {
     expect(W.hold[1]).toBe(W.slamAt);
     expect(W.fingers[0]).toBeGreaterThanOrEqual(W.hold[0]);
     expect(W.fingers[1]).toBe(W.slamAt);
-    expect(SCARES.wardrobe.hitAt).toBe(W.slamAt);
+    // 惊吓落下的时刻：现在是 slamAt；合并时主会话会改成门撞上的那一刻（WARDROBE_SHUT），两种都在门开始关到撞上之间
+    expect(SCARES.wardrobe.hitAt).toBeGreaterThanOrEqual(W.slamAt);
+    expect(SCARES.wardrobe.hitAt).toBeLessThanOrEqual(WARDROBE_SHUT);
+  });
+
+  it('门撞上门框的那一刻只算一处：WARDROBE_SHUT = slamAt + slamTime', () => {
+    expect(WARDROBE_SHUT).toBe(W.slamAt + W.slamTime);
   });
 });
 
@@ -167,12 +176,42 @@ describe('衣柜：布局', () => {
 });
 
 describe('落下时扬的灰：床、肖像、衣柜一张表（最终审查 P-6）', () => {
-  it('三处都在表里；衣柜在门撞上的那一刻、从柜顶起来，不崩碎屑', () => {
+  it('三处都在表里', () => {
     expect(Object.keys(DUST_BURSTS).sort()).toEqual(['bed', 'portrait', 'wardrobe']);
+  });
+
+  it('肖像、床两行和并表之前一样（原来的 PORTRAIT_IMPACT、画框中心、BED_COLLAPSE、BED_DUST），都不往下落', () => {
+    const p = DUST_BURSTS.portrait!, b = DUST_BURSTS.bed!;
+    expect(p.at).toBe(PORTRAIT_TIMELINE.impact);
+    expect(p.spot()).toEqual({ x: 0, y: 0, z: (PLASTER.slab.z0 + PLASTER.slab.z1) / 2 });
+    expect(dustShape(p)).toBeUndefined();
+    expect(b.at).toBe(BED_TIMELINE.collapse);
+    expect(b.spot()).toEqual(bedDustSpot());
+    expect(dustShape(b)).toEqual({ halfW: 0.22, halfL: 0.26, edgeShare: 0.4, count: 0.5, size: 0.75, speed: 0.6, chips: false });
+  });
+
+  it('衣柜：门撞上的那一刻（WARDROBE_SHUT）从柜顶起来，落点盖住整个柜顶，WARDROBE.settle 秒里落到地上，不崩碎屑', () => {
     const d = DUST_BURSTS.wardrobe!;
-    expect(d.at).toBeCloseTo(SHUT, 9);
-    expect(d.spot()).toEqual(wardrobeDustSpot());
-    expect(d.shape?.chips).toBe(false);
+    const L = wardrobeLayout();
+    expect(d.at).toBe(WARDROBE_SHUT);
+    const s = dustShape(d)!;
+    expect(s.fall).toBe(W.settle);
+    expect(s.chips).toBe(false);
+    // 前沿就是顶檐的外沿（翻下去的灰落在门前，不擦着门板），两边是柜子两侧
+    expect(s.halfW).toBeCloseTo(L.w / 2, 9);
+    expect(d.spot().z + s.halfL!).toBeCloseTo(L.zf, 9);
+  });
+
+  it('每一次扬灰活多久按那一行算：肖像要等碎屑、床不等、衣柜等落灰落完（约 WARDROBE.settle）', () => {
+    expect(burstLife()).toBe(PLASTER.chips.life[1]);
+    expect(burstLife(dustShape(DUST_BURSTS.bed!))).toBeCloseTo(PLASTER.dust.life[1] + PLASTER.dust.stagger, 9);
+    const life = burstLife(dustShape(DUST_BURSTS.wardrobe!));
+    expect(life).toBeGreaterThanOrEqual(W.settle);
+    expect(life).toBeLessThan(W.settle + 0.2);
+    // 落灰在自己寿命结束之前落到地上，落地以后才淡掉
+    expect(PLASTER.fall.land).toBeLessThan(1);
+    expect(PLASTER.fall.fadeFrom).toBeGreaterThanOrEqual(PLASTER.fall.land - 0.2);
+    expect(PLASTER.fall.life[1]).toBe(1);
   });
 });
 
@@ -211,24 +250,59 @@ function rigAt(variant?: number) {
 }
 
 describe('衣柜：物件', () => {
-  it('转的是 +x 那一扇，合页在它外侧；按时间轴开门、停住、合上，演完关着', () => {
+  it('转的是 −x（西边）那一扇，合页在它外侧；按时间轴开门、停住、合上，演完关着', () => {
     const r = rigAt(0.9);
     const L = wardrobeLayout();
-    expect(r.hinge.position.x).toBeCloseTo(L.xo, 9);
+    expect(r.hinge.position.x).toBeCloseTo(-L.xo, 9);
     expect(r.hinge.position.z).toBeCloseTo(L.zFace, 9);
     for (const s of [0.1, 0.8, 1.6, 1.9, 2.25, 2.3]) {
       r.to(s);
-      expect(r.hinge.rotation.y).toBeCloseTo(THREE.MathUtils.degToRad(doorDeg(s)), 6);
+      expect(r.hinge.rotation.y).toBeCloseTo(-THREE.MathUtils.degToRad(doorDeg(s)), 6);
       if (s === 1.9) {
-        // 停住的时候：门绕外侧合页往外开，离合页最远的门边往前（+z）走出去二十几厘米
-        const edge = new THREE.Vector3(-(L.xo - 0.01), 1, 0).applyEuler(r.hinge.rotation);
+        // 停住的时候：门绕西边的合页往外开，门缝那条边往前（+z）走出去二十几厘米、往西（−x）偏：门往西南转
+        const edge = new THREE.Vector3(L.xo - 0.01, 1, 0).applyEuler(r.hinge.rotation);
         expect(edge.z).toBeGreaterThan(0.2);
+        expect(edge.x).toBeLessThan(L.xo - 0.01 - 0.05);
       }
     }
     r.to(SHUT + 3);
     expect(r.hinge.rotation.y).toBe(0);
     expect(r.rig.model.position.length()).toBe(0);
     r.rig.dispose?.();
+  });
+
+  it('默认的娃娃屋机位（东南，方位角 45°）看得进门缝：开着的门在画面上不挡着门缝；晃的外套就挂在门缝后面', () => {
+    const r = rigAt(0.9);
+    r.to(1.9);
+    const L = wardrobeLayout();
+    r.rig.model.updateMatrixWorld(true);
+    // 镜头在东南（dev/harness.ts、engine/camera.ts 的方位角 π/4）：画面横轴是 (sin 45°, 0, −cos 45°)
+    const az = Math.PI / 4;
+    const sx = (v: THREE.Vector3) => v.x * Math.sin(az) - v.z * Math.cos(az);
+    const hingeP = r.hinge.localToWorld(new THREE.Vector3(0, 1, 0));
+    const freeP = r.hinge.localToWorld(new THREE.Vector3(L.xo - WARDROBE_BOX.gap / 2, 1, 0));
+    const stillEdge = new THREE.Vector3(WARDROBE_BOX.gap / 2, 1, L.zFace); // 一直关着那扇门的门边
+    // 开着的门在画面上占 [合页, 门缝那条边]，整个在不动那扇门门边的左边，中间露出来二十几厘米宽的缝
+    expect(sx(stillEdge) - Math.max(sx(hingeP), sx(freeP))).toBeGreaterThan(0.15);
+    const coatPivot = r.rig.model.getObjectByName('wardrobe-coat')!.parent!;
+    expect(coatPivot.position.x).toBeLessThan(0);
+    expect(coatPivot.position.x).toBeGreaterThan(-0.2);
+  });
+
+  it('扶住的时候只露出手指：门后那一截手（掌骨）离门缝那条边往里不超过 3 厘米、往柜子里不超过 4.5 厘米（审查 Minor-3：门外不显出一截黑桩）', () => {
+    const r = rigAt(0.1);
+    r.to(2.1); // 四根都扶住了（最晚的小指 2.07 秒）
+    const L = wardrobeLayout();
+    const xe = L.xo - WARDROBE_BOX.gap / 2; // 门缝那条边（合页坐标）
+    const pos = (r.fingers as THREE.Mesh).geometry.attributes.position;
+    let minX = Infinity, minZ = Infinity;
+    for (let i = 0; i < pos.count; i++) {
+      if (pos.getZ(i) >= 0) continue; // 门板里面那个平面以前的（绕过门边、趴在门面上的手指）不算
+      minX = Math.min(minX, pos.getX(i));
+      minZ = Math.min(minZ, pos.getZ(i));
+    }
+    expect(minX).toBeGreaterThan(xe - 0.03);
+    expect(minZ).toBeGreaterThan(-0.045);
   });
 
   it('手指只在 variant 小于 fingersChance 的那一次出现，只在 fingers 时段里，合上以后不见', () => {
