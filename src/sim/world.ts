@@ -324,6 +324,14 @@ export function createWorld(opts: WorldOptions): World {
       ghostInWall = inWall;
     },
 
+    close() {
+      // 接口先占位（2026-10-30），模拟那一路实现
+    },
+
+    reopen() {
+      // 接口先占位（2026-10-30），模拟那一路实现
+    },
+
     manifest(): boolean {
       // 要有鬼魂（第三人称）
       if (ghost === null) return false;

@@ -134,7 +134,8 @@ export interface WorldState {
 export const GHOST_SOURCE = 'ghost';
 
 export type SimEvent =
-  | { type: 'spawn'; npc: number }
+  /** last：收夜（World.close）时屋里没人，最后再放进来的那一位（播报 "{name} is the last to arrive."） */
+  | { type: 'spawn'; npc: number; last?: boolean }
   /** 玩家附身物件 */
   /**
    * variant：这一次附身的随机数（0..1，模拟每次都给）。画面和声音按它挑同一个变体，两边一致，比如衣柜 A 版里
@@ -194,6 +195,13 @@ export interface World {
    * 访客看不见鬼魂，但鬼魂贴近时会发毛（2026-10-28 第三人称改版）
    */
   setGhost(g: GhostInput | null): void;
+  /**
+   * 收夜（2026-10-30「一夜」）：之后不再安排新访客（已经排上、还没进门的那一次取消）。调的那一刻屋里没人（都走了或都在逃跑），
+   * 就最后再放一位进来（spawn 事件带 last）。屋里的人照常闹，没有时限
+   */
+  close(): void;
+  /** 收夜以后玩家选 Keep haunting：照常补人（和开局之后一样，按 SPAWN.delay 一个一个来） */
+  reopen(): void;
 }
 
 export interface SpawnOptions {
@@ -212,4 +220,9 @@ export interface WorldOptions {
   seed: number;
   /** 测试用：关掉自动生成访客 */
   autoSpawn?: boolean;
+  /**
+   * 开局几个访客之间隔多久进门（秒，第一个仍在 SPAWN.first）。不给就是原来的 SPAWN.stagger：机器人、平衡测试都不给，数字不变。
+   * 正式游戏给 NIGHT.openingGaps（第一个人独自进来，过一会儿才有第二个敲门）
+   */
+  openingGaps?: number[];
 }
