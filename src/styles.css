@@ -217,6 +217,21 @@ body {
   color: #a69d8c;
 }
 
+/* 触屏竖屏（hud.ts 给 #hud 加 is-touch）：玩法说明下面另起一行「把手机横过来」，同样的小型大写（2026-10-30 试玩报告 P1-6 c） */
+.hud-turn {
+  display: none;
+}
+
+@media (orientation: portrait) {
+  .is-touch .hud-turn {
+    display: block;
+    margin-top: 0.7em;
+    text-wrap: balance;
+    color: var(--bone);
+    opacity: 0.8;
+  }
+}
+
 .hud-error {
   max-width: 30rem;
   margin: 0;
@@ -585,6 +600,13 @@ body {
   color: var(--ghost);
 }
 
+/* 惊吓类物件没人看着（2026-10-30「标签说实话」）：和「谁在看着」同样的小型大写，只是灰烬色——现在点下去会落空 */
+.ov-tip.is-unseen .ov-tip-state {
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.14em;
+  color: var(--ash);
+}
+
 .ov-tip-string {
   width: 1px;
   height: 14px;
@@ -675,8 +697,10 @@ body {
 /* ── 第三人称（engine/ghostRig.ts）：准星、操作提示、「点一下继续」──────────────
  * 都在 .hud-play 里（跟着游戏中的 HUD 一起淡入），都不接收指针：点击落到画布上，画布那边负责重新锁定指针。
  * - 准星：画面正中一个很淡的骨白小点，只在指针锁定时显示；对着够得着的物件时，外面浮出一圈细环
- * - 操作提示：开场后在画面下方停几秒（小型大写、字距拉开，和标题页底部的玩法说明一个排法），然后淡出，只出现一次
- * - 「Click to resume」：丢了指针锁定时，画面正中挂一张标本签（和悬停标签同一种框）
+ * - 操作提示：开场后在画面下方停十来秒（小型大写、字距拉开，和标题页底部的玩法说明一个排法），然后淡出，只出现一次；
+ *   情境提示（ui/hints.ts）排在同一个位置，同一时刻只放一句
+ * - 「Click to resume」：丢了指针锁定时，画面正中挂一张标本签（和悬停标签同一种框），下面挂一行操作说明
+ * - 做不到时的一句（ui/hints.ts）：准星下面一点，斜体灰烬色，很快淡掉
  */
 .hud-aim {
   position: absolute;
@@ -738,45 +762,66 @@ body {
   opacity: 1;
 }
 
-.hud-keys {
-  position: absolute;
-  left: 50%;
-  bottom: max(30px, env(safe-area-inset-bottom));
+/* 一行说明（.hud-note）：开场的操作说明、情境提示、「Click to resume」下面那一行，都是这一种排法（2026-10-30 试玩报告 P1-3）。
+ * 垫一层很淡的黑底：悬停标签的底色 rgba(8, 7, 9)、透明度 0.5，边缘用同色的模糊羽化开，不成一个框——
+ * 压在访客手电的光斑上也读得出（原来没有底，实测对比度只有 1.8–2.3 : 1）。
+ * 宽度让开左下的播报和右下的按钮（两边各留约 300 像素），放不下就折成均匀的两行；「A · B」只在「·」处折，
+ * 折到行尾的「·」藏起来（hints.ts 的 setSegments、markLineEnds） */
+.hud-note {
   margin: 0;
-  transform: translateX(-50%);
-  /* 操作说明有五项：窄窗口里在「·」处折成均匀的两行，不出屏 */
+  padding: 0.2em 0.9em 0.28em;
   width: max-content;
-  max-width: calc(100vw - 32px);
+  max-width: min(52rem, max(24rem, calc(100vw - 600px)));
   text-align: center;
   text-wrap: balance;
   font-variant-caps: all-small-caps;
   letter-spacing: 0.13em;
   font-size: 1.05rem;
-  line-height: 1.4;
-  color: #a69d8c;
+  line-height: 1.45;
+  color: #b2a994;
   text-shadow: var(--ink-shadow);
-  opacity: 0;
-  transition: opacity 1.2s ease;
+  background: rgba(8, 7, 9, 0.5);
+  border-radius: 0.9em;
+  box-shadow: 0 0 16px 8px rgba(8, 7, 9, 0.5);
 }
 
-.hud-keys.is-on {
+.hud-seg {
+  white-space: nowrap;
+}
+
+.hud-sep.is-eol {
+  visibility: hidden;
+}
+
+/* 画面下方正中那一行：开场的操作说明（.hud-keys）、情境提示（.hud-hintline）轮流用，淡入淡出 1.2 秒（hud.ts 的 KEYS.fade、hints.ts 的 HINT.fade） */
+.hud-keys,
+.hud-hintline {
+  position: absolute;
+  left: 50%;
+  bottom: max(30px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  opacity: 0;
+  transition: opacity 1.2s ease;
+  pointer-events: none;
+}
+
+.hud-keys.is-on,
+.hud-hintline.is-on {
   opacity: 1;
 }
 
+/* 暂停（「Click to resume」挂着）：标签下面已经有一行操作说明，下面那一行开场的先让开，回来时还在就再出来 */
+.hud-play.is-paused .hud-keys {
+  opacity: 0;
+  transition-duration: 0.3s;
+}
+
+/* 「Click to resume」：标签挂在画面正中（.hud-resume 只管定位和显隐，大小就是那张标签），操作说明的那一行挂在它下面 */
 .hud-resume {
   position: absolute;
   left: 50%;
   top: 50%;
-  margin: 0;
-  padding: 10px 22px 11px;
   transform: translate(-50%, -50%);
-  border-image: var(--frame-label) 14 fill / 14px stretch;
-  white-space: nowrap;
-  font-family: var(--face-display);
-  font-style: italic;
-  font-size: 1.3rem;
-  line-height: 1.1;
-  color: var(--bone);
   visibility: hidden;
   opacity: 0;
   transition: opacity 0.3s ease, visibility 0s linear 0.3s;
@@ -786,6 +831,68 @@ body {
   visibility: visible;
   opacity: 1;
   transition: opacity 0.3s ease;
+}
+
+.hud-resume-card {
+  margin: 0;
+  padding: 10px 22px 11px;
+  border-image: var(--frame-label) 14 fill / 14px stretch;
+  white-space: nowrap;
+  font-family: var(--face-display);
+  font-style: italic;
+  font-size: 1.3rem;
+  line-height: 1.1;
+  color: var(--bone);
+}
+
+.hud-resume-keys {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 18px);
+  transform: translateX(-50%);
+  max-width: min(46rem, calc(100vw - 48px));
+}
+
+/* 做不到时的一句（Not yet. / Too far away. …）：准星下面一点，斜体灰烬色，和播报里安静的那几行一个口气；来得快、去得慢 */
+.hud-refusal {
+  position: absolute;
+  left: 50%;
+  top: calc(50% + 26px);
+  margin: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-style: italic;
+  font-size: 1.1rem;
+  line-height: 1.2;
+  color: var(--ash);
+  text-shadow: var(--ink-shadow);
+  opacity: 0;
+  transition: opacity 0.6s ease;
+  pointer-events: none;
+}
+
+.hud-refusal.is-on {
+  opacity: 1;
+  transition: opacity 0.15s ease;
+}
+
+/* 窄窗口、触屏：下面是播报和按钮（窄屏的播报挪到按钮上方，占满一行），那一行挪到上面、计数的下方 */
+@media (max-width: 640px), (pointer: coarse) {
+  .hud-keys,
+  .hud-hintline {
+    top: calc(max(14px, env(safe-area-inset-top)) + 3.4rem);
+    bottom: auto;
+  }
+
+  .hud-note {
+    max-width: calc(100vw - 48px);
+  }
+}
+
+@media (max-width: 640px) {
+  .hud-seg {
+    white-space: normal;
+  }
 }
 
 /* 场景叠层在第三人称下的遮挡、远近淡出（view/overlays.ts 把 opacity 写在内层元素上）：走出视线时淡掉，不是一下消失。

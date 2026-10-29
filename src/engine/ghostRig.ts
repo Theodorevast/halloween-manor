@@ -7,6 +7,8 @@
 //   跟随用临界阻尼弹簧（不过冲、不来回晃），转向只做很短的一阶平滑；滚轮调远近（1–4 米）；
 //   吊臂碰到天花板或地板时沿吊臂缩短。镜头和鬼魂之间隔着的墙由墙体自己溶开，这里不做镜头碰撞
 // - 不做：呼吸、冲镜（设计文档「做减法」）；只留吓跑时很轻的一抖（juice.ts 调 shake）
+// - hold（2026-10-30 试玩报告 P1-1）：点了开始、开场遮罩还挂着时，指针已经锁上，但鼠标转向、按键、F / 右键、滚轮都不算，
+//   界面状态 held 告诉拾取器也别悬停、附身；放开时视角回到 hold 开始那一刻（开场时就是开场的朝向）
 // 坐标：鬼魂状态用房屋米坐标；three 的世界坐标 = 房屋坐标 − 房子中心（houseRoot 的偏移，和 camera.ts 一样）
 import * as THREE from 'three/webgpu';
 import { CELL, GRID_H, GRID_W, HOUSE_D, HOUSE_W, Tile, WALL_H, WALL_T, buildTiles, cellOf, idx, inGrid } from '../config/house';
@@ -222,9 +224,14 @@ export interface GhostUi {
   aim: string | null;
   /** 现身的冷却还剩多少（0..1，1 = 刚用、0 = 可以再用；main.ts 每帧按模拟写）：准星外面那圈很淡的环 */
   manifestCooldown: number;
+  /**
+   * 不收输入（GhostRig.hold，2026-10-30 试玩报告 P1-1）：点了开始、开场遮罩还挂着。指针已经锁上，但鼠标、按键都不算；
+   * 拾取器这时也不悬停、不附身（准星还没出来）
+   */
+  held: boolean;
 }
 
-const ui: GhostUi = { active: false, engaged: false, locked: false, pending: false, aim: null, manifestCooldown: 0 };
+const ui: GhostUi = { active: false, engaged: false, locked: false, pending: false, aim: null, manifestCooldown: 0, held: false };
 const uiCbs = new Set<(s: Readonly<GhostUi>) => void>();
 
 /** 订阅第三人称的界面状态：注册时先按当前值回调一次，之后每次变化回调；返回取消订阅的函数 */
@@ -283,6 +290,10 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   let bobClock = 0;
   /** 现身的蓄力和停留期间定住（pin） */
   let pinned = false;
+  /** 不收输入（hold）：开场遮罩还挂着。held 是按住的键，这个是整个操控停着 */
+  let holding = false;
+  /** hold 开始那一刻的视角（目标值）：放开时回到这里。开场时就是开场的朝向（这之前鬼魂没动过：没开场不收输入） */
+  let heldView = { yaw: yawT, pitch: pitchT };
   let trauma = 0;
   let intro: { t: number; dur: number } | null = null;
   /** 镜头位置（房屋米坐标），调试口和 viewDir 用 */
@@ -346,7 +357,7 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   addEventListener('keydown', (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return; // 浏览器快捷键，松开时可能收不到 keyup
     if (MOVE.has(e.code) || TURN.has(e.code)) held.add(e.code);
-    if (e.code === 'KeyF' && !e.repeat && controlling()) manifest();
+    if (e.code === 'KeyF' && !e.repeat && controlling() && !holding) manifest();
   });
   addEventListener('keyup', (e) => { held.delete(e.code); });
   // 切走窗口时 keyup 收不到：全部松开，鬼魂不会自己一直飘
@@ -360,7 +371,7 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   let pendingTimer = 0;
   const realLocked = () => document.pointerLockElement === canvas;
   const controlling = () => realLocked() || fake;
-  const publish = () => setGhostUi({ engaged, locked: controlling(), pending });
+  const publish = () => setGhostUi({ engaged, locked: controlling(), pending, held: holding });
   const settle = () => {
     pending = false;
     clearTimeout(pendingTimer);
@@ -384,7 +395,7 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   document.addEventListener('pointerlockerror', settle);
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button === 2 && controlling()) {
-      manifest();
+      if (!holding) manifest();
       return;
     }
     if (e.button !== 0 || !engaged || controlling()) return;
@@ -394,16 +405,17 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   document.addEventListener('mousemove', (e) => {
-    if (!controlling()) return;
+    if (!controlling() || holding) return;
     const mx = Number.isFinite(e.movementX) ? clamp(e.movementX, -LOOK.maxStep, LOOK.maxStep) : 0;
     const my = Number.isFinite(e.movementY) ? clamp(e.movementY, -LOOK.maxStep, LOOK.maxStep) : 0;
     yawT += mx * LOOK.sens;
     pitchT = clamp(pitchT + my * LOOK.sens, LOOK.pitchMin, LOOK.pitchMax);
   });
 
-  // 滚轮调远近；preventDefault 挡住触控板双指缩放把整页放大
+  // 滚轮调远近；preventDefault 挡住触控板双指缩放把整页放大。hold 期间也不算（开场的构图连远近一起留着）
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
+    if (holding) return;
     const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
     rig.zoom(Math.exp(-clamp(px, -200, 200) * CAM.wheel));
   }, { passive: false });
@@ -436,9 +448,9 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
       clock += dt;
       const calm = reduced();
 
-      // 按键：开场之前不动（开场遮罩后面的鬼魂停在起点）；现身期间定住，只能转视角
+      // 按键：开场之前、hold 期间不动（开场遮罩后面的鬼魂停在起点）；现身期间定住，只能转视角
       let fwd = 0, side = 0, turn = 0;
-      if (engaged) {
+      if (engaged && !holding) {
         for (const code of held) {
           const m = MOVE.get(code);
           if (m && !pinned) { fwd += m[0]; side += m[1]; }
@@ -517,8 +529,18 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
     pin(on) {
       pinned = on;
     },
-    hold() {
-      // 接口先占位（2026-10-30），上手那一路实现
+    hold(on) {
+      if (on === holding) return;
+      holding = on;
+      if (on) {
+        heldView = { yaw: yawT, pitch: pitchT };
+      } else {
+        // 视角回到 hold 开始那一刻（开场时就是开场的朝向）。实际值一起就位：平滑不会把镜头从别处扫回来
+        yawT = yaw = heldView.yaw;
+        pitchT = pitch = heldView.pitch;
+        ghost.heading = wrapAngle(yaw);
+      }
+      publish();
     },
   };
 
