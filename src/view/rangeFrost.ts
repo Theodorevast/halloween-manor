@@ -661,7 +661,8 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
         if (quiet()) return;
         startMan('manifest', e.pos);
         sync();
-      } else if (e.phase === 'end' && man.kind === 'manifest') {
+      } else if (e.phase === 'end' && man.kind === 'manifest' && man.melt === null) {
+        // 已经在化（比如变安静时先化了）就不再从头化：否则圈会闪回满浓度再化一遍（RF 复审 N-1）
         man.meltPending = true;
       }
     },
