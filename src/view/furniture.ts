@@ -340,21 +340,32 @@ const nightstand: Maker = (k, { w, zb, zf }) => {
   k.box(x0 + 0.06, 0.16, zf - 0.03, x1 - 0.06, 0.32, zf - 0.025, shade(PALETTE.woodDark, 0.6)); // 下层空格
 };
 
+/**
+ * 衣柜的门洞和门（模型坐标，米；正面朝 +z，原点在衣柜正中的地面）。柜体在这里画、门洞留空；两扇门和门里的东西是可附身的物件，
+ * 在 props/wardrobe.ts，两边都按这一份摆。门是盖在柜体正面上的（盖门）：
+ * - inset：门洞左右离柜边多远（侧板的里面）；y0：门洞下沿（下面是抽屉那一层）；top：门洞上沿离柜顶多远（上面是顶檐）
+ * - front：柜体正面比衣柜最前面（顶檐、底座的前沿）缩进多少，门板贴在柜体正面前面；door：门板厚；panel：门芯板再凸出多少
+ * - gap：两扇门中间的缝；back：背板厚
+ */
+export const WARDROBE_BOX = { inset: 0.06, y0: 0.44, top: 0.16, front: 0.02, door: 0.015, panel: 0.01, gap: 0.02, back: 0.02 };
+
+/**
+ * 衣柜：脚、底座、抽屉那一层、两块侧板、门洞上面一条、背板、顶檐。两扇门和门里的东西（吃光的黑、外套）不在这里画：
+ * 衣柜是可附身的物件，在 props/wardrobe.ts；门洞（WARDROBE_BOX）是空的，门开一条缝时看得见里面
+ */
 const wardrobe: Maker = (k, { w, zb, zf }) => {
-  const x0 = -w / 2, x1 = w / 2, H = FURNITURE_TOP.wardrobe;
+  const x0 = -w / 2, x1 = w / 2, H = FURNITURE_TOP.wardrobe, B = WARDROBE_BOX;
+  const face = zf - B.front; // 柜体正面（门板背面贴着它）
+  const y1 = H - B.top; // 门洞上沿
   for (const x of [x0 + 0.08, x1 - 0.08]) for (const z of [zb + 0.08, zf - 0.08]) k.box(x - 0.03, 0, z - 0.03, x + 0.03, 0.08, z + 0.03, COL.woodDark);
-  k.box(x0 + 0.03, 0.08, zb, x1 - 0.03, H - 0.1, zf - 0.02, COL.wood, VARNISH);
+  k.box(x0 + 0.03, 0.08, zb, x1 - 0.03, B.y0, face, COL.wood, VARNISH); // 抽屉那一层（实心）
+  k.box(x0 + 0.03, B.y0, zb, x0 + B.inset, y1, face, COL.wood, VARNISH); // 左侧板
+  k.box(x1 - B.inset, B.y0, zb, x1 - 0.03, y1, face, COL.wood, VARNISH); // 右侧板
+  k.box(x0 + 0.03, y1, zb, x1 - 0.03, H - 0.1, face, COL.wood, VARNISH); // 门洞上面一条
+  k.box(x0 + B.inset, B.y0, zb, x1 - B.inset, y1, zb + B.back, COL.wood); // 背板
   k.box(x0, H - 0.1, zb, x1, H, zf, COL.woodDark, VARNISH); // 顶檐
   k.box(x0 + 0.02, 0.08, zb, x1 - 0.02, 0.16, zf, COL.woodDark, VARNISH); // 底座
-  k.box(x0 + 0.06, 0.2, zf - 0.02, x1 - 0.06, 0.4, zf - 0.005, COL.woodDark, VARNISH); // 底部抽屉
-  const mid = 0;
-  for (const [a, b] of [[x0 + 0.06, mid - 0.01], [mid + 0.01, x1 - 0.06]]) {
-    k.box(a, 0.44, zf - 0.02, b, H - 0.16, zf - 0.005, COL.woodDark, VARNISH); // 门
-    k.box(a + 0.07, 0.56, zf - 0.005, b - 0.07, 1.2, zf + 0.005, COL.wood, VARNISH); // 门芯
-    k.box(a + 0.07, 1.3, zf - 0.005, b - 0.07, H - 0.28, zf + 0.005, COL.wood, VARNISH);
-  }
-  k.box(mid - 0.05, 1.1, zf - 0.005, mid - 0.03, 1.22, zf + 0.015, COL.brass, METAL);
-  k.box(mid + 0.03, 1.1, zf - 0.005, mid + 0.05, 1.22, zf + 0.015, COL.brass, METAL);
+  k.box(x0 + 0.06, 0.2, face, x1 - 0.06, 0.4, zf - 0.005, COL.woodDark, VARNISH); // 底部抽屉
 };
 
 const coatRack: Maker = (k, { w, zb, zf }) => {
@@ -426,6 +437,19 @@ function backedByWall(f: Furniture, tiles: Uint8Array): boolean {
   return cells.every(([i, j]) => inGrid(i, j) && (tiles[idx(i, j)] === Tile.Wall || tiles[idx(i, j)] === Tile.Window));
 }
 
+/**
+ * 一件家具在自己模型坐标里的范围：宽 w（x：-w/2..w/2），进深 zb（背面）..zf（正面）。背后贴着墙格时背面伸到墙面（见文件头）。
+ * 衣柜的物件（props/wardrobe.ts）按它摆门和门里的东西，和这里画的柜体对得上
+ */
+export function furnitureFrame(f: Furniture, tiles: Uint8Array): { w: number; zb: number; zf: number } {
+  const sx = (f.rect.x1 - f.rect.x0) * CELL, sz = (f.rect.z1 - f.rect.z0) * CELL;
+  // facing 朝东西时，模型的宽度方向对应房屋的 z
+  const ew = Math.abs(Math.cos(f.facing)) > 0.5;
+  const w = ew ? sz : sx, d = ew ? sx : sz;
+  const ext = f.blocks && backedByWall(f, tiles) ? (CELL - WALL_T) / 2 : 0;
+  return { w, zb: -d / 2 - ext, zf: d / 2 };
+}
+
 export interface FurnitureView {
   mesh: THREE.Mesh;
   /** 第三人称模式：同一份几何体配不挖洞的材质（附近没有洞的帧用它，见 walls.ts 的 HOLE_TEST）；娃娃屋模式为 null */
@@ -439,14 +463,8 @@ export interface FurnitureView {
 export function createFurniture(tiles: Uint8Array, dissolve?: DissolveUniforms): FurnitureView {
   const b = new GeoBuilder({ surf: 2 });
   const kit = new Kit(b);
-  const back = (CELL - WALL_T) / 2;
   FURNITURE.forEach((f, n) => {
-    const sx = (f.rect.x1 - f.rect.x0) * CELL, sz = (f.rect.z1 - f.rect.z0) * CELL;
-    // facing 朝东西时，模型的宽度方向对应房屋的 z
-    const ew = Math.abs(Math.cos(f.facing)) > 0.5;
-    const w = ew ? sz : sx, d = ew ? sx : sz;
-    const ext = f.blocks && backedByWall(f, tiles) ? back : 0;
-    const frame: Frame = { w, zb: -d / 2 - ext, zf: d / 2, rand: rng(1000 + n * 7919) };
+    const frame: Frame = { ...furnitureFrame(f, tiles), rand: rng(1000 + n * 7919) };
     const cx = ((f.rect.x0 + f.rect.x1) / 2) * CELL, cz = ((f.rect.z0 + f.rect.z1) / 2) * CELL;
     b.transform = new THREE.Matrix4().makeRotationY(yawFor(f.facing)).setPosition(cx, 0, cz);
     MAKERS[f.kind](kit, frame);

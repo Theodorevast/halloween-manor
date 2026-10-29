@@ -9,6 +9,8 @@
 // 贴地的面片做软粒子（common.ts，正交、透视相机都对），不出现插进地板 / 墙里的直线。
 // 床塌下去那一下也用它（2026-10-28，props/bed.ts）：burst 的最后一个参数换一套形状——落点小一点、灰少一点、喷得慢一点、没有碎屑，
 // 中心抬到被子面上。不给参数就是肖像砸地那一套，画面和以前完全一样。
+// 衣柜（2026-10-29，props/wardrobe.ts）：形状里多一个 fall（秒）——从柜顶四边翻出去的灰不悬在上面，而是在这几秒里一颗颗慢慢落到
+// 门前的地上（见 PLASTER.fall）。不给 fall 时多出来的项全乘 0 / 1，肖像、床的灰和原来一模一样。
 import * as THREE from 'three/webgpu';
 import {
   exp, float, instanceIndex, length, max, min, mix, mx_noise_float, mx_noise_vec3, pow, smoothstep, sqrt, uniform, uv,
@@ -82,6 +84,14 @@ export const PLASTER = {
     /** 落地以后留多久（秒）再在 0.8 秒里淡掉 */
     life: [2.6, 3.6] as const,
   },
+  /**
+   * 往下落的灰（BurstShape.fall 给了才有，衣柜：门撞上以后柜顶积的灰从边上翻下去，慢慢落到门前的地上）。
+   * 只有从四边翻出去的灰落（靠转轴那条边除外：衣柜那一边贴着墙），从落点中间震起来的照旧悬一会儿、淡掉。
+   * 一颗颗在 stagger 秒里先后翻下去（不是一圈同时离开边沿）；每颗的寿命是 (fall − stagger) 秒的 life[0]..life[1] 倍（随机），
+   * 所以全部在 fall 秒内落完。在寿命的 land 倍时落到地面——按这个算出终速，tau 秒里从静止追上终速
+   * （先慢后快，像细灰在空气里落，越落越稳），落到地面停住，寿命最后 1 − fadeFrom 那一段淡掉
+   */
+  fall: { stagger: 0.6, life: [0.45, 1] as const, land: 0.85, tau: 0.45, fadeFrom: 0.7 },
   /** 灰和碎屑的底色（线性）：旧灰泥和画框打底的石膏，灰褐 */
   albedo: new THREE.Color(0.36, 0.32, 0.26),
   chipAlbedo: new THREE.Color(0.42, 0.36, 0.25),
@@ -107,14 +117,31 @@ export interface BurstShape {
   speed?: number;
   /** false = 不崩碎屑 */
   chips?: boolean;
+  /**
+   * 往下落（秒）：四边翻出去的灰在这么多秒里一颗颗慢慢落到地上（见 PLASTER.fall；衣柜用 WARDROBE.settle）。
+   * 不给（肖像、床）就不落，和原来完全一样
+   */
+  fall?: number;
+}
+
+/**
+ * 这一次扬尘最长的一颗能活多久（秒，从 burst 的 t0 算起）：过了就可以把整个物体藏起来、不再拷软粒子的深度。
+ * 按这一次的形状算（没有碎屑就不等碎屑的 3.6 秒；落灰按 fall 算），不是全局的最长寿命
+ */
+export function burstLife(shape: BurstShape = {}): number {
+  const D = PLASTER.dust;
+  // 不落的灰最长 life[1] + stagger；落灰（先后错开、寿命按 fall − fall.stagger 算）全在 fall 秒内落完
+  const dust = Math.max(D.life[1] + D.stagger, shape.fall ?? 0);
+  return (shape.chips ?? true) ? Math.max(dust, PLASTER.chips.life[1]) : dust;
 }
 
 export interface Plaster {
   object: THREE.Sprite;
-  /** 最长的一颗能活多久（秒）：过了就把整个物体藏起来 */
-  readonly maxLife: number;
-  /** 在 t0（ctx.time 的时间轴）砸地。center：画框中心（房屋坐标）；axisW / axisL：画框宽、长方向（长方向从转轴指向画框上沿）。shape：换一套形状（床用） */
-  burst(t0: number, center: THREE.Vector3, axisW: THREE.Vector3, axisL: THREE.Vector3, shape?: BurstShape): void;
+  /**
+   * 在 t0（ctx.time 的时间轴）砸地。center：画框中心（房屋坐标）；axisW / axisL：画框宽、长方向（长方向从转轴指向画框上沿）。
+   * shape：换一套形状（床、衣柜用）。返回这一次最长的一颗能活多久（秒，burstLife）
+   */
+  burst(t0: number, center: THREE.Vector3, axisW: THREE.Vector3, axisL: THREE.Vector3, shape?: BurstShape): number;
   setQuality(q: 'high' | 'low'): void;
   setReduced(on: boolean): void;
   dispose(): void;
@@ -138,6 +165,10 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   const uHl = uniform(hl0);
   const uEdge = uniform(D.edgeShare);
   const uSize = uniform(1);
+  /** 往下落：这一次落多久（秒，0 = 不落）；落点离地多高（米，不落时 0） */
+  const uFall = uniform(0);
+  const uDrop = uniform(0);
+  const FL = PLASTER.fall;
 
   const r = (k: number) => rnd(k, uSeed);
   const lerp = (a: number, b: number, t: F) => float(a).add(t.mul(b - a));
@@ -166,7 +197,11 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
 
   // —— 灰 ——
   const fe = lt(r(4), uEdge); // 1 = 从四边喷出，0 = 从画框背上震起
-  const delay = r(5).mul(D.stagger).mul(dust);
+  // 1 = 这一颗往下落（给了 fall：四边翻出去的，靠转轴那条边除外），0 = 原来那一套。不给 fall 时全是 0：
+  // 下面乘 keep 的项乘的是 1、减 fallF 那一项减的是 0、mix(…, fallF) 取的是原值，算出来和原来一样
+  const fallF = lt(float(0), uFall).mul(fe).mul(float(1).sub(fNear));
+  const keep = float(1).sub(fallF);
+  const delay = r(5).mul(mix(float(D.stagger), float(FL.stagger), fallF)).mul(dust);
   const age = time.sub(uT0).sub(delay);
   const ageC = max(age, 0);
   const vScale = calm;
@@ -177,9 +212,17 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   const y0 = mix(float(0.06), lerp(0.015, 0.05, r(10)), fe);
   const vy = mix(rng(D.topUp, 11), rng(D.up, 11), fe).mul(vScale);
   const settle = rng(D.settle, 12).mul(max(ageC.sub(D.settleFrom), 0));
+  // 寿命（落灰：(fall − stagger) 秒的 life[0]..life[1] 倍，加上错开的那一点也在 fall 秒内）
+  const lifeD = mix(rng(D.life, 20), max(uFall.sub(FL.stagger), 0.5).mul(lerp(FL.life[0], FL.life[1], r(20))), fallF);
+  // 往下落：寿命的 land 倍时落到地面（从起点往下 uDrop + y0）。终速 = 落差 / (land × 寿命 − tau)，tau 秒里从静止追上，
+  // 走过的距离 = 终速 × (t − tau × (1 − e^(−t/tau)))
+  const vFall = uDrop.add(y0).div(max(lifeD.mul(FL.land).sub(FL.tau), 0.25));
+  const fallBy = vFall.mul(ageC.sub(ease(ageC, FL.tau).mul(FL.tau)));
   const yDust = max(
-    y0.add(vy.mul(D.upTau).mul(ease(ageC, D.upTau))).add(rng(D.rise, 13).mul(ease(ageC, D.riseTau))).sub(settle),
-    0.025,
+    y0.add(vy.mul(D.upTau).mul(ease(ageC, D.upTau))).add(rng(D.rise, 13).mul(ease(ageC, D.riseTau)).mul(keep))
+      .sub(settle.mul(keep)).sub(fallBy.mul(fallF)),
+    // 下限：原来贴着落点（不钻进地板 / 被子 / 柜顶）；落灰落到地面为止（落点下面 uDrop 米）
+    mix(float(0.025), float(0.02).sub(uDrop), fallF),
   );
   const n0 = vec3(lx0.mul(D.turbFreq), r(14).mul(40), lz0.mul(D.turbFreq));
   const turb = mx_noise_vec3(n0.add(vec3(ageC.mul(0.35), ageC.mul(0.6), ageC.mul(-0.3)))).mul(calm.mul(D.turb)).mul(ease(ageC, D.turbTau));
@@ -208,9 +251,10 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   // —— 大小、不透明度、寿命 ——
   const s0 = rng(D.size0, 18).mul(uSize), s1 = rng(D.size1, 19).mul(uSize);
   const dustSize = s0.add(s1.sub(s0).mul(ease(ageC, D.growTau)));
-  const lifeD = rng(D.life, 20), lifeC = rng(C.life, 20);
+  const lifeC = rng(C.life, 20);
   const life = mix(lifeD, lifeC, chip);
-  const fadeD = smoothstep(0, 0.05, age).mul(float(1).sub(smoothstep(lifeD.mul(D.fadeFrom), lifeD, age)));
+  const fadeFrom = mix(float(D.fadeFrom), float(FL.fadeFrom), fallF);
+  const fadeD = smoothstep(0, 0.05, age).mul(float(1).sub(smoothstep(lifeD.mul(fadeFrom), lifeD, age)));
   const alphaD = rng(D.alpha, 21).mul(fadeD).mul(pow(s0.div(dustSize), D.thin));
   const alphaC = float(1).sub(smoothstep(lifeC.sub(0.8), lifeC, age));
   const aliveF = activeF.mul(ge(age, 0)).mul(lt(age, life));
@@ -250,7 +294,6 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
   protectMRT(mat);
 
   const object = makeSprite(mat, N + NC, 'portrait-plaster-dust', 2.5);
-  const maxLife = Math.max(D.life[1] + D.stagger, C.life[1]);
   let seed = 0;
   let quality: 'high' | 'low' = 'high';
   let reduced = false;
@@ -264,12 +307,14 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
 
   return {
     object,
-    maxLife,
     burst(t0, center, axisW, axisL, opts = {}) {
       uHw.value = opts.halfW ?? hw0;
       uHl.value = opts.halfL ?? hl0;
       uEdge.value = opts.edgeShare ?? D.edgeShare;
       uSize.value = opts.size ?? 1;
+      uFall.value = opts.fall ?? 0;
+      // center 是房屋坐标，y 就是离地高度
+      uDrop.value = opts.fall ? center.y : 0;
       burstShape = { count: opts.count ?? 1, speed: opts.speed ?? 1, chips: opts.chips ?? true };
       applyCounts();
       uT0.value = t0;
@@ -278,6 +323,7 @@ export function createPlaster(light: LightUniforms, time: THREE.UniformNode<'flo
       uCenter.value.copy(center);
       uAxisW.value.copy(axisW);
       uAxisL.value.copy(axisL);
+      return burstLife(opts);
     },
     setQuality(q) { quality = q; applyCounts(); },
     setReduced(on) { reduced = on; applyCounts(); },
