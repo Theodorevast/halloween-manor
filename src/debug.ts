@@ -1,7 +1,10 @@
-// 调试接口：地址带 ?debug 时挂到 window.__haunt，给冒烟测试和手动排查用。正常访问不挂
+// 调试接口：地址带 ?debug 时挂到 window.__haunt，给冒烟测试和手动排查用。正常访问不挂。
+// 例外：?night=<分钟>（一夜多久天亮，看样时用）不用带 ?debug，见 nightTiming
+import { NIGHT } from './config/night';
 import { AO, BLOOM, GRADE, GRAIN, REVEAL, type FxFlags } from './engine/postfx';
 import type { EngineCore } from './engine/renderer';
 import type { CameraRig, RenderCore } from './engine/types';
+import type { NightSnapshot, NightTiming } from './night';
 import type { SimEvent, SpawnOptions, World, WorldState } from './sim/types';
 // 第三人称调试口用（见文件末尾 ghostDebug）
 import * as THREE from 'three/webgpu';
@@ -17,6 +20,28 @@ export interface DebugDeps {
   control: { timeScale: number };
   rig: CameraRig;
   core: RenderCore;
+  /** 一夜（src/night.ts，main.ts 接好的）：收夜、天亮、Keep haunting，和看状态 */
+  night?: NightHooks;
+}
+
+/** 一夜的调试口（main.ts 把控制器、登记簿、前门接进来） */
+export interface NightHooks {
+  endNight(): void;
+  dawn(): void;
+  keepHaunting(): void;
+  /** 控制器的状态，加上登记簿开着没有、前门开着多少（0..1） */
+  snapshot(): NightSnapshot & { register: boolean; door: number };
+}
+
+/**
+ * ?night=<分钟>：一夜多久天亮（模拟时间），收夜跟着按 NIGHT.length / NIGHT.dawn 的比例缩放（200 / 270），看样、试收尾时用
+ * （?night=1：44 秒收夜、1 分钟天亮）。不带 ?debug 也认；没给、给的不是正数就是 NIGHT 原来的
+ */
+export function nightTiming(search = typeof location === 'undefined' ? '' : location.search): NightTiming {
+  const minutes = Number(new URLSearchParams(search).get('night'));
+  if (!(minutes > 0) || !Number.isFinite(minutes)) return { length: NIGHT.length, dawn: NIGHT.dawn };
+  const dawn = minutes * 60;
+  return { length: (dawn * NIGHT.length) / NIGHT.dawn, dawn };
 }
 
 export interface HauntDebug {
@@ -35,6 +60,14 @@ export interface HauntDebug {
   screenOf(objectId: string): { x: number; y: number } | null;
   /** 取走记下的模拟事件（主循环和 step 推进出来的都算，只留最近 EVENT_LOG 个），取完清空。冒烟测试看现身、机关有没有发事件 */
   events(): SimEvent[];
+  /** 一夜：立刻收夜（不等屋里的人走光：静、光收回、翻开登记簿） */
+  endNight(): void;
+  /** 一夜：立刻天亮（屋里没被吓走的人自己出门；step 快进看他们走光、收尾） */
+  dawn(): void;
+  /** 一夜：收夜那一页上点 Keep haunting（冒烟测试优先点真的按钮） */
+  keepHaunting(): void;
+  /** 一夜此刻的状态：phase（night / closed / silence / retreat / register）、这一夜的时刻、登记簿开着没有、前门开着多少；没接时为 null */
+  night(): (NightSnapshot & { register: boolean; door: number }) | null;
 }
 
 const f1 = (n: number) => n.toFixed(1);
@@ -91,6 +124,10 @@ export function installDebug(d: DebugDeps) {
       log = [];
       return out;
     },
+    endNight: () => d.night?.endNight(),
+    dawn: () => d.night?.dawn(),
+    keepHaunting: () => d.night?.keepHaunting(),
+    night: () => d.night?.snapshot() ?? null,
   };
   (window as unknown as { __haunt: HauntDebug }).__haunt = api;
   Object.assign(api, cameraDebug(d));
@@ -98,7 +135,7 @@ export function installDebug(d: DebugDeps) {
   Object.assign(api, ghostDebug(d));
   // ?pipelog：从加载起记下新建的渲染管线（含开场的预编译），window.__pipelog.stop() 取结果
   if (new URLSearchParams(location.search).has('pipelog')) (window as unknown as { __pipelog: unknown }).__pipelog = (api as unknown as PostDebug).fx.pipelines();
-  console.info('[debug] window.__haunt 已就绪：state() / raw() / step(ms) / trigger(id) / spawn(opts) / rotate(dir) / setTimeScale(n)');
+  console.info('[debug] window.__haunt 已就绪：state() / raw() / step(ms) / trigger(id) / spawn(opts) / rotate(dir) / setTimeScale(n) / endNight() / dawn() / night()');
 }
 
 // ── 镜头与电影段落的调试口（电影感升级）：量震动的角度，记下 fx.setReveal 收到的调用 ──

@@ -10,6 +10,7 @@
 //   声像：俯视（娃娃屋）模式是 StereoPanner，按物体在屏幕上的横坐标（createAudio 的 pan）；第三人称调过 setListener 之后
 //     是 HRTF 的 PannerNode，听者在镜头处（space.ts）。braam、后颈一凉的涌起、环境层的持续音和风、鬼魂的冷风不定位
 //   ambHush 是现身时环境声的「让路」（压低 12 dB，ghost.ts），ambDuck 是吓跑前的静音（silence），两个各管各的、乘在一起
+//   环境层自己还有一级整体电平（ambience.ts 的 setLevel，在进 amb 之前）：一夜收尾时慢慢压下去、Keep haunting 时回来（setAmbience）
 // 限幅器是 DynamicsCompressorNode，阈值贴近天花板，平时几乎不动作，只在几个声音叠在一起时压一下；
 // 它后面再接一个 WaveShaper 软削波：-4 dBFS 以下是直线，以上用 tanh 弯到 -1.2 dBFS，峰值保证不会超过 -1 dBFS。
 // 注意：Web Audio 规范里压缩器自带 makeup 增益（这组参数实测 +1.9 dB），dev/audio.html 测的指标都是走完整条总线之后的。
@@ -69,6 +70,12 @@ export interface AudioSys extends Module {
   setListener(pos: Vec3, forward: Vec3): void;
   /** 第三人称的鬼魂，每帧调；null = 没有鬼魂（开场前、俯视模式）。穿墙时「呼」一声，飘动时有极轻的冷风；隔墙遮挡也从鬼魂的位置算 */
   setGhost(g: GhostState | null): void;
+  /**
+   * 环境层（持续音、风、嘎吱）的整体电平（2026-10-30「一夜」：收夜的静、光收回那几秒里慢慢压下去，Keep haunting 时回来）。
+   * level 是线性增益（1 = 原样），seconds 秒里平滑地走过去（0 = 立刻）；压得很低时也不再安排嘎吱（ambience.ts 的 setLevel）。
+   * 不新加声音；unlock 之前调也可以（先记着，建好环境层时补上）
+   */
+  setAmbience(level: number, seconds: number): void;
 }
 
 /** 主音量 */
@@ -448,6 +455,8 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
   let ghost: GhostState | null = null;
   /** 环境层的第三人称抬升做过没有 */
   let presence = false;
+  /** 环境层的整体电平（setAmbience；1 = 原样） */
+  let ambLevel = 1;
   /** 建总线失败过（极老的浏览器没有节点构造函数）：不再每次点击都重试 */
   let failed = false;
   let warned = false;
@@ -498,6 +507,8 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
           b.master.gain.value = muted ? 0 : MASTER;
           amb = createAmbience(b);
           amb.start(c.currentTime + 0.05);
+          // unlock 之前就压低过（一般不会：收夜在开场之后）：补上
+          if (ambLevel !== 1) amb.setLevel(ambLevel, c.currentTime, 0);
           crowd = createCrowd(b);
           breath = createBreath(b, crowd);
           ghostSnd = createGhostSound(b);
@@ -555,6 +566,15 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
         b.space.setEar(g ? { x: g.x, z: g.z } : null);
         gs.set(g, now);
       });
+    },
+
+    setAmbience(level, seconds) {
+      ambLevel = Math.max(0, level);
+      const a = amb;
+      if (!a || !ac) return;
+      const t = ac.currentTime;
+      // 时间常数取秒数的 1/3：seconds 秒走完约 95%（指数逼近，听起来比线性的渐变匀）
+      guard(() => a.setLevel(ambLevel, t, seconds > 0 ? seconds / 3 : 0));
     },
 
     onEvent(e, state) {

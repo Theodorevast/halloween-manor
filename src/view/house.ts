@@ -56,6 +56,161 @@ const PORCH = { pos: { x: 9.55, y: 1.35, z: 12.6 }, intensity: 1.8, distance: 2.
  */
 export const porchFlicker = (t: number) => 0.95 + 0.03 * Math.sin(t * 7.3) + 0.015 * Math.sin(t * 17.9 + 1.3);
 
+const smoothstep01 = (u: number) => {
+  const x = Math.min(1, Math.max(0, u));
+  return x * x * (3 - 2 * x);
+};
+
+/** 一个慢慢走过去的值：smoothstep（两头平、中间最陡 1.5 / 秒数），不过冲、不回头；seconds 给 0 直接切。门廊灯、天亮的光都用它 */
+export interface SmoothRamp {
+  readonly value: number;
+  /** 正在走 */
+  readonly moving: boolean;
+  /** 从此刻的值往 to 走，seconds 秒走完（≤ 0 直接切） */
+  set(to: number, seconds: number): void;
+  /** 走 dt 秒，返回走完以后的值 */
+  step(dt: number): number;
+}
+
+export function smoothRamp(initial: number): SmoothRamp {
+  let value = initial;
+  let ramp: { from: number; to: number; t: number; dur: number } | null = null;
+  return {
+    get value() {
+      return value;
+    },
+    get moving() {
+      return ramp !== null;
+    },
+    set(to, seconds) {
+      if (!(seconds > 0) || to === value) {
+        value = to;
+        ramp = null;
+        return;
+      }
+      ramp = { from: value, to, t: 0, dur: seconds };
+    },
+    step(dt) {
+      if (!ramp) return value;
+      ramp.t += dt;
+      if (ramp.t >= ramp.dur - 1e-9) {
+        value = ramp.to;
+        ramp = null;
+      } else value = ramp.from + (ramp.to - ramp.from) * smoothstep01(ramp.t / ramp.dur);
+      return value;
+    },
+  };
+}
+
+/**
+ * 门廊灯慢慢熄 / 亮回来（2026-10-30「一夜」：收夜时 NIGHT.porchFade.seconds 秒里熄掉，Keep haunting 时同样的时间亮回来）。
+ * 慢慢变暗不算闪，但不能有抖动（tests/night-controller.test.ts）：
+ * - 先在 flat 秒里把平时那点微抖（porchFlicker）收平，再开始变暗。不收平的话微抖一路跟着，熄灯的十几秒里灯忽上忽下
+ *   （从低处往回亮最多约 0.08），看着是在抖、不是在熄；收平以后一路只往下走
+ * - 亮度走 smoothRamp，只往一个方向；亮回来到头以后，微抖在 flat 秒里慢慢回来，之后和原来一位不差
+ * - countDips 数整段熄灯就是一下（一次慢慢变暗），附近的现身放在熄灯、亮回来的任何时刻叠上来，任意 1 秒也不超过 3 下
+ * - seconds 给 0 = 直接切（减少动态效果）
+ * mean：porchFlicker 的平均亮度（微抖收平以后停在它）
+ */
+export const PORCH_FADE = { flat: 1, mean: 0.95 };
+
+export interface PorchDimmer {
+  /** 亮度系数（0..1，不含微抖）：灯笼的自发光跟着它 */
+  readonly level: number;
+  /** 往 level 走，seconds 秒走完（往下走时含先收平微抖的那一段）；≤ 0 直接切 */
+  set(level: number, seconds: number): void;
+  /** 走 dt 秒，返回此刻门廊灯的亮度（乘 PORCH.intensity）；clock 是微抖的时钟（秒） */
+  step(dt: number, clock: number): number;
+}
+
+export function createPorchDimmer(): PorchDimmer {
+  const level = smoothRamp(1);
+  /** 微抖的幅度（0..1） */
+  let amp = 1;
+  /** 要往下走、还在等微抖收平：到时候再开始走（目标、秒数） */
+  let waiting: { to: number; seconds: number } | null = null;
+  return {
+    get level() {
+      return level.value;
+    },
+    set(to, seconds) {
+      const k = Math.min(1, Math.max(0, to));
+      waiting = null;
+      if (!(seconds > 0)) {
+        level.set(k, 0);
+        amp = k >= 1 ? 1 : 0;
+        return;
+      }
+      // 往下走：先花 amp × flat 秒收平微抖（已经平了就不用等），剩下的时间用来变暗；往上走：整段都用来亮
+      if (k < level.value) {
+        const flatFor = amp * PORCH_FADE.flat;
+        if (flatFor > 0) waiting = { to: k, seconds: Math.max(0.01, seconds - flatFor) };
+        else level.set(k, seconds);
+      } else level.set(k, seconds);
+    },
+    step(dt, clock) {
+      // 微抖只在全亮、而且没有要往下走的时候有；收平、回来都是线性的，flat 秒走完
+      const wantAmp = waiting === null && !level.moving && level.value >= 1;
+      amp = wantAmp ? Math.min(1, amp + dt / PORCH_FADE.flat) : Math.max(0, amp - dt / PORCH_FADE.flat);
+      if (waiting && amp === 0) {
+        level.set(waiting.to, waiting.seconds);
+        waiting = null;
+      }
+      const k = level.step(dt);
+      if (amp >= 1 && k >= 1) return porchFlicker(clock);
+      return k * (PORCH_FADE.mean + amp * (porchFlicker(clock) - PORCH_FADE.mean));
+    },
+  };
+}
+
+/**
+ * 天亮（2026-10-30「一夜」：模拟时间到 NIGHT.dawn，屋里没被吓走的人自己出门）：现有的月光、半球光慢慢从月夜的冷蓝往灰白偏一点、
+ * 亮一点点（颜色往同样亮度的灰白偏，亮多少只由强度的乘数管）；窗下的月光光斑淡一点（天快亮了，直射的月光弱，光是散的）。
+ * 不加灯，只改已有灯的颜色、强度和光斑的 uniform（都不重编）。克制：不是日出，没有暖色，不闪
+ * - moonGrey / skyGrey：月光、天空色往灰白偏多少（0..1）；moonGain / hemiGain：强度乘多少；patch：窗下光斑乘多少
+ * - white：灰白带的那一点点暖（r, g, b 的乘数，不是纯灰；亮度不变）
+ */
+export const DAWN = {
+  moonGrey: 0.45,
+  moonGain: 1.15,
+  skyGrey: 0.5,
+  hemiGain: 1.2,
+  patch: 0.8,
+  white: [1, 0.985, 0.96] as [number, number, number],
+};
+
+/** c 往同样亮度（线性 Rec.709 亮度）的灰白偏 m（0..1） */
+function towardGrey(c: THREE.Color, m: number): THREE.Color {
+  const [wr, wg, wb] = DAWN.white;
+  const lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  const s = lum / (0.2126 * wr + 0.7152 * wg + 0.0722 * wb);
+  return c.clone().lerp(new THREE.Color(s * wr, s * wg, s * wb), m);
+}
+
+const MOON_NIGHT = new THREE.Color(PALETTE.moon);
+const SKY_NIGHT = new THREE.Color(PALETTE.moonSky);
+const MOON_DAWN = towardGrey(MOON_NIGHT, DAWN.moonGrey);
+const SKY_DAWN = towardGrey(SKY_NIGHT, DAWN.skyGrey);
+
+/** 天亮到 k（0 夜里、1 天亮）时月光、天空色和几个乘数；给了 out 就写进去（每帧用，不新建颜色） */
+export function dawnLights(k: number, out = { moon: new THREE.Color(), sky: new THREE.Color(), moonGain: 1, hemiGain: 1, patch: 1 }) {
+  const x = Math.min(1, Math.max(0, k));
+  out.moon.lerpColors(MOON_NIGHT, MOON_DAWN, x);
+  out.sky.lerpColors(SKY_NIGHT, SKY_DAWN, x);
+  out.moonGain = 1 + (DAWN.moonGain - 1) * x;
+  out.hemiGain = 1 + (DAWN.hemiGain - 1) * x;
+  out.patch = 1 + (DAWN.patch - 1) * x;
+  return out;
+}
+
+/** createHouseView 的结果：多两个「一夜」用的慢变化接口（main.ts 的一夜控制器 src/night.ts 调） */
+export interface HouseView extends Module {
+  /** 门廊灯（连灯笼）往 level（0..1）走，seconds 秒走完（0 = 直接切）：收夜时慢慢熄、Keep haunting 时亮回来。见 createPorchDimmer */
+  setPorch(level: number, seconds: number): void;
+  /** 天亮的光：k 0 夜里、1 天亮，seconds 秒走完（0 = 直接切）。见 DAWN */
+  setDawn(k: number, seconds: number): void;
+}
+
 const C = (hex: number) => new THREE.Color(hex);
 const mixC = (a: number, b: number, t: number) => C(a).lerp(C(b), t);
 
@@ -259,7 +414,7 @@ function buildOutdoors() {
   porch.name = 'porch-light';
   out.push(porch);
 
-  return { objects: out, porch, dispose: () => {
+  return { objects: out, porch, lantern: glowMat, dispose: () => {
     for (const o of out) if (o instanceof THREE.Mesh) { o.geometry.dispose(); (o.material as THREE.Material).dispose(); }
   } };
 }
@@ -405,7 +560,7 @@ function buildCeiling(dissolve?: DissolveUniforms) {
  */
 const GHOST_MOON_VIEW: Vec2 = { x: Math.SQRT1_2, z: Math.SQRT1_2 };
 
-export function createHouseView(core: RenderCore, rig: CameraRig): Module {
+export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
   const search = new URLSearchParams(location.search);
   // 第三人称模式：rig 带着鬼魂（GhostRig）。墙全高、有天花板；溶解和冷光可以用 ?noghostfx 关掉
   const ghostMode = isGhostRig(rig);
@@ -463,16 +618,34 @@ export function createHouseView(core: RenderCore, rig: CameraRig): Module {
     patches.update(L, walls.fullness);
   };
 
+  // 天亮（2026-10-30「一夜」）：月光、半球光的颜色和强度、窗下光斑跟着 dawn 走（dawnLights）；夜里 dawn = 0，就是原来的值
+  const dawn = smoothRamp(0);
+  const dawnMix = dawnLights(0);
+  let quality: Quality = core.quality;
+  const applyLight = () => {
+    const high = quality === 'high';
+    dawnLights(dawn.value, dawnMix);
+    moon.color.copy(dawnMix.moon);
+    moon.intensity = (high ? MOON.intensity : MOON.intensityLow) * dawnMix.moonGain;
+    hemi.color.copy(dawnMix.sky);
+    hemi.intensity = MOON.hemi * dawnMix.hemiGain;
+    patches.strength.value = (high ? MOON.patch : MOON.patchLow) * dawnMix.patch;
+  };
   const applyQuality = (q: Quality) => {
-    const high = q === 'high';
+    quality = q;
     // 月光阴影两档都开：关掉它会改变每一个受光材质的着色器，第一次切到 Low 时全部重编，页面卡 2 秒以上
     // （2026-10-27 实测）。一张 2048 的方向光阴影图只画深度，开销远小于那次卡顿
     moon.castShadow = true;
-    moon.intensity = high ? MOON.intensity : MOON.intensityLow;
-    patches.strength.value = high ? MOON.patch : MOON.patchLow;
+    applyLight();
   };
   applyQuality(core.quality);
   aimMoon();
+
+  // 门廊灯慢慢熄 / 亮回来（2026-10-30「一夜」）：灯的强度每帧由 porch 给（含平时的微抖），灯笼的自发光跟着亮度系数走。
+  // 灯笼的颜色只在系数变了的时候写：lightfx（现身时附近的灯一起暗）发现颜色被主人改过，会把新值当作底数，见 lightfx.ts
+  const porch = createPorchDimmer();
+  const lanternBase = outdoors.lantern.color.clone();
+  let lanternLevel = 1;
 
   // 第三人称：镜头位置换到房屋坐标（houseRoot 只有平移，挂在场景根上）；
   // 墙、家具附近会不会有洞（HOLE_TEST），不会就换上不挖洞的那份材质（省掉 discard 的开销）
@@ -498,11 +671,28 @@ export function createHouseView(core: RenderCore, rig: CameraRig): Module {
         walls.update(ctx.dt, rig.viewDir);
         aimMoon();
       }
-      // 门廊灯：极轻的油灯式摇曳（porchFlicker）
+      // 门廊灯：极轻的油灯式摇曳（porchFlicker）；收夜时慢慢熄、Keep haunting 时亮回来（createPorchDimmer）
       flicker += ctx.dt;
-      outdoors.porch.intensity = PORCH.intensity * porchFlicker(flicker);
+      outdoors.porch.intensity = PORCH.intensity * porch.step(ctx.dt, flicker);
+      if (porch.level !== lanternLevel) {
+        lanternLevel = porch.level;
+        outdoors.lantern.color.copy(lanternBase).multiplyScalar(lanternLevel);
+      }
+      // 天亮的光：走的时候每帧写一次，走完不再碰
+      if (dawn.moving) {
+        dawn.step(ctx.dt);
+        applyLight();
+      }
     },
     setQuality: applyQuality,
+    setPorch(level, seconds) {
+      porch.set(level, seconds);
+    },
+    setDawn(k, seconds) {
+      dawn.set(Math.min(1, Math.max(0, k)), seconds);
+      // 直接切（减少动态）：这一下就写上
+      if (!dawn.moving) applyLight();
+    },
     dispose() {
       core.houseRoot.remove(root);
       core.scene.remove(hemi);

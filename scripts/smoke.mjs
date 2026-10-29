@@ -2,7 +2,8 @@
 //   node scripts/smoke.mjs            先构建再测
 //   node scripts/smoke.mjs --no-build 直接测现有的 dist/
 //   node scripts/smoke.mjs --webgl    强制走 WebGL2 回退路径（地址加 ?webgl）
-// 三段：娃娃屋俯视（?dollhouse，原有的各项检查）· 第三人称鬼魂（有鼠标的桌面默认走这条）· 手机竖屏（触屏自动走俯视）
+// 四段：娃娃屋俯视（?dollhouse，原有的各项检查）· 第三人称鬼魂（有鼠标的桌面默认走这条）·
+// 一夜（2026-10-30：前门、天亮、收夜、登记簿、Keep haunting）· 手机竖屏（触屏自动走俯视，也收一次夜）
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright-core';
@@ -106,6 +107,28 @@ const waitStarted = async (page) => {
   const held = Date.now() - t0;
   await sleep(3500);
   return held;
+};
+/** 一夜（2026-10-30）：等到 __haunt.night() 满足 pred（真实时间，最多 ms 毫秒），返回最后一次读到的状态 */
+const waitNight = async (page, pred, ms) => {
+  const t0 = Date.now();
+  let n = null;
+  while (Date.now() - t0 < ms) {
+    n = await page.evaluate(() => window.__haunt.night());
+    if (n && pred(n)) return n;
+    await sleep(100);
+  }
+  return n;
+};
+/** 左下播报里现在有的几行 */
+const tickerLines = (page) => page.evaluate(() => [...document.querySelectorAll('.hud-ticker li')].map((l) => l.textContent));
+/** 收夜那一页上的按钮（文案和 STRINGS.register 一致）：点真的按钮；没有就记一笔失败，再走调试口，后面几项照样能测 */
+const clickRegister = async (page, name, what) => {
+  const b = page.getByRole('button', { name });
+  const ok = await b.waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false);
+  check(`一夜：登记簿上有「${name}」按钮（${what}）`, ok);
+  if (ok) await b.click();
+  else if (name === 'Keep haunting') await page.evaluate(() => window.__haunt.keepHaunting());
+  return ok;
 };
 
 try {
@@ -422,6 +445,51 @@ try {
   check('第三人称：没有页面报错', gErrors.length === 0, gErrors.slice(0, 5).join(' | '));
   await gp.close();
 
+  // ── 一夜（2026-10-30）：前门、天亮、收夜、登记簿、Keep haunting ─────────────────────
+  // 收尾的静、光收回走真实时间（NIGHT.closing 一共 5.5 秒），模拟用 step 快进
+  const np = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const nErrors = watchErrors(np);
+  await np.goto(`${BASE}?debug${QS}`, { waitUntil: 'networkidle' });
+  await waitReady(np);
+  await np.mouse.move(640, 400);
+  await np.locator('[data-start]').click();
+  await waitStarted(np);
+  // 前门：放一个人进门，2.5 秒内门开到一半以上（两下敲门之后推开，人进来以后才慢慢合上）
+  await np.evaluate(() => window.__haunt.spawn());
+  let doorMax = 0;
+  for (let t0 = Date.now(); Date.now() - t0 < 2500; await sleep(100)) doorMax = Math.max(doorMax, (await np.evaluate(() => window.__haunt.night().door)));
+  check('一夜：有人进门时前门推开', doorMax > 0.5, `最大开度 ${doorMax.toFixed(2)}`);
+  // 天亮：屋里没被吓走的人自己出门（模拟快进），走光、门关上以后静一会儿、光收回前门、翻开登记簿
+  await np.evaluate(() => window.__haunt.dawn());
+  const dawnSaid = (await tickerLines(np)).some((l) => l === 'The sky is growing pale.');
+  let left = -1;
+  for (let i = 0; i < 24 && left !== 0; i++) left = await np.evaluate(() => { window.__haunt.step(5000); return window.__haunt.raw().npcs.length; });
+  const afterDawn = await waitNight(np, (n) => n.phase === 'register' && n.register, 12000);
+  check('一夜：天亮后屋里的人都走掉、登记簿翻开', dawnSaid && left === 0 && afterDawn?.phase === 'register' && afterDawn.register,
+    `播报 ${dawnSaid ? '有' : '无'}，屋里还剩 ${left} 人，${JSON.stringify(afterDawn)}`);
+  await np.screenshot({ path: `shots/smoke-6-register-dawn${WEBGL ? '-webgl' : ''}.png` });
+  // 第三人称：翻开时把鼠标还给玩家（无头浏览器锁不上指针时这项不算数）
+  check('一夜：登记簿翻开时指针锁定放开', await np.evaluate(() => document.pointerLockElement === null));
+  // Keep haunting：合上登记簿、这一夜重新计时、照常补人（几秒后有人敲门）
+  await clickRegister(np, 'Keep haunting', '收夜那一页');
+  const kept = await waitNight(np, (n) => n.phase === 'night' && !n.register, 3000);
+  const reopened = await np.evaluate(() => {
+    const h = window.__haunt;
+    h.events();
+    h.step(20000);
+    return h.events().filter((e) => e.type === 'spawn').length;
+  });
+  check('一夜：Keep haunting 以后登记簿合上、又有人进门', kept?.phase === 'night' && !kept.register && reopened > 0, `${JSON.stringify(kept)}，20 秒内进门 ${reopened} 人`);
+  // 立刻收夜（调试口：不等屋里的人走光）：播报 lastCall，静、光收回以后翻开登记簿
+  await np.evaluate(() => window.__haunt.endNight());
+  const lastCall = (await tickerLines(np)).some((l) => l === 'No one else is coming tonight.');
+  const ended = await waitNight(np, (n) => n.phase === 'register' && n.register, 12000);
+  check('一夜：收夜以后登记簿翻开', lastCall && ended?.phase === 'register' && ended.register, `播报 ${lastCall ? '有' : '无'}，${JSON.stringify(ended)}`);
+  await np.screenshot({ path: `shots/smoke-7-register-close${WEBGL ? '-webgl' : ''}.png` });
+  await clickRegister(np, 'Keep haunting', '收夜那一页，第二夜');
+  check('一夜：没有页面报错', nErrors.length === 0, nErrors.slice(0, 5).join(' | '));
+  await np.close();
+
   // ── 手机竖屏（触屏）：自动走俯视；不出横向滚动条；轻点开场能开始，轻点物件能附身 ──────────
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   await phone.goto(`${BASE}?debug${QS}`, { waitUntil: 'networkidle' });
@@ -437,6 +505,15 @@ try {
   const cd = await phone.evaluate(() => window.__haunt.raw().objects.find((o) => o.id === 'lamp-living').cooldown);
   check('触屏轻点物件能附身', cd > 0, `点 (${pt.x.toFixed(0)}, ${pt.y.toFixed(0)})，冷却 ${cd.toFixed(1)} 秒`);
   await phone.screenshot({ path: 'shots/smoke-3-phone.png' });
+  // 触屏、俯视也能收夜、翻登记簿（2026-10-30「一夜」）；Keep haunting 用手指点
+  await phone.evaluate(() => window.__haunt.endNight());
+  const phoneEnd = await waitNight(phone, (n) => n.phase === 'register' && n.register, 12000);
+  check('触屏：收夜以后登记簿翻开', phoneEnd?.phase === 'register' && phoneEnd.register, JSON.stringify(phoneEnd));
+  await phone.screenshot({ path: 'shots/smoke-8-phone-register.png' });
+  const keepBtn = phone.getByRole('button', { name: 'Keep haunting' });
+  if (await keepBtn.isVisible().catch(() => false)) await keepBtn.tap();
+  const phoneKept = await waitNight(phone, (n) => n.phase === 'night' && !n.register, 3000);
+  check('触屏：点 Keep haunting 合上登记簿', phoneKept?.phase === 'night' && !phoneKept.register, JSON.stringify(phoneKept));
 } catch (e) {
   check('冒烟流程跑完', false, e.message.split('\n')[0]);
 } finally {
