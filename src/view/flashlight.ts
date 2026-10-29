@@ -110,9 +110,9 @@ export function nervousWave(time: number, seed: number): number {
  */
 const beamPersp = uniform(0);
 
-// 光锥网格要在墙那里截断：沿格子地图走一遍，找到第一个挡视线的格子
+// 光锥网格要在墙那里截断：沿格子地图走一遍，找到第一个挡视线的格子（反弹光 bounce.ts 量落点也用它）
 let tiles: Uint8Array | null = null;
-function wallDistance(x: number, z: number, dir: number, max: number): number {
+export function wallDistance(x: number, z: number, dir: number, max: number): number {
   tiles ??= buildTiles();
   const dx = Math.cos(dir), dz = Math.sin(dir);
   const step = CELL / 5;

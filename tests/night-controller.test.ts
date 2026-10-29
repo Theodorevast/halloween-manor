@@ -13,7 +13,7 @@ import type { RenderCore } from '../src/engine/types';
 import { NIGHT_FX, createNight, type NightDeps, type NightTiming } from '../src/night';
 import type { NpcMode, NpcState, SimEvent, WorldState } from '../src/sim/types';
 import { manifestLights } from '../src/view/ghost';
-import { PORCH_FADE, createPorchDimmer, dawnLights, porchFlicker, smoothRamp } from '../src/view/house';
+import { DAWN, PORCH_FADE, createPorchDimmer, dawnLights, porchFlicker, smoothRamp } from '../src/view/house';
 import { countDips, createLightFx, dipStarts } from '../src/view/lightfx';
 import { PALETTE } from '../src/view/palette';
 
@@ -562,7 +562,7 @@ describe('天亮的光：只改已有的月光、半球光，慢慢往灰白偏�
     expect(mid - next).toBeLessThan(0.01);
   });
 
-  it('dawnLights：k = 0 就是原来的夜；k = 1 月光、天空色饱和度降下来（往灰白偏），仍然不偏暖（不像黄昏），强度只亮一点点；k 从 0 走到 1 亮度一路只往上', () => {
+  it('dawnLights：k = 0 就是原来的夜；k = 1 月光、天空色饱和度降下来（往灰白偏），仍然不偏暖（不像黄昏）；月亮落下去直射弱一点、天光散开亮一些；k 从 0 走到 1 亮度一路只往上', () => {
     const lum = (c: THREE.Color) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
     const sat = (c: THREE.Color) => c.getHSL({ h: 0, s: 0, l: 0 }).s;
     const night = dawnLights(0);
@@ -576,16 +576,39 @@ describe('天亮的光：只改已有的月光、半球光，慢慢往灰白偏�
       // 颜色本身的亮度几乎不变（只是变灰），亮多少由强度的乘数管
       expect(Math.abs(lum(d) / lum(n) - 1)).toBeLessThan(0.05);
     }
-    expect(dawn.moonGain).toBeGreaterThan(1);
-    expect(dawn.moonGain).toBeLessThanOrEqual(1.25);
+    // 月亮落下去：直射的月光只暗一点点（ART-2：×0.9）；天光变散：半球光亮一些（×1.5），不像日出那样大亮
+    expect(dawn.moonGain).toBeGreaterThanOrEqual(0.85);
+    expect(dawn.moonGain).toBeLessThan(1);
     expect(dawn.hemiGain).toBeGreaterThan(1);
-    expect(dawn.hemiGain).toBeLessThanOrEqual(1.3);
+    expect(dawn.hemiGain).toBeLessThanOrEqual(1.6);
     let prev = 0;
     for (let k = 0; k <= 100; k++) {
       const l = dawnLights(k / 100);
       const b = lum(l.moon) * l.moonGain + lum(l.sky) * l.hemiGain;
       expect(b).toBeGreaterThanOrEqual(prev - 1e-12);
       prev = b;
+    }
+  });
+
+  it('看得见的天（ART-2）：窗玻璃的倍数、屋外底色、雾随 k 一路只往上（每个通道都是），k = 0 是夜里原来的样子、k = 1 是 DAWN 给的；天是冷的灰蓝，不偏暖', () => {
+    const night = dawnLights(0);
+    expect(night.glass.toArray()).toEqual([1, 1, 1]);
+    expect(night.background.equals(new THREE.Color(PALETTE.night))).toBe(true);
+    expect(night.fog).toBe(0);
+    const dawn = dawnLights(1);
+    expect(dawn.glass.toArray()).toEqual(DAWN.glass);
+    expect(dawn.background.equals(new THREE.Color(DAWN.background))).toBe(true);
+    expect(dawn.fog).toBe(DAWN.fog);
+    expect(dawn.background.b).toBeGreaterThan(dawn.background.r);
+    expect(dawn.glass.z).toBeLessThanOrEqual(dawn.glass.x);
+    let prev = dawnLights(0);
+    for (let k = 1; k <= 100; k++) {
+      const l = dawnLights(k / 100);
+      for (const [a, b] of [[l.glass.x, prev.glass.x], [l.glass.y, prev.glass.y], [l.glass.z, prev.glass.z],
+        [l.background.r, prev.background.r], [l.background.g, prev.background.g], [l.background.b, prev.background.b], [l.fog, prev.fog]]) {
+        expect(a).toBeGreaterThanOrEqual(b - 1e-12);
+      }
+      prev = l;
     }
   });
 });

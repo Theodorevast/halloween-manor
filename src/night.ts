@@ -32,8 +32,8 @@ export const NIGHT_FX = {
   hush: 0.18,
   /** Keep haunting 以后环境层回来用几秒 */
   ambienceBack: 4,
-  /** 天亮的光起来用几秒（house.ts 的 setDawn）；Keep haunting 以后退回夜里用几秒 */
-  dawnLight: 20,
+  /** 天亮的光起来用几秒（house.ts 的 setDawn；smoothstep，慢、克制，最后几位出门前走完）；Keep haunting 以后退回夜里用几秒 */
+  dawnLight: 30,
   dawnBack: 4,
   /** Keep haunting：光从前门重新铺开用几秒（和开场一样长） */
   spread: 2.5,

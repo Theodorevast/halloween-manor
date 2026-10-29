@@ -137,6 +137,19 @@ export const DRAFT = {
   minSteps: 2,
 };
 
+/**
+ * 天亮的程度（0 夜里、1 天亮）：house.ts 的天亮跟着写（DAWN.fog）。雾的环境色往 FOG_DAWN 走（晨雾被天光照亮），update 里变了才写 uniform
+ */
+export const fogSky = { k: 0 };
+/** 雾的 uniform 上一次按哪个 k 写的 */
+let fogSkyK = 0;
+/** 天亮时雾的环境色：FOG.ambient ×1.8，再往它自己亮度的灰偏 0.4 */
+const FOG_DAWN = (() => {
+  const c = FOG.ambient.clone().multiplyScalar(1.8);
+  const l = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  return c.lerp(new THREE.Color(l, l, l), 0.4);
+})();
+
 const TORCHES = 4;
 const POINTS = 4;
 /** 房间编号（顶点属性 room）：按 ROOMS 的顺序；墙外、屋外是 NO_ROOM */
@@ -723,6 +736,8 @@ export function createFogView(core: RenderCore, _rig: CameraRig): Module {
       u.time.value = ctx.time;
       scanIn -= ctx.dt;
       stepDrafts(ctx.dt);
+      // 天亮：雾的环境色跟着天光走（fogSky，house.ts 写；变了才写）
+      if (fogSky.k !== fogSkyK) u.ambient.value.copy(FOG.ambient).lerp(FOG_DAWN, (fogSkyK = fogSky.k));
     },
     setQuality(q) {
       quality = q;
