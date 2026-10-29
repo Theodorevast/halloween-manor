@@ -126,8 +126,9 @@ interface Effect {
  * - glow：一个数值 uniform（台灯：灯罩、灯泡的自发光都乘它，台灯每帧自己写）。灯罩的颜色是着色器里的常量，
  *   换颜色要重编材质，所以只跟着暗、不偏色（台灯的光本身照样偏暖红）
  * - emissive：用 material.color 画的自发光材质（门廊的灯笼）：颜色跟着暗，也和灯一样往暖红偏
+ * - busy：主人自己正在演闪烁时设成 true（附身的台灯），这段时间这盏灯不叠加别的压暗：两套闪叠起来最多会到每秒 6 下（2026-10-29）
  */
-export type LightFxTag = true | { glow?: { value: number }; emissive?: { color: THREE.Color } };
+export type LightFxTag = true | { glow?: { value: number }; emissive?: { color: THREE.Color }; busy?: boolean };
 
 /**
  * 越暗越偏红：base 的色调往 warm 偏 w（0..1），亮度（最大的那个分量）不变。base 的最大分量是 1 时就是 base.lerp(warm, w)；
@@ -150,6 +151,8 @@ interface Managed {
   writtenColor: THREE.Color;
   glow: { ref: { value: number }; base: number; written: number } | null;
   emissive: { mat: { color: THREE.Color }; base: THREE.Color; written: THREE.Color } | null;
+  /** 主人自己正在演闪烁（标记的 busy，见 LightFxTag）：这时不再叠加压暗，两套闪叠起来会超过每秒 3 下 */
+  owner: { busy?: boolean } | null;
   level: number;
   /** 没在压暗：不碰这盏灯 */
   idle: boolean;
@@ -195,6 +198,7 @@ export function createLightFx(core: RenderCore): LightFx {
         baseColor: l.color.clone(), writtenColor: l.color.clone(),
         glow: g ? { ref: g, base: g.value, written: g.value } : null,
         emissive: e ? { mat: e, base: e.color.clone(), written: e.color.clone() } : null,
+        owner: typeof tag === 'object' ? tag : null,
         level: 1, idle: true,
       });
     });
@@ -298,7 +302,8 @@ export function createLightFx(core: RenderCore): LightFx {
 
       for (const m of lights) {
         if (m.idle && !busy) continue;
-        const target = busy ? levelAt(m.pos, now) : 1;
+        // 主人自己在闪（附身的台灯）：这盏灯这时不叠加现身的压暗，回到 1（主人的闪本身已经守着每秒 3 下）
+        const target = busy && !m.owner?.busy ? levelAt(m.pos, now) : 1;
         if (m.idle) {
           if (target === 1) continue;
           wake(m);

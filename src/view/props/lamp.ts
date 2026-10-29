@@ -115,7 +115,10 @@ export function createLamp(seed: number): PropRig {
   const light = new THREE.PointLight(PALETTE.lamp, LIGHT.high.intensity, LIGHT.high.distance, 2);
   light.position.y = LIGHT_Y;
   light.castShadow = false;
-  light.userData.lightfx = { glow }; // 现身时跟着附近的灯一起暗，灯罩、灯泡的自发光（glow）也一起（lightfx.ts 收集）
+  // 现身时跟着附近的灯一起暗，灯罩、灯泡的自发光（glow）也一起（lightfx.ts 收集）；自己在闪（附身、复原）时标 busy，
+  // lightfx 这段时间不再叠加压暗：两套闪叠起来会超过每秒 3 下
+  const fxTag = { glow, busy: false };
+  light.userData.lightfx = fxTag;
   model.add(light);
 
   let q: Quality = 'high';
@@ -152,6 +155,7 @@ export function createLamp(seed: number): PropRig {
         else if (off && obj.broken <= 0) r = 0;
       }
 
+      fxTag.busy = t >= 0 || r >= 0;
       let target = 1;
       if (t >= 0) {
         t += dt;

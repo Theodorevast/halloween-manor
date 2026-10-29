@@ -267,3 +267,38 @@ describe('跟着灯一起暗的自发光（评审 I3：灯暗了灯罩还亮着�
     expect(s.lantern.color.equals(s.lanternBase)).toBe(true);
   });
 });
+
+describe('主人自己在闪的灯不叠加压暗（2026-10-29：附身台灯的闪 + 现身的压暗叠起来最坏每秒 6 下）', () => {
+  it('标了 busy 的灯在压暗期间回到 1，busy 清掉以后照常跟着压暗', () => {
+    const scene = new THREE.Scene();
+    const houseRoot = new THREE.Group();
+    scene.add(houseRoot);
+    const tag = { glow: uniform(1), busy: false };
+    const lamp = new THREE.PointLight(0xffb35c, 4.2, 4.8, 2);
+    lamp.position.set(1, 1.3, 1);
+    lamp.userData.lightfx = tag;
+    houseRoot.add(lamp);
+    const fx = createLightFx({ scene, houseRoot } as unknown as RenderCore);
+    let time = 0;
+    const run = (seconds: number) => {
+      for (let k = 0; k < Math.round(seconds / DT); k++) {
+        time += DT;
+        lamp.intensity = 4.2; // 主人每帧写自己的强度（真的台灯在 lightfx 之前写）
+        fx.update({ dt: DT, time, state: {} as WorldState });
+      }
+    };
+    run(0.1);
+    fx.dipAll({ x: 1, z: 1 }, 5, 0.2, 3000);
+    run(0.3);
+    expect(lamp.intensity).toBeLessThan(4.2 * 0.3);
+    // 主人开始演自己的闪：这盏灯不再被压暗（热惯性约 0.05 秒内回到满）
+    tag.busy = true;
+    run(0.3);
+    expect(lamp.intensity).toBeCloseTo(4.2, 3);
+    // 演完：压暗还没结束，照常压下去
+    tag.busy = false;
+    run(0.3);
+    expect(lamp.intensity).toBeLessThan(4.2 * 0.3);
+    fx.dispose();
+  });
+});
