@@ -21,6 +21,8 @@
 //   喘气、呜咽是恐惧值的函数，没有事件：第三人称区有演示按钮（访客站在鬼魂面前，恐惧值从低涨到高），离线版直接喂 breath.ts
 //   没有事件可发、直接调合成函数的声音（呜咽 whimper、冷气 coldBreath、灯暗的咔哒 lightClick）和听者站在卧室里的 3D 床标 shot：出单发按钮，
 //   在页面自己备的一条实时总线上放离线测量用的那份 render（createAudio 不把总线交出来；听者的站位在 render 里摆）。window.__audio.fire(name) 也能点它们
+// 2026-10-29 新增衣柜 wardrobe（trigger 事件，时刻全读 config/scares.ts 的 WARDROBE：锁舌 + 门板被推 → 合页吱呀 → 空白 → 门撞上门框 + 低频冲击 + 落灰）：
+//   立体声版走真正的 createAudio（出实时按钮，也进离线测量）；3D 版是单发 shot，听者站在卧室里、衣柜正前方 2.5 米
 import { FRONT_DOOR, HOUSE_W, PROPS, propCenter } from '../src/config/house';
 import { FEAR } from '../src/config/visitors';
 import { createAmbience, dreadTarget, AMB } from '../src/audio/ambience';
@@ -28,7 +30,7 @@ import { createBreath } from '../src/audio/breath';
 import { createAudio, createBus, createRouter, type MixBus, type Router } from '../src/audio/engine';
 import { createCrowd, stepBanks } from '../src/audio/footsteps';
 import { createGhostSound, wallWhoosh } from '../src/audio/ghost';
-import { Snd, bandNoise, braam, lightClick, rng } from '../src/audio/sfx';
+import { Snd, bandNoise, braam, lightClick, rng, wardrobeCues } from '../src/audio/sfx';
 import type { Vec3 } from '../src/audio/space';
 import { coldBreath, whimper } from '../src/audio/voices';
 import type { GhostState } from '../src/engine/types';
@@ -121,7 +123,7 @@ function simulateWalk(bus: MixBus, t: number, who: NpcState, path: Vec2[], speed
 function simulateBreath(bus: MixBus, t: number, who: NpcState, pos: Vec2, ear: Vec2, fear: number, seconds: number) {
   const crowd = createCrowd(bus, true);
   const breath = createBreath(bus, crowd);
-  const w: NpcState = { ...who, pos: { ...pos }, mode: 'wander', speed: 0, fear, nervous: fear >= 60 };
+  const w: NpcState = { ...who, pos: { ...pos }, mode: 'wander', speed: 0, fear, nervous: fear >= FEAR.nervous };
   for (let f = 0; f < seconds * 60; f++) {
     crowd.update([w], t + f / 60, 1 / 60);
     breath.update([w], t + f / 60, 1 / 60, ear);
@@ -139,7 +141,7 @@ const RUG_WALK: Vec2[] = [{ x: 3, z: 6 }, { x: 7, z: 6 }];
 const STUDY_WALK: Vec2[] = [{ x: 1.5, z: 2.6 }, { x: 4.6, z: 2.6 }];
 
 // ── 声音清单（按钮和离线测量共用） ─────────────────────────────────────────
-type Group = 'ambience' | 'scare' | 'lure' | 'voice' | 'other' | 'stress' | 'calib' | 'calib3d' | 'step' | 'ghost' | 'chill' | '3d' | 'manifest' | 'reveal' | 'breath' | 'bed' | 'trap';
+type Group = 'ambience' | 'scare' | 'lure' | 'voice' | 'other' | 'stress' | 'calib' | 'calib3d' | 'step' | 'ghost' | 'chill' | '3d' | 'manifest' | 'reveal' | 'breath' | 'bed' | 'trap' | 'wardrobe';
 interface Case {
   name: string;
   group: Group;
@@ -419,6 +421,15 @@ const CASES: Case[] = [
     r.play([trig('bed')], state, t);
   } },
   { name: 'trap: armed (very light ice crack, not positional)', group: 'trap', seconds: 2, win: [0, 0.5], nominal: 0, rmsRange: [-68, -52], events: [trap('bed', 'armed')], render: viaRouter([trap('bed', 'armed')]) },
+
+  // ── 衣柜（trigger wardrobe）：latch 锁舌 + 门板被推 → open 合页吱呀 → hold 空白 → 门从 slamAt 起关、slamTime 秒后撞上门框，砰（时刻都读 config/scares.ts 的 WARDROBE）──
+  // 测量窗和设计时长跟声音自己的时刻表走（wardrobeCues().hit = 撞上那一刻），不绑模拟的 SCARES.wardrobe.active：那个数要按机器人调，缩到撞击之前会把撞击截掉
+  { name: 'trigger wardrobe (latch click + push, hinge creak, silence, slam + low hit + dust)', group: 'wardrobe', seconds: 8, win: [0, wardrobeCues().hit + 0.5], nominal: wardrobeCues().hit, rmsRange: [-35, -23], events: [trig('wardrobe')], render: viaRouter([trig('wardrobe')]) },
+  // 单发：听者站在卧室里、衣柜正前方 2.5 米（衣柜在 (4.25, 7.75)，声音从 1.1 米高的柜门出来）
+  { name: '3d: trigger wardrobe, listener 2.5 m in front of the doors', group: 'wardrobe', seconds: 8, win: [0, wardrobeCues().hit + 0.5], nominal: 0, rmsRange: [-37, -26], shot: true, render: (bus, r, t) => {
+    listen(bus, v3(4.25, 1.8, 10.25), NORTH);
+    r.play([trig('wardrobe')], state, t);
+  } },
 
   { name: '3d: object sounds 3 m ahead (portrait)', group: '3d', seconds: 4, win: [0, 1.3], nominal: 1.3, rmsRange: [-24, -10], render: (bus, r, t) => {
     // 书房里，肖像在 (3.75, 0.75)，听者在它南边 3 米（第三人称：鬼魂 1 米、镜头再往后 2 米）
@@ -823,7 +834,7 @@ const LIVE3D: { name: string; run(): void }[] = [
 ];
 
 const box = document.getElementById('buttons')!;
-for (const g of ['scare', 'lure', 'voice', 'other', 'manifest', 'reveal', 'breath', 'bed', 'trap'] as Group[]) {
+for (const g of ['scare', 'lure', 'voice', 'other', 'manifest', 'reveal', 'breath', 'bed', 'wardrobe', 'trap'] as Group[]) {
   const sec = document.createElement('div');
   sec.innerHTML = `<h2>${g}</h2>`;
   for (const c of CASES.filter((x) => x.group === g && (x.events || x.timeline || x.shot))) {

@@ -56,11 +56,26 @@
 //       加稀疏的纤维颗粒）；1.25–1.95 一口被布闷住的吸气（和 shiver 同一套呼吸合成 breathPass，过 600 Hz 低通，从枕头那里出来），然后屏住：
 //       1.95 到落下之间（0.65 秒）什么声音都没有（调研原则 11：先抽空再落下）；2.6 塌下：一声「噗」（低通噪声 0.15 秒，截止 900 → 180 Hz 往下扫）
 //       + 最低一层的低频冲击（braamFn，比现身的再小一点）+ 一丝灰尘的「嘶」；2.66 起被子底下挤出来一口长气（闷住的呼气 1.15 秒，共振峰往下走）
+//   衣柜 wardrobe（trigger 事件；时刻全部读 config/scares.ts 的 WARDROBE，由 wardrobeCues() 现算，一个数都不抄：改了时间轴声音跟着走，tests/wardrobe-audio.test.ts 钉着，
+//     设计文档 4.3、调研 3.3 的 A 版「被从里面拉上」）：
+//     latch [0–0.3]：开头一下锁舌「咔——哒」（两颗相隔 8–14 毫秒的低通噪声颗粒，截止 1.2–1.9 kHz、Q 0.5，第二颗更闷、略轻：没有共鸣、没有振荡器，所以没有音高，
+//       不会像「叮」，和 lightClick 同一个做法）[柜子里的锁舌]，中间一下门板被推的闷响（170 → 110 Hz 的正弦下沉 + 低通噪声，很轻）[门轻轻一震]；
+//     open [0.3–1.6]：一声长长的合页吱呀（门、摇椅用的那套嘎吱合成：窄脉冲 + 被它调制的噪声，过四只高 Q 带通，最低一只 190 Hz 是柜体的空腔），
+//       脉冲频率 34 → 19 → 12 Hz，先快后慢（门越慢，声音越暗），再叠一路慢速的随机抖动，音量开头起得快、结束时还剩四成，到 open 结束那一刻硬停 [门停死，不回弹、不晃]；
+//     hold [1.6–2.2] 加上门关上的 slamTime（0.12 秒）：什么声音都没有（共 0.72 秒空白，调研原则 11：先抽空再落下；实测 hold 这段 RMS 比吱呀低 25 dB 以上，只剩混响尾巴）。
+//       门从 slamAt 起关、slamTime 秒后撞上门框（画面 view/props/wardrobe.ts 的 SHUT），slamAt 那一刻门还开着 25°，所以砰的一声不放在 slamAt
+//       （那样比画面早 slamTime 秒，音频领先 120 毫秒是听得出来的），放在门撞上门框的那一刻；
+//     撞上门框 slamAt + slamTime [2.32]：只响这一次 —— 门板撞上柜体：木头的「啪」（3.5 kHz 低通噪声，20 毫秒）+ 闷响（92 → 50 Hz 的正弦下沉 + 低通噪声）
+//       + 门板和柜体的共鸣（150 / 360 Hz）+ 锁舌咔哒 + 低频冲击（braamFn，和床塌下的 BED_HIT 一个分量：D1 + D2 + 一丝 E♭2，小二度）[门撞上门框]；
+//       之后柜体木头的抖动（6 颗，0.03–0.3 秒），柜顶落灰的「嘶」（3–9 kHz 的噪声，0.15 秒涨起、0.5 秒时间常数退掉，加稀疏的细颗粒，约 1.5 秒后听不见）。
+//       手指是画面的事，没有声音。
+//       实测（立体声，dev/audio.html 离线渲染 5 次的平均）：被拉上这一下峰值 −4.5 dBFS、rmsMax400 −22.3 dB（床 −23.3、肖像 −14.3、厨房门 −14.0），
+//       整声 A 计权 −35.7 dBFS（床 −40.6、肖像 −29.3）；吱呀的 A 计权 −33 ~ −37 dBFS，和厨房门的吱呀同一档
 //   机关设下 trapArm（trap 事件 armed；不定位，只有玩家听得见）：极轻的冰裂声 —— 一小簇主裂声（3–5 个 0.5–3 毫秒的噪声颗粒，25 毫秒内）+ 后面 0.28 秒里
 //     疏疏落落的 3–5 下小裂声（越来越轻）；每颗随机走 3.2 / 4.8 / 6.6 kHz 三条宽带通之一（冰裂不会每一下都一样亮），Q 0.9，没有共鸣、没有音高（调研 A7）；
 //     再垫一丝 6 kHz 以上的「嘶」（结晶，0.3 秒起落，很轻）。sprung 走物件本来的声音，expired 无声
 import { CELL, FURNITURE } from '../config/house';
-import { SCARES } from '../config/scares';
+import { SCARES, WARDROBE } from '../config/scares';
 import type { ScareType } from '../sim/types';
 import { isPort, type Place, type Port, type Space, type Vec3 } from './space';
 import { DOOR_T_LINE } from '../view/props/door';
@@ -90,6 +105,9 @@ export const LEVEL = {
   bed: 0,
   bedHit: -9,
   trapArm: -12,
+  /** 衣柜（锁舌、合页吱呀、门板闷响、落灰），和它被拉上时的低频冲击（和床塌下的 bedHit 一个分量） */
+  wardrobe: -3,
+  wardrobeHit: -9,
 };
 
 // ── 共用：总线、随机数、节点工厂、包络 ─────────────────────────────────────────────
@@ -423,8 +441,11 @@ export function creakBank(s: Snd, c: CreakSpec, dest: AudioNode): GainNode {
   return input;
 }
 
-/** 一声嘎吱的激励（脉冲 + 被脉冲调制的噪声），接到 creakBank 的输入 */
-export function creakExcite(s: Snd, bank: AudioNode, t: number, dur: number, amp: number, c: CreakSpec, att = 0.04) {
+/**
+ * 一声嘎吱的激励（脉冲 + 被脉冲调制的噪声），接到 creakBank 的输入。fade = 收尾的线性渐弱占整声的比例（默认 0.4；衣柜的吱呀要「停得死」，只给一小段）。
+ * 返回摩擦脉冲的振荡器：调用方想让脉冲的节奏不那么规则，可以往它的 frequency 上接一路慢速的随机抖动
+ */
+export function creakExcite(s: Snd, bank: AudioNode, t: number, dur: number, amp: number, c: CreakSpec, att = 0.04, fade = 0.4): OscillatorNode {
   const end = t + dur;
   const p = s.osc(s.bus.pulse, c.rate[0], t, end + 0.02);
   p.frequency.setValueAtTime(c.rate[0], t);
@@ -440,9 +461,10 @@ export function creakExcite(s: Snd, bank: AudioNode, t: number, dur: number, amp
   const a = Math.min(att, dur * 0.4);
   env.gain.setValueAtTime(0, t);
   env.gain.linearRampToValueAtTime(amp, t + a);
-  env.gain.setValueAtTime(amp, Math.max(t + a, end - dur * 0.4));
+  env.gain.setValueAtTime(amp, Math.max(t + a, end - dur * fade));
   env.gain.linearRampToValueAtTime(0, end);
   env.connect(bank);
+  return p;
 }
 
 /** 一声完整的嘎吱（自带一组共鸣） */
@@ -1308,6 +1330,164 @@ export const bed: SfxFn = (bus, t, at) => {
   return s.end(end);
 };
 
+// ── 衣柜：门自己开一条缝、停住，2.2 秒时被从里面猛地拉上 ────────────────────────────────────
+
+export const WARDROBE_SFX = {
+  /**
+   * 锁舌「咔——哒」（latch 开头，柜子里面）：两颗相隔 gap 秒的低通噪声颗粒（第二下更闷、略轻），低通截止每次在 lp 里随机、Q 不高：
+   * 没有共鸣，所以没有音高，不会像「叮」（和 lightClick 同一个做法）。lag = 落在 latch 开头往后多少秒（起音不被截掉）；
+   * amp = 第一颗的幅度；second = 第二颗相对第一颗；第二颗的截止是第一颗的 0.75 倍
+   */
+  click: { lag: 0.004, gap: [0.008, 0.014] as [number, number], amp: 1.4, second: 0.8, lp: [1200, 1900] as [number, number], q: 0.5 },
+  /**
+   * 门板被推的闷响（锁舌之后、门开之前，像有人从里面推了一下）：落在 latch 时段的这个位置（0..1）；正弦从 f0 落到 f1 + 低通噪声（thud）。
+   * 用正弦打底，每次触发的响度都一样（窄带噪声的峰值每次差好几 dB）；幅度、衰减时间常数（秒）、噪声的低通截止和相对量
+   */
+  push: { at: 0.5, amp: 0.14, f0: 170, f1: 110, tau: 0.04, lp: 900, noise: 0.5 },
+  /**
+   * 合页吱呀（open 时段，一声）：摩擦脉冲的频率跟着开门走（先快后慢，和画面的缓动一个意思：门越慢，脉冲越疏、声音越暗）；
+   * 高 Q 带通是木头和合页的共鸣（最低一条 190 Hz 是柜体的空腔）。包络 creakShape：[占 open 时段的位置 0..1, 相对音量]，
+   * 开头起得快、结束时还剩四成，然后硬停（creakFade = 收尾那一小段占时段的比例；creakAtt = 起音秒数）：停得不该这么死。
+   * jitter = 脉冲频率上的随机抖动（赫兹，慢速低通噪声推的）：慢下来以后更不规则，像真的在一下一下地磨；每次触发整体速度随机 ±spread
+   */
+  creak: 0.28,
+  creakSpec: { rate: [34, 19, 12], res: [[190, 4, 0.5], [460, 8, 1], [1060, 10, 0.75], [2150, 8, 0.35]], grit: 0.4 } as CreakSpec,
+  creakShape: [[0, 0], [0.04, 0.85], [0.18, 1], [0.5, 0.65], [1, 0.4]] as readonly (readonly [number, number])[],
+  creakFade: 0.02,
+  creakAtt: 0.05,
+  jitter: 5,
+  spread: 0.07,
+  /**
+   * 门撞上门框的那一刻（slamAt + slamTime，不是门刚开始关的 slamAt）：门板撞上柜体。crack = 木头的「啪」（低通噪声，峰值和截止）；
+   * thud = 闷响（正弦从 thudHz[0] 落到 thudHz[1]，衰减时间常数 thudTau，加低通噪声）；body = 门板和柜体的共鸣 [赫兹, Q, 幅度, 衰减时间常数]；
+   * latchLag / latchK = 锁舌咔哒落在撞上那一刻往后多少秒、比开门时重多少倍。
+   * 整声压在床塌下去的同一档（实测见文件开头的配方），比门、肖像的撞击轻得多：想调响度先动 LEVEL.wardrobe（整声）和 LEVEL.wardrobeHit（低频冲击），再动这里
+   */
+  slam: {
+    crack: 0.14,
+    crackLp: 3500,
+    thud: 0.19,
+    thudHz: [92, 50] as const,
+    thudTau: 0.1,
+    body: [[150, 3, 0.16, 0.1], [360, 4, 0.13, 0.06]] as readonly (readonly [number, number, number, number])[],
+    latchLag: 0.006,
+    latchK: 1.1,
+  },
+  /** 柜体被带得抖一下：几颗木头的颗粒，在撞上之后 [from, to] 秒里越来越轻，过 hz 的带通 */
+  rattle: { from: 0.03, to: 0.3, n: 6, amp: 0.16, hz: 800 },
+  /** 柜顶落灰的「嘶」：撞上之后 [from, to] 秒（上限是 slamAt + settle）、峰值、起音和衰减时间常数（秒）、高通和低通截止（灰的声音在 3 kHz 到 9 kHz 之间，再往上是空气的嘶嘶声）；再加稀疏的细颗粒（个数、峰值） */
+  dust: { from: 0.06, to: 2.4, amp: 0.04, attack: 0.15, tau: 0.5, hp: 3200, lp: 9000, grains: 48, grainAmp: 0.06 },
+  wet: 0.3,
+};
+
+/** 衣柜被拉上时的低频冲击：和床塌下的 BED_HIT 一个分量（振幅、时长、各层的量都一样，各个音的总量也一样），最低一层上面多一丝 E♭2（和 D2 差小二度）：撞上去的是硬木头，不是被子 */
+export const WARDROBE_HIT: BraamSpec = { ...BED_HIT, voices: [[36.71, 1], [73.42, 0.5], [77.78, 0.35]] };
+const wardrobeHit = braamFn(WARDROBE_HIT, 'wardrobeHit');
+
+/** 衣柜声音的时刻表（秒，相对触发）。合成函数就是照它排的，tests/wardrobe-audio.test.ts 把它和 config/scares.ts 的 WARDROBE 对账 */
+export interface WardrobeCues {
+  /** 锁舌咔哒的第一颗 */
+  latch: number;
+  /** 门板被推的闷响 */
+  push: number;
+  /** 合页吱呀：从、到 */
+  creak: readonly [number, number];
+  /** 门撞上门框那一刻（slamAt + slamTime）：门板的闷响、锁舌、低频冲击 */
+  thud: number;
+  slamLatch: number;
+  hit: number;
+  /** 柜体木头的抖动、柜顶落灰的嘶：从、到（都在撞上之后） */
+  rattle: readonly [number, number];
+  dust: readonly [number, number];
+}
+
+/** 一个数都不抄：每一项都从 WARDROBE 推出来（每次调用现算，时间轴改了就跟着变）。hold 时段和门关上的 slamTime 秒里没有任何一项 */
+export function wardrobeCues(): WardrobeCues {
+  const W = WARDROBE;
+  const K = WARDROBE_SFX;
+  // 门从 slamAt 起关，slamTime 秒后撞上门框（画面 view/props/wardrobe.ts 的 SHUT）：砰的一声落在接触那一刻。
+  // slamAt 那一刻门还开着，声音放在那里会比画面早 slamTime 秒
+  const shut = W.slamAt + W.slamTime;
+  return {
+    latch: W.latch[0] + K.click.lag,
+    push: W.latch[0] + (W.latch[1] - W.latch[0]) * K.push.at,
+    creak: [W.open[0], W.open[1]],
+    thud: shut,
+    slamLatch: shut + K.slam.latchLag,
+    hit: shut,
+    rattle: [shut + K.rattle.from, shut + K.rattle.to],
+    // 灰最迟在 slamAt + settle 落完（settle 是「环境声回来」的期限，从 slamAt 算，不跟着 slamTime 后移）
+    dust: [shut + K.dust.from, Math.min(shut + K.dust.to, W.slamAt + W.settle)],
+  };
+}
+
+/** 锁舌的「咔——哒」：两颗相隔 gap 的低通噪声颗粒（第二下更闷、略轻）。k = 强度倍数（被拉上时的比开门时的重） */
+function latchClick(s: Snd, t: number, k: number) {
+  const C = WARDROBE_SFX.click;
+  const lp = rand(C.lp[0], C.lp[1]);
+  playGrains(s, t, [{ t: 0, len: rand(0.002, 0.004), amp: C.amp * k * rand(0.85, 1) }], s.out, 1, s.bq('lowpass', lp, C.q));
+  playGrains(s, t + rand(C.gap[0], C.gap[1]), [{ t: 0, len: rand(0.002, 0.005), amp: C.amp * k * C.second * rand(0.85, 1) }], s.out, 1, s.bq('lowpass', lp * 0.75, C.q));
+}
+
+export const wardrobe: SfxFn = (bus, t, at) => {
+  const K = WARDROBE_SFX;
+  const C = wardrobeCues();
+  const s = new Snd(bus, { at, level: LEVEL.wardrobe, wet: K.wet });
+
+  // latch：柜子里「咔——哒」一声锁舌，接着门板被推了一下的闷响（很轻、没有高频）
+  latchClick(s, t + C.latch, 1);
+  thud(s, s.out, t + C.push, K.push.amp, K.push.f0, K.push.f1, K.push.tau, K.push.lp, K.push.noise);
+
+  // open：一声长长的合页吱呀，摩擦脉冲跟着开门先快后慢；音量开头快起、渐弱，到 open 结束那一刻硬停
+  const [c0, c1] = C.creak;
+  const d = c1 - c0;
+  const j = rand(1 - K.spread, 1 + K.spread);
+  const spec: CreakSpec = { ...K.creakSpec, rate: [K.creakSpec.rate[0] * j, K.creakSpec.rate[1] * j, K.creakSpec.rate[2] * j] };
+  const contour = s.gain(0);
+  contour.connect(s.out);
+  line(contour.gain, t + c0, K.creakShape.map(([u, v]) => [u * d, v] as const));
+  const pulse = creakExcite(s, creakBank(s, spec, contour), t + c0, d, K.creak, spec, K.creakAtt, K.creakFade);
+  bandNoise(s, t + c0, t + c1 + 0.02, 'lowpass', 3.5).connect(s.gain(K.jitter)).connect(pulse.frequency);
+
+  // hold，以及门从 slamAt 起关上的 slamTime 秒：什么都不放（吱呀在 open 结束时停死，下一声是门撞上门框）
+
+  // 门撞上门框（slamAt + slamTime）：门板撞上柜体 —— 木头的「啪」+ 闷响 + 门板和柜体的共鸣，锁舌咔哒，低频冲击
+  const th = t + C.thud;
+  const cg = s.gain(0);
+  perc(cg.gain, th, K.slam.crack, 0.0008, 0.02);
+  bandNoise(s, th, th + 0.25, 'lowpass', K.slam.crackLp).connect(cg).connect(s.out);
+  thud(s, s.out, th, K.slam.thud, K.slam.thudHz[0], K.slam.thudHz[1], K.slam.thudTau, 900, 0.5);
+  for (const [f, q, a, tau] of K.slam.body) {
+    const g = s.gain(0);
+    perc(g.gain, th, a, 0.001, tau);
+    bandNoise(s, th, th + tau * 8, 'bandpass', f, q).connect(g).connect(s.out);
+  }
+  latchClick(s, t + C.slamLatch, K.slam.latchK);
+  const hitEnd = wardrobeHit(bus, t + C.hit, at);
+
+  // 柜体被带得抖一下：几颗木头的颗粒，越来越轻
+  const [r0, r1] = C.rattle;
+  const wood: Grain[] = [];
+  for (let i = 0; i < K.rattle.n; i++) {
+    const u = (i + rand(0, 0.8)) / K.rattle.n;
+    wood.push({ t: (r1 - r0) * u, len: rand(0.002, 0.006), amp: K.rattle.amp * (1 - 0.7 * u) * rand(0.6, 1) });
+  }
+  playGrains(s, t + r0, wood, s.out, 1, s.bq('bandpass', K.rattle.hz, 0.9));
+
+  // 之后一点点落灰的「嘶」：高频的噪声慢慢涌起、退掉，加稀疏的细颗粒（灰一粒一粒落下来，前密后疏）
+  const [d0, d1] = C.dust;
+  const dg = s.gain(0);
+  perc(dg.gain, t + d0, K.dust.amp, K.dust.attack, K.dust.tau);
+  bandNoise(s, t + d0, t + d1, 'highpass', K.dust.hp).connect(s.bq('lowpass', K.dust.lp, 0.7)).connect(dg).connect(s.out);
+  const sand: Grain[] = [];
+  for (let i = 0; i < K.dust.grains; i++) {
+    const u = rng.next() ** 1.6;
+    sand.push({ t: (d1 - d0) * 0.9 * u, len: rand(0.0006, 0.0018), amp: K.dust.grainAmp * (1 - 0.7 * u) * rand(0.4, 1) });
+  }
+  playGrains(s, t + d0, sand, s.out, 1, s.bq('highpass', K.dust.hp), s.bq('highpass', K.dust.hp), s.bq('lowpass', K.dust.lp, 0.7));
+  return Math.max(s.end(t + d1 + 0.5), hitEnd);
+};
+
 // ── 机关：设下时的冰裂声 ─────────────────────────────────────────────────────────────
 
 export const TRAP_ARM = {
@@ -1334,8 +1514,9 @@ export const trapArm: SfxFn = (bus, t, at) => {
   const s = new Snd(bus, { at, level: LEVEL.trapArm, wet: A.wet });
   // 每条带通一个颗粒轨：主裂声（一小簇，前密）+ 后面疏疏落落的小裂声（越来越轻）
   const tracks = A.bands.map(() => [] as Grain[]);
-  const put = (at: number, amp: number) => {
-    tracks[Math.floor(rng.next() * tracks.length)].push({ t: at, len: rand(0.0005, 0.003), amp, block: rng.next() < 0.4 });
+  // 颗粒的时刻叫 when，不叫 at：at 是这个声音放在哪（SfxFn 的第三个参数），别遮蔽它（最终审查 U M-11）
+  const put = (when: number, amp: number) => {
+    tracks[Math.floor(rng.next() * tracks.length)].push({ t: when, len: rand(0.0005, 0.003), amp, block: rng.next() < 0.4 });
   };
   const nc = Math.round(rand(A.crack[0], A.crack[1]));
   for (let i = 0; i < nc; i++) put(rand(0, A.crackSpan), A.amp * rand(0.5, 1));
@@ -1352,8 +1533,7 @@ export const trapArm: SfxFn = (bus, t, at) => {
 };
 
 /** 附身物件 → 声音（编译期检查：每种物件都得有声音） */
-// 衣柜（2026-10-29）先借厨房门的吱呀占位，声音那一路换成衣柜自己的（锁舌、合页、闷响、低频冲击，时间轴读 config/scares.ts 的 WARDROBE）
-export const TRIGGER: Record<ScareType, SfxFn> = { musicBox, door, lamp, rockingChair, portrait, mirror, bed, wardrobe: door };
+export const TRIGGER: Record<ScareType, SfxFn> = { musicBox, door, lamp, rockingChair, portrait, mirror, bed, wardrobe };
 /** 物件复原 → 声音（只有台灯和肖像有「被破坏」状态） */
 export const RESET: Partial<Record<ScareType, SfxFn>> = { lamp: lampReset, portrait: portraitReset };
 
