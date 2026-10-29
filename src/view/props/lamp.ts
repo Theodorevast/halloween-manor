@@ -112,9 +112,10 @@ export function createLamp(seed: number): PropRig {
   shade.castShadow = false; // 灯罩挡手电没意义，而且它自己在发光
   model.add(shade);
 
-  // 灯泡：纯自发光的小球（亮的时候泛光最明显的一点）
+  // 灯泡：纯自发光的小球（亮的时候泛光最明显的一点）。亮度要留在泛光阈值（postfx.ts 的 BLOOM.threshold 2.2）上面，
+  // 泛光收紧以后（ART-7）只有光源才晕：灯色亮度 0.54 × 4.5 ≈ 2.4
   const bulbMat = new THREE.MeshBasicNodeMaterial();
-  bulbMat.colorNode = color(PALETTE.lamp).mul(glow.mul(2.4).add(0.04));
+  bulbMat.colorNode = color(PALETTE.lamp).mul(glow.mul(4.5).add(0.04));
   const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 6), bulbMat);
   bulb.position.y = LIGHT_Y;
   model.add(bulb);

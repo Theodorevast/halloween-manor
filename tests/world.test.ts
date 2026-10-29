@@ -882,9 +882,11 @@ describe('World：生成访客（计划测试 8）', () => {
 
   test('pickName：不和屋里的人重名；名字用完了才允许重名', () => {
     const rng = createRng(3);
+    const last = NAMES[NAMES.length - 1];
     for (let k = 0; k < 200; k++) {
-      const taken = NAMES.slice(0, 15);
-      expect(pickName(rng, taken)).toBe(NAMES[15]);
+      // 名字池只剩最后一个没被占（一夜里最近进来的那一层见 tests/night.test.ts）
+      const taken = NAMES.slice(0, -1);
+      expect(pickName(rng, taken)).toBe(last);
     }
     expect(NAMES).toContain(pickName(rng, NAMES));
   });

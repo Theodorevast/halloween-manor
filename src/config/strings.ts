@@ -137,13 +137,20 @@ export const STRINGS = {
     ranFrom: (prop: string, time: string) => `ran from the ${prop.toLowerCase()} at ${time}`,
     sawYou: (time: string) => `saw you in the dark, and ran at ${time}`,
     coldBreath: (time: string) => `felt a cold breath, and ran at ${time}`,
-    scream: (time: string) => `ran when someone screamed, at ${time}`,
+    scream: (time: string) => `ran at ${time} when someone screamed`,
     trap: (prop: string, time: string) => `the ${prop.toLowerCase()} was waiting for them at ${time}`,
     stillInside: 'still inside',
-    /** 天亮自己走的（exit 带 calm） */
-    leftAtDawn: (time: string) => `walked out at ${time}, unafraid`,
+    /** 天亮自己走的（exit 带 calm）：不评价恐惧（被吓过一下、只是没跑的人也写这一句），只写天色 */
+    leftAtDawn: (time: string) => `walked out at ${time}, as the sky paled`,
     /** 人太多时：只写前面这么多行，剩下的一句带过 */
     andOthers: (n: string) => `and ${n} others`,
+    /** 数字写进句子（页脚、andOthers；register.ts 的 inWords）：下标就是那个数，one 到 twenty 写英文单词，再多写阿拉伯数字 */
+    numbers: [
+      '', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
+      'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty',
+    ] as readonly string[],
+    /** 钟点后面的上午 / 下午（register.ts 的 clockAt；registerView.ts 折行时把钟点和它粘在一起） */
+    meridiem: { am: 'am', pm: 'pm' },
     /** 页脚两三句：数字用英文单词写在句子里，不做大号数字、不做表格、不打分 */
     footer: {
       cameRan: (came: string, ran: string) => `${came} came in. ${ran} ran.`,

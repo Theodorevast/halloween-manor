@@ -4,7 +4,7 @@ import './styles.css';
 import { createAudio, type AudioSys } from './audio/engine';
 import { NIGHT } from './config/night';
 import { STRINGS } from './config/strings';
-import { MANIFEST, TRAP } from './config/visitors';
+import { MANIFEST } from './config/visitors';
 import { installDebug, nightTiming } from './debug';
 import { createCameraRig } from './engine/camera';
 import { createGhostRig, setGhostUi } from './engine/ghostRig';
@@ -17,7 +17,7 @@ import type { Object3D } from 'three/webgpu';
 import { createNight } from './night';
 import type { ManifestState, SimEvent } from './sim/types';
 import { createWorld } from './sim/world';
-import { createHints } from './ui/hints';
+import { createHints, manifestRefusal, trapsFull } from './ui/hints';
 import { createHud } from './ui/hud';
 import { createRegisterView } from './ui/registerView';
 import { createCharactersView, loadFirstOutfit } from './view/characters';
@@ -214,7 +214,10 @@ async function boot() {
   // 情境提示、登记簿是界面，挂在 HUD 的层里（#hud，渲染器起不来时不建：错误界面上不该有本子）
   const house = createHouseView(c, r);
   const frontDoor = createFrontDoor(c, isGhostRig(r) ? r : null);
-  const otherShadow = createOtherShadow(c);
+  // 关门声跟着画面：一群人出门时门等最后一个才甩，只响那一声（前门在 modules 里排在声音前面，同一批事件先到它）
+  audio.setFrontDoor(frontDoor);
+  // 和玩家的鬼魂同一个外形（共用几何体和阴影管线）；给了镜头才只放在玩家看得见的墙上、躲开玩家的鬼魂
+  const otherShadow = createOtherShadow(c, { model: ghostFx?.model ?? null, rig: r });
   const uiRoot = document.getElementById('hud')!;
   const hints = createHints(uiRoot);
   const registerView = createRegisterView(uiRoot);
@@ -243,10 +246,12 @@ async function boot() {
   );
 
   // 登记簿：翻开时把鼠标还给玩家（第三人称要点得到按钮）；合上时不自动锁回，HUD 自己提示「Click to resume」，点一下画布就继续
-  // （Esc 合上时浏览器也不让马上再锁）。触屏、俯视没有指针锁定，照样翻、照样合。
+  // （Esc 合上时浏览器也不让马上再锁）。翻开着的时候鬼魂不收输入（rig.hold：翻开之前按住的 WASD 也不再推它，鼠标、F、滚轮都不算），
+  // 合上时放开，视角回到翻开那一刻。触屏、俯视没有指针锁定，照样翻、照样合。
   // 收夜那一页被合上（不管从哪儿合的）都当 Keep haunting：不然光收回以后画面一直停在黑里（keepHaunting 只认那一页，重复调只算一次）
   registerView.onToggle((open) => {
     if (open && isGhostRig(r) && document.pointerLockElement) document.exitPointerLock();
+    if (isGhostRig(r)) r.hold(open);
     if (!open && night.phase === 'register') night.keepHaunting();
   });
   registerView.onKeepHaunting(() => night.keepHaunting());
@@ -263,14 +268,17 @@ async function boot() {
   // 登记簿翻开着时不附身、不设机关：它自己的底子盖着画面，这里再保险一下（俯视模式点到底下的物件）
   picker.onPick((id) => { if (started && !registerView.isOpen) world.trigger(id); });
   // 第三人称：按住设机关；右键或 F 现身（冷却中、正在现身、鬼魂在墙格里时模拟自己不理）。
-  // 做不到时回应一句（hints.refused）：机关满了；现身时没在现身却不行就是在墙里（world.manifest 先查墙），否则是还在冷却 / 正在现身
+  // 做不到时回应一句（hints.refused，判断在 ui/hints.ts）：机关满了（这个物件自己没设着）；够不着；
+  // 现身被拒：冷却中说 Not yet，就绪却被拒是在墙里，正在现身（蓄力、停留）时再按不回应
   picker.onArm((id) => {
-    if (!started || registerView.isOpen) return;
-    if (!world.arm(id) && world.state.objects.filter((o) => o.armed > 0).length >= TRAP.max) hints.refused('trapsFull');
+    if (!started || registerView.isOpen || world.arm(id)) return;
+    if (trapsFull(world.state.objects, id)) hints.refused('trapsFull');
   });
+  picker.onTooFar(() => { if (started && !registerView.isOpen) hints.refused('tooFar'); });
   if (isGhostRig(r)) r.onManifest(() => {
     if (!started || world.manifest()) return;
-    hints.refused(world.state.manifest.phase === 'idle' ? 'manifestWall' : 'manifestCooldown');
+    const why = manifestRefusal(world.state.manifest.phase);
+    if (why) hints.refused(why);
   });
 
   installDebug({

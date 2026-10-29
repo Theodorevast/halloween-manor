@@ -15,7 +15,9 @@
 // - 什么时候、在哪：createOtherDirector（纯逻辑，tests/other-shadow.test.ts 直接测），规则见 OTHER_SHADOW（config/night.ts）
 //   和 OTHER_LOOK，站位见 OTHER_SPOTS。放上去、撤掉都只在没有手电碰到这个人形的时候（光锥再放宽 pad）：没人看得见它怎么来、怎么走。
 //   给了镜头（opts.rig）就只放在玩家看得见的那面墙上；玩家的鬼魂被照着、或者就在旁边时不放（两个影子不同时落在同一面墙上，
-//   不会被当成自己的）
+//   不会被当成自己的）。
+//   一次出现最长 OTHER_SHADOW.maxShown 秒：到了就在 OTHER_LOOK.fade 秒里慢慢化掉（uShadow 往下降，侵蚀阈值抬高，影子一缕缕散掉），
+//   不管有没有被照着——这是唯一一种在光里消失的情形，所以只能慢、只能单调（不抖，不算「暗一下」）
 //
 // ?noother：不建（看样对比、量开销）；?debug：window.__otherShadow（state() / place(id) / clear() / inView()），截图、手动看样用
 import * as THREE from 'three/webgpu';
@@ -71,6 +73,17 @@ export const OTHER_LOOK = {
   retry: 3,
   /** 出现过一次以后，至少隔这么久（秒，模拟时间）才放下一次 */
   gap: 45,
+  /**
+   * 一次出现满 OTHER_SHADOW.maxShown 秒以后，用多少秒慢慢化掉（真实时间），化完撤掉（理由 faded）。level 从 1 线性降到 0，
+   * 画面上 uShadow 从 1 线性降到 fadeFloor：材质的侵蚀阈值 mix(2, erode, uShadow) 跟着抬高，下摆、边上那几缕先散，兜帽最后
+   */
+  fade: 1.2,
+  /**
+   * 化到这个 uShadow 时一点不剩：阈值 mix(2, erode, 0.5) ≥ 1.02，比噪声的最大值（1）还高，所以最后撤掉（uShadow = 0）那一下墙上什么也不少。
+   * 噪声多半落在 0.3–0.7（估的，没量），影子看得见地散开大约在 uShadow 0.92–0.68 这一段，也就是化掉的头三分之二；
+   * 嫌最后那一截空着可以把它往上调到 0.6 左右（代价是最后撤掉时可能少几粒很小的碎点）
+   */
+  fadeFloor: 0.5,
   /** 玩家的鬼魂不再被照着以后，至少过这么久（秒，真实时间）才放：它自己的影子刚从墙上消失 */
   ghostCalm: 1.5,
   /** 没放着的时候，多久找一次站位（秒） */
@@ -186,8 +199,11 @@ function angleOff(t: TorchSample, s: Vec2): number {
 
 // ───────────────────────── 出现的规则 ─────────────────────────
 
-/** 为什么撤：照够了（done）、访客走近（near）、玩家的鬼魂被照着或走近（ghost）、玩家看不见了（view）、等太久没人照（wait） */
-export type OtherWhy = 'done' | 'near' | 'ghost' | 'view' | 'wait';
+/**
+ * 为什么撤：照够了（done）、访客走近（near）、玩家的鬼魂被照着或走近（ghost）、玩家看不见了（view）、等太久没人照（wait）、
+ * 一次出现满 maxShown 秒、慢慢化完了（faded）
+ */
+export type OtherWhy = 'done' | 'near' | 'ghost' | 'view' | 'wait' | 'faded';
 
 export type OtherEvent =
   /** 放上去了（还没人看见：uShadow = 1，等手电扫过来） */
@@ -222,6 +238,8 @@ export interface OtherDirector {
   readonly spot: OtherSpot | null;
   /** 这一次放上去以后被照到过没有 */
   readonly shown: boolean;
+  /** 还剩多少（1 = 全在；满 maxShown 秒以后在 OTHER_LOOK.fade 秒里线性降到 0，只降不升；没放着是 0） */
+  readonly level: number;
   step(f: OtherFrame): OtherEvent[];
   /** 看样、截图用：下一帧没被手电碰到就放到 s（不管时间、次数、玩家看不看得见、附近有没有人）；放着别的就先不放 */
   force(s: OtherSpot): void;
@@ -239,12 +257,16 @@ export interface OtherDirector {
  * - 被照到（照到的程度 ≥ litMin）：第一次算出现一次（appear）；累计照满 litFor 秒以后，在下一个没有手电碰到它的时刻撤
  * - 提前撤：访客走到 near 米内、玩家的鬼魂被照着或走近；还没出现过的，玩家看不见了、放了 wait 秒没人照到，也撤。
  *   都等没有手电碰到它的时刻；访客（或他的手电）贴到 tooClose 以内就不等了
+ * - 一次出现最长 maxShown 秒（真实时间，从出现那一帧算起）：到了就在 look.fade 秒里慢慢化掉（level 线性降到 0），化完撤掉（faded），
+ *   不管有没有被照着。化的时候上面那几条照样算：没人碰到它时有理由撤，就在那一刻撤（没人看得见）
  */
 export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, rule = OTHER_SHADOW, look = OTHER_LOOK): OtherDirector {
   let appeared = 0;
   let at: OtherSpot | null = null;
   /** 这一次被照了多久（真实秒，累计）、出现过没有、是不是看样时硬放的、什么时候放的（模拟时间） */
   let litTime = 0, shown = false, forcedHere = false, placedAt = 0;
+  /** 出现以后过了多久（真实秒）；正在化掉：化了多久（真实秒，-1 = 没在化） */
+  let shownFor = 0, fadeT = -1;
   /** 撤的理由里一旦有了就一直算的那几种（照够了、访客走近、玩家的鬼魂） */
   let sticky: OtherWhy | null = null;
   /** 模拟时间：这之前不放（两次之间隔 gap；没出现就撤的隔 retry） */
@@ -298,6 +320,8 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
     at = s;
     litTime = 0;
     shown = false;
+    shownFor = 0;
+    fadeT = -1;
     sticky = null;
     forcedHere = isForced;
     placedAt = f.time;
@@ -308,6 +332,7 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
     get appeared() { return appeared; },
     get spot() { return at; },
     get shown() { return shown; },
+    get level() { return !at ? 0 : fadeT < 0 ? 1 : Math.max(0, 1 - fadeT / look.fade); },
     force(s) { forced = s; },
     clear() {
       at = null;
@@ -320,6 +345,17 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
         const s = at;
         const L = lightOnSpot(s, f.torches);
         const near = nearestTo(s, f);
+        // 出现以后的时长：出现那一帧算 0，满 maxShown 那一帧起开始化，化满 fade 秒撤掉（不管照没照着：已经一点不剩了）
+        if (shown) {
+          if (fadeT >= 0) fadeT += f.dt;
+          else if ((shownFor += f.dt) >= rule.maxShown - 1e-9) fadeT = 0;
+          if (fadeT >= look.fade - 1e-9) {
+            ev.push({ type: 'withdraw', spot: s, why: 'faded', seen: true });
+            at = null;
+            nextAt = f.time + look.gap;
+            return ev;
+          }
+        }
         if (L.lit >= look.litMin) {
           litTime += f.dt;
           if (!shown) {
@@ -468,8 +504,11 @@ export function createOtherShadow(core: RenderCore, opts: OtherShadowOptions = {
 
   if (search?.has('debug')) {
     (window as unknown as { __otherShadow: unknown }).__otherShadow = {
-      /** 放在哪（null = 没放）、今晚出现过几次、这一次被照到过没有、uShadow、最近几次撤掉的理由 */
-      state: () => ({ spot: director.spot?.id ?? null, appeared: director.appeared, shown: director.shown, shadow: u.shadow.value, withdrawals: [...withdrawals] }),
+      /** 放在哪（null = 没放）、今晚出现过几次、这一次被照到过没有、还剩多少（化掉时往 0 走）、uShadow、最近几次撤掉的理由 */
+      state: () => ({
+        spot: director.spot?.id ?? null, appeared: director.appeared, shown: director.shown, level: director.level, shadow: u.shadow.value,
+        withdrawals: [...withdrawals],
+      }),
       /** 下一帧没被手电碰到就放到这个站位（不管时间、次数、看不看得见）；返回站位 id，不认识的 id 返回 null */
       place(id: string = OTHER_SPOTS[0].id) {
         const s = OTHER_SPOTS.find((x) => x.id === id);
@@ -504,6 +543,8 @@ export function createOtherShadow(core: RenderCore, opts: OtherShadowOptions = {
       frame.ghostLit = ghostRevealAmount() > OTHER_LOOK.ghostLit || phase === 'windup' || phase === 'hold';
       if (rig) prepareView(rig);
       for (const e of director.step(frame)) apply(e);
+      // 满 maxShown 秒以后慢慢化掉：uShadow 跟着 level 从 1 线性降到 fadeFloor（化完撤掉时 apply 已经设成 0）
+      if (director.spot && director.level < 1) u.shadow.value = OTHER_LOOK.fadeFloor + (1 - OTHER_LOOK.fadeFloor) * director.level;
     },
     dispose() {
       core.houseRoot.remove(mesh);

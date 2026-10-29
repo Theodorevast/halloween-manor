@@ -37,6 +37,8 @@
 //     照样用 note 记进 lit，恢复后第一帧的 sync 把压力声对上（不然这几帧的 on / off 丢了，压力声要等下一次照到 / 移开才对得上；tests/audio-engine.test.ts 守着）
 //   - 察觉（notice 事件）：只有手电照到鬼魂（kind = ghost）时那个人倒吸一口很轻的气（调研 3.1），同一个人 NOTICE_GAP 秒内最多一次；其余种类没有声音
 //   - 机关（trap 事件）：armed 一声极轻的冰裂声（不定位，只有玩家听得见）；sprung 走物件本来的 trigger 声；expired 无声
+//   - 出门（exit 事件）：远处那声关门（sfx.ts 的 exitDoor，闷响落在门撞上门框那一刻）只在画面上门真的甩上时响——setFrontDoor 接上前门以后
+//     每个 exit 问它 slammed(编号)：一群人出门时门等最后一个才甩，只响那一声（2026-10-30 集成，FD 审查 Minor 1）。没接时每个 exit 都响
 //   - 喘气、呜咽：不是事件，是恐惧值的函数，每帧由 breath.ts 排程（凑近才听得见，耳朵是鬼魂）
 //   - 声音里出任何异常只警告一次、绝不往外抛：主循环里一个异常就会让 three 的动画循环停掉；建总线失败（极老的浏览器）就安静地没有声音。
 //     每帧 3D 的几步（脚步、喘气、space.update）各用各的 guard：一步坏了别的步骤照样跑（喘气坏了，隔墙遮挡也不该跟着停）
@@ -76,6 +78,16 @@ export interface AudioSys extends Module {
    * 不新加声音；unlock 之前调也可以（先记着，建好环境层时补上）
    */
   setAmbience(level: number, seconds: number): void;
+  /**
+   * 前门（view/frontDoor.ts，2026-10-30 集成）：exit 时问它这一下门真的甩上了没有，画面上真的甩门的那一下才响关门声
+   * （一群人出门时门等最后一个才甩，只响那一声；天亮平静出门的照同一条规则）。没接（null，开发页、离线测量）每个 exit 都响，和原来一样
+   */
+  setFrontDoor(door: DoorSlams | null): void;
+}
+
+/** 前门告诉声音：这个人出门时门真的甩上了没有 */
+export interface DoorSlams {
+  slammed(npc: number): boolean;
 }
 
 /** 主音量 */
@@ -237,8 +249,11 @@ export interface Router {
   tension: number;
 }
 
-/** crowd：每个访客跟着走的声道（3D 时用；不给就在事件发生的位置定位） */
-export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crowd): Router {
+/**
+ * crowd：每个访客跟着走的声道（3D 时用；不给就在事件发生的位置定位）。
+ * doorSlams：这个人出门时前门真的甩上了没有（给了就只在甩上的那一下响关门声；不给每个 exit 都响）
+ */
+export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crowd, doorSlams?: (npc: number) => boolean): Router {
   /** 正在响的尖叫的结束时刻 */
   let screamEnds: number[] = [];
   /** 每个访客上一声尖叫的结束时刻 */
@@ -393,7 +408,8 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
             neckEnd.delete(e.npc);
             noticeAt.delete(e.npc);
             if (lit.delete(e.npc)) reveal.set(lit.size > 0, t);
-            exitDoor(bus, t, placeAt(FRONT_DOOR.outside, DOOR_Y));
+            // 画面上门真的甩上了才响（view/frontDoor.ts 的 slammed：后面还有人要过时门先不甩，等最后一个）
+            if (doorSlams?.(e.npc) ?? true) exitDoor(bus, t, placeAt(FRONT_DOOR.outside, DOOR_Y));
             break;
           case 'spawn':
             spawnDoor(bus, t, placeAt(FRONT_DOOR.outside, DOOR_Y));
@@ -457,6 +473,8 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
   let presence = false;
   /** 环境层的整体电平（setAmbience；1 = 原样） */
   let ambLevel = 1;
+  /** 前门（setFrontDoor）：exit 时问门甩上了没有；null 时每个 exit 都响 */
+  let frontDoor: DoorSlams | null = null;
   /** 建总线失败过（极老的浏览器没有节点构造函数）：不再每次点击都重试 */
   let failed = false;
   let warned = false;
@@ -512,7 +530,7 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
           crowd = createCrowd(b);
           breath = createBreath(b, crowd);
           ghostSnd = createGhostSound(b);
-          router = createRouter(b, pan, crowd);
+          router = createRouter(b, pan, crowd, (id) => frontDoor?.slammed(id) ?? true);
           if (listener) b.space.setListener(listener.pos, listener.fwd);
         } catch (err) {
           console.warn('audio unavailable', err);
@@ -566,6 +584,10 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
         b.space.setEar(g ? { x: g.x, z: g.z } : null);
         gs.set(g, now);
       });
+    },
+
+    setFrontDoor(door) {
+      frontDoor = door;
     },
 
     setAmbience(level, seconds) {
