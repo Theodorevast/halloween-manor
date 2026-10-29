@@ -46,6 +46,8 @@ def parse_args():
     p.add_argument('--trust', default='', help='逗号分隔的 arms / legs：这些肢体不做「管子」判断，照自动绑骨的权重跟着肢体走（骨头放偏了的模型用）')
     p.add_argument('--trust-dist', type=float, default=math.inf,
                    help='--trust 点名的肢体只信离骨段这么远（米）以内的点：d 以内跟肢体，d 到 2d 平滑过渡到身体，再远的算身体（被自动绑骨误分给肢体的大衣、披风碎块）。手脚不受影响；不给就不限（和以前一样）')
+    p.add_argument('--split-feet', action='store_true',
+                   help='删掉同时连着左脚、右脚的面（顶点的主导骨头分别是左、右两边的 Foot / ToeBase）：两只鞋底被一片面连着时，迈步就被拉成一条长板。不补洞（开口在鞋底内侧，游戏里看不出来）；不给就不做（和以前一样）')
     p.add_argument('--min-island', type=float, default=0.002, help='面数少于总数这个比例的孤立碎片删掉')
     return p.parse_args(argv)
 
@@ -648,6 +650,49 @@ if skel:
     for o in meshes:
         if any(m.type == 'ARMATURE' for m in o.modifiers):
             reweighted[o.name] = reweight(o)
+
+
+def split_feet(obj):
+    """--split-feet（2026-10-29）：删掉同时有左脚、右脚主导顶点的面。女巫的两只鞋底之间有一片约 0.5 厘米的连接面，
+    鞋、脚骨是 effector（整块跟着脚），迈步时两只脚分开，这片面被拉成一条长板（最大拉伸 63–102 倍，复审 2）。
+    按精修后的最终权重判断。不补洞：开口在鞋底内侧，游戏里侧面、背后（含低机位）看逃跑都看不出来（2026-10-29 实测；
+    Blender 亮光下从正下方、背后贴地看得到）。返回删掉的面数和少了的顶点数"""
+    me = obj.data
+    names = {g.index: g.name for g in obj.vertex_groups}
+
+    def side(v):
+        if not v.groups:
+            return None
+        n = names.get(max(v.groups, key=lambda g: g.weight).group, '')
+        if 'Foot' not in n and 'Toe' not in n:
+            return None
+        return 'L' if 'Left' in n else 'R' if 'Right' in n else None
+
+    sides = [side(v) for v in me.vertices]
+    bad = [p.index for p in me.polygons if {'L', 'R'} <= {sides[i] for i in p.vertices}]
+    if not bad:
+        return 0, 0
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bm.faces.ensure_lookup_table()
+    n0 = len(bm.verts)
+    # context='FACES'：只被这些面用到的边、顶点一起删掉，不留孤立顶点
+    bmesh.ops.delete(bm, geom=[bm.faces[i] for i in bad], context='FACES')
+    removed = n0 - len(bm.verts)
+    bm.to_mesh(me)
+    bm.free()
+    return len(bad), removed
+
+
+if A.split_feet and skel:
+    for o in meshes:
+        faces, verts = split_feet(o)
+        report.setdefault('split_feet', {})[o.name] = {'removed_faces': faces, 'removed_verts': verts}
+        if faces:
+            log(f'{o.name}：删掉连着两只鞋的 {faces} 个面（顶点少了 {verts} 个）')
+        else:
+            warn(f'{o.name}：--split-feet 没找到连着两只鞋的面')
+    report['tris_after'] = tri_count()
 
 # ---------------------------------------------------------------- 动作：原地 + 脊柱减幅
 
