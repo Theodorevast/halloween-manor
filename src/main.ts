@@ -2,9 +2,10 @@
 // 模拟层只在开场点击之后才开始走；画面从一开始就渲染，开场遮罩后面的房子已经准备好
 import './styles.css';
 import { createAudio, type AudioSys } from './audio/engine';
+import { NIGHT } from './config/night';
 import { STRINGS } from './config/strings';
-import { MANIFEST } from './config/visitors';
-import { installDebug } from './debug';
+import { MANIFEST, TRAP } from './config/visitors';
+import { installDebug, nightTiming } from './debug';
 import { createCameraRig } from './engine/camera';
 import { createGhostRig, setGhostUi } from './engine/ghostRig';
 import { createCinematic, type Cinematic } from './engine/cinematic';
@@ -13,15 +14,20 @@ import { createPicker } from './engine/picking';
 import { createRenderCore, watchFrameTime, type EngineCore } from './engine/renderer';
 import { isGhostRig, type CameraRig, type FrameCtx, type Module, type Quality, type RenderCore } from './engine/types';
 import type { Object3D } from 'three/webgpu';
+import { createNight } from './night';
 import type { ManifestState, SimEvent } from './sim/types';
 import { createWorld } from './sim/world';
+import { createHints } from './ui/hints';
 import { createHud } from './ui/hud';
+import { createRegisterView } from './ui/registerView';
 import { createCharactersView, loadFirstOutfit } from './view/characters';
 import { createFrost } from './view/frost';
 import { GHOST, createGhostView, loadGhostModel } from './view/ghost';
 import { createFogView } from './view/fog';
+import { createFrontDoor } from './view/frontDoor';
 import { createHouseView } from './view/house';
 import { createLightFx } from './view/lightfx';
+import { createOtherShadow } from './view/otherShadow';
 import { createOverlays } from './view/overlays';
 import { createParticlesView } from './view/particles';
 import { createPropsView } from './view/props';
@@ -99,7 +105,8 @@ const hud = createHud(document.getElementById('hud')!, {
 hud.showStart();
 hud.setReady(false);
 
-const world = createWorld({ seed: Date.now() % 2147483647 });
+// 一夜（2026-10-30）：正式游戏给开局间隔（第一个人独自进来，过一会儿才有第二个敲门）。机器人、平衡测试不给，数字不变
+const world = createWorld({ seed: Date.now() % 2147483647, openingGaps: NIGHT.openingGaps });
 const control = { timeScale: 1 };
 const dispatch = (evs: SimEvent[]) => {
   for (const e of evs) for (const m of modules) m.onEvent?.(e, world.state);
@@ -113,7 +120,12 @@ function begin(): boolean {
   wantBegin = true;
   void audio.unlock();
   // 指针锁定也必须在这次点击的调用栈里
-  if (rig && isGhostRig(rig)) rig.lockPointer();
+  if (rig && isGhostRig(rig)) {
+    rig.lockPointer();
+    // 开场遮罩还挂着的这段（等预编译、等造型）不收输入：指针已经锁上了，随手一动鼠标就把开场镜头转走（试玩 P1-1）。
+    // 真正开场时放开（start）；下面马上就开场的话也是一样，hold 一下就放
+    rig.hold(true);
+  }
   if (ready && !lost && bgDone && outfitsSettled) {
     start();
     return true;
@@ -132,6 +144,7 @@ function begin(): boolean {
 
 function start() {
   started = true;
+  if (rig && isGhostRig(rig)) rig.hold(false);
   // 后台预编译用的临时访客（站在地板下面）：开始了就收走，不再白画
   releaseStaged?.();
   cinematic?.intro(2.5);
@@ -197,23 +210,78 @@ async function boot() {
   // ?solid=0.1：现身时「实」的那份没被照着时的暗度（默认 0.03 是暗色剪影，0.1 是偏灰的实雾；看样时对比用）。建鬼魂之前改
   const solid = Number(new URLSearchParams(location.search).get('solid') || NaN);
   if (Number.isFinite(solid) && solid >= 0) GHOST.solid.dark = solid;
+  // 一夜（2026-10-30）：前门、墙上多一个影子要在下面开场的预编译之前就在场景里（第一次出现不卡）；
+  // 情境提示、登记簿是界面，挂在 HUD 的层里（#hud，渲染器起不来时不建：错误界面上不该有本子）
+  const house = createHouseView(c, r);
+  const frontDoor = createFrontDoor(c, isGhostRig(r) ? r : null);
+  const otherShadow = createOtherShadow(c);
+  const uiRoot = document.getElementById('hud')!;
+  const hints = createHints(uiRoot);
+  const registerView = createRegisterView(uiRoot);
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  // 一夜的收尾（src/night.ts）：到点收夜、天亮，屋里没人、前门关上以后静一会儿、光收回前门、翻开登记簿；?night=<分钟> 改夜长
+  const night = createNight({
+    world,
+    say: (text) => hud.say(text, 'quiet'),
+    porch: (level, seconds) => house.setPorch(level, seconds),
+    dawnLight: (k, seconds) => house.setDawn(k, seconds),
+    ambience: (level, seconds) => audio.setAmbience(level, seconds),
+    retreat: (seconds) => cine.retreat(seconds),
+    spread: (seconds) => cine.spread(seconds),
+    door: () => frontDoor.openness,
+    openRegister: () => registerView.open({ closing: true }),
+    closeRegister: () => registerView.close(),
+    reload: () => location.reload(),
+    reduced: () => reducedMotion.matches,
+  }, nightTiming());
   modules.push(
-    createHouseView(c, r), createFogView(c, r), props, characters, createParticlesView(c),
+    house, createFogView(c, r), props, characters, frontDoor, otherShadow, createParticlesView(c),
     ...(ghostFx && isGhostRig(r) ? [createGhostView(c, r, ghostFx), ghostFx.lights, ghostFx.frost] : []),
-    createJuice(r, c), cine, audio, overlays, hud,
+    createJuice(r, c), cine, audio, overlays, hud, hints, registerView,
+    // 一夜只在开场之后走（开场前模拟没动；图形设备丢了以后也不再往下走，免得登记簿翻在错误界面上）
+    { onEvent: (e, s) => night.onEvent(e, s), update: (ctx) => { if (started) night.update(ctx); } },
   );
+
+  // 登记簿：翻开时把鼠标还给玩家（第三人称要点得到按钮）；合上时不自动锁回，HUD 自己提示「Click to resume」，点一下画布就继续
+  // （Esc 合上时浏览器也不让马上再锁）。触屏、俯视没有指针锁定，照样翻、照样合。
+  // 收夜那一页被合上（不管从哪儿合的）都当 Keep haunting：不然光收回以后画面一直停在黑里（keepHaunting 只认那一页，重复调只算一次）
+  registerView.onToggle((open) => {
+    if (open && isGhostRig(r) && document.pointerLockElement) document.exitPointerLock();
+    if (!open && night.phase === 'register') night.keepHaunting();
+  });
+  registerView.onKeepHaunting(() => night.keepHaunting());
+  registerView.onAnotherNight(() => night.anotherNight());
+  // 墙上多一个影子出现过：登记簿页脚多一句
+  otherShadow.onAppear(() => registerView.noteOtherOne());
 
   const picker = createPicker(canvas, r, () => props.pickTargets());
   picker.onHover((id) => {
     props.setHover(id);
     overlays.setHover(id);
+    if (id) hints.aimed(id);
   });
-  picker.onPick((id) => { if (started) world.trigger(id); });
-  // 第三人称：按住设机关；右键或 F 现身（冷却中、正在现身、鬼魂在墙格里时模拟自己不理）
-  picker.onArm((id) => { if (started) world.arm(id); });
-  if (isGhostRig(r)) r.onManifest(() => { if (started) world.manifest(); });
+  // 登记簿翻开着时不附身、不设机关：它自己的底子盖着画面，这里再保险一下（俯视模式点到底下的物件）
+  picker.onPick((id) => { if (started && !registerView.isOpen) world.trigger(id); });
+  // 第三人称：按住设机关；右键或 F 现身（冷却中、正在现身、鬼魂在墙格里时模拟自己不理）。
+  // 做不到时回应一句（hints.refused）：机关满了；现身时没在现身却不行就是在墙里（world.manifest 先查墙），否则是还在冷却 / 正在现身
+  picker.onArm((id) => {
+    if (!started || registerView.isOpen) return;
+    if (!world.arm(id) && world.state.objects.filter((o) => o.armed > 0).length >= TRAP.max) hints.refused('trapsFull');
+  });
+  if (isGhostRig(r)) r.onManifest(() => {
+    if (!started || world.manifest()) return;
+    hints.refused(world.state.manifest.phase === 'idle' ? 'manifestWall' : 'manifestCooldown');
+  });
 
-  installDebug({ world, dispatch, control, rig: r, core: c });
+  installDebug({
+    world, dispatch, control, rig: r, core: c,
+    night: {
+      endNight: () => night.endNight(),
+      dawn: () => night.dawnNow(),
+      keepHaunting: () => night.keepHaunting(),
+      snapshot: () => ({ ...night.snapshot(), register: registerView.isOpen, door: frontDoor.openness }),
+    },
+  });
 
   // 先把场景里所有材质的渲染管线异步编好，再开始渲染。不预编译的话，管线是第一次画到时同步编译的，
   // 开局头几秒会连着卡好几下（实测单帧最长 0.5–0.7 秒），正好撞上开场镜头下降。

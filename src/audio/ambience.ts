@@ -17,6 +17,8 @@
 //   第三人称（3D 启用后）：整层 +2 dB（用户要更多氛围；只抬一点，持续音和风不能盖住脚步声）；嘎吱改成每 14–38 秒一次，
 //     放在听者周围 3–9 米的随机一点（屋里），六成在地板上、四成在头顶的房梁 —— 隔墙的会被遮挡闷住，真的像别的房间在响；
 //     因为离得远、常常隔着墙，3D 的嘎吱比俯视时响 3 dB
+//   一夜的收尾（2026-10-30）：整层电平（setLevel）在收夜的静、光收回那几秒里慢慢压到很低，Keep haunting 时回来；
+//     压低的时候不再安排嘎吱（房子也静下来：嘎吱各自是一个声音，走的是 amb 总线和混响，不经过这一级）。不新加声音
 import { HOUSE_D, HOUSE_W } from '../config/house';
 import { Snd, bandNoise, creak, knock, rand, type Bus, type CreakSpec } from './sfx';
 import type { Place, Vec3 } from './space';
@@ -49,6 +51,8 @@ export const AMB = {
   creakEvery3d: [14, 38] as [number, number],
   creak3d: 3,
   creakDist: [3, 9] as [number, number],
+  /** 整层电平（setLevel）低于这个（线性增益）就不安排嘎吱 */
+  hushBelow: 0.5,
 };
 
 export const DREAD = {
@@ -90,15 +94,24 @@ export interface Ambience {
   creak(t: number, at?: Place, settle?: boolean): void;
   /** 第三人称的整层增益（dB）和嘎吱节奏：engine.ts 在 3D 启用时调一次 */
   setPresence(db: number, t: number): void;
+  /**
+   * 整层电平（2026-10-30「一夜」：收夜时慢慢压下去，Keep haunting 时回来）：level 是线性增益（1 = 原样），从 t 开始按
+   * tau 秒的时间常数走过去（约 3 tau 走完；tau ≤ 0 立刻）。低于 AMB.hushBelow 时不再安排嘎吱
+   */
+  setLevel(level: number, t: number, tau: number): void;
   stop(t: number): void;
 }
 
 export function createAmbience(bus: Bus): Ambience {
   const s = new Snd(bus, { to: 'amb', level: AMB.level });
+  // 整层电平（一夜的收尾）在第三人称抬升之后、出口之前
+  const level = s.gain(1);
+  level.connect(s.out);
   const presence = s.gain(1);
-  presence.connect(s.out);
+  presence.connect(level);
   const master = s.gain(0);
   master.connect(presence);
+  let hushed = false;
   let started = false;
   let nextCreak = Infinity;
   let every = AMB.creakEvery;
@@ -188,9 +201,18 @@ export function createAmbience(bus: Bus): Ambience {
       windDread.gain.setTargetAtTime(10 ** ((AMB.windBoost * x) / 20), t, 0.4);
       upper.gain.setTargetAtTime(AMB.upper * smooth(DREAD.upperFrom, 1, x), t, 0.4);
     },
+    setLevel(v, t, tau) {
+      const x = Math.max(0, v);
+      const g = level.gain;
+      g.cancelScheduledValues(t);
+      if (tau > 0) g.setTargetAtTime(x, t, tau);
+      else g.setValueAtTime(x, t);
+      hushed = x < AMB.hushBelow;
+    },
     update(now) {
       if (!started || now < nextCreak - 0.1) return;
-      placeCreak(Math.max(now + 0.05, nextCreak));
+      // 压低了（收夜）：这一声不放，照常排下一声
+      if (!hushed) placeCreak(Math.max(now + 0.05, nextCreak));
       nextCreak = Math.max(now, nextCreak) + rand(every[0], every[1]);
     },
     creak(t, at, settle) {
