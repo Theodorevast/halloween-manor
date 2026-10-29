@@ -1,5 +1,6 @@
 // 射线拾取：鼠标悬停 → onHover（同时改光标），一次「点击」→ onPick。
 // 点击的判定：按下和抬起间隔 < 400 ms、位移 < 6 px，这样拖一下、按住不放都不会误触发附身。
+// 「按了多久」都按指针事件自己的时间戳算（eventTime），不按处理事件那一刻的时钟：主线程卡一帧、事件排在后面才处理，不会把点一下读成按住。
 // 触屏没有悬停：按下时先按落点更新一次悬停（叠层能显示物件名），抬起时再判定点击。
 // 第三人称（ghostRig）换一套：准星（画面正中）对着的、离鬼魂 4 米以内、鬼魂看得见的物件是悬停，
 // 指针锁定时点一下（按下后不到 TRAP.holdToArm 秒松开）附身，在松开那一刻；按住满 TRAP.holdToArm 秒设机关（onArm）；
@@ -13,6 +14,18 @@ import { isGhostRig, type CameraRig, type GhostRig } from './types';
 
 const CLICK_MS = 400;
 const CLICK_PX = 6;
+/** 事件时间戳可信的范围（毫秒）：比现在早不过 maxAge、比现在晚不过 futureSlack，才当它和 performance.now() 在同一条时间轴上 */
+export const EVENT_STAMP = { maxAge: 2000, futureSlack: 100 };
+
+/**
+ * 指针事件发生的时刻（毫秒，和 performance.now() 同一条时间轴）。主线程卡了一下（着色器编译、垃圾回收），事件排在后面才被处理时，
+ * 处理那一刻的 performance.now() 比事件真正发生的晚得多；按它算「按了多久」，按下和松手之间卡一下就会把点一下读成按住。
+ * 事件自己的 timeStamp 不受这个影响。不可信的（不是有限数、比现在晚过 futureSlack、比现在早过 maxAge：个别浏览器的 timeStamp 不在这条时间轴上）退回 now
+ */
+export function eventTime(stamp: number, now: number): number {
+  if (!Number.isFinite(stamp) || stamp > now + EVENT_STAMP.futureSlack || now - stamp > EVENT_STAMP.maxAge) return now;
+  return Math.min(stamp, now);
+}
 /** 触屏轻点后，悬停标签停留多久（毫秒） */
 const TOUCH_HOVER_MS = 1500;
 /** 第三人称：准星对着的物件离鬼魂（水平距离，米）这么近才够得着 */
@@ -83,7 +96,7 @@ export interface HoldInputOptions {
   holdMs: number;
   /** 准星此刻对着谁（拾取器的射线）。只在按下、手势结束时调；每帧的那一次由 frame 的参数传进来，不重复算 */
   aimed(): string | null;
-  /** 现在（毫秒） */
+  /** 现在（毫秒）。down / buttons 没给事件时刻时用它；每帧（frame）判断按满了没有也用它 */
   now(): number;
   /** 点一下：附身，在松手那一刻 */
   onPick(id: string): void;
@@ -114,15 +127,21 @@ export function createHoldInput(o: HoldInputOptions) {
     else o.onArm(act.id);
   };
   return {
-    /** pointerdown：只有左键（button 0）、而且鼠标在操控鬼魂（锁定中）才开始手势 */
-    down(button: number) {
+    /**
+     * pointerdown：只有左键（button 0）、而且鼠标在操控鬼魂（锁定中）才开始手势。
+     * at = 这个事件发生的时刻（毫秒，和 now() 同一条时间轴，见 eventTime）；不给就用 now()
+     */
+    down(button: number, at?: number) {
       if (button !== 0 || !locked) return;
-      hold.down(o.aimed(), o.now());
+      hold.down(o.aimed(), at ?? o.now());
     },
-    /** pointermove / pointerup：buttons 是这个事件之后还按着的键（位：1 = 左键，2 = 右键）；左键位是 0 就结束手势 */
-    buttons(buttons: number) {
+    /**
+     * pointermove / pointerup：buttons 是这个事件之后还按着的键（位：1 = 左键，2 = 右键）；左键位是 0 就结束手势。
+     * at 同 down：按了多久按事件自己的时刻算，卡了一下才处理的松手不会把点一下读成按住
+     */
+    buttons(buttons: number, at?: number) {
       if (!hold.holding || (buttons & 1) !== 0) return;
-      fire(hold.up(o.aimed(), o.now()));
+      fire(hold.up(o.aimed(), at ?? o.now()));
     },
     /** 每帧：准星此刻对着谁（拾取器已经算好）。看按满了没有、准星有没有移开 */
     frame(aimed: string | null) {
@@ -220,8 +239,9 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
       watching = false;
       return;
     }
-    if (camMoved()) setHover(idAt(mouse.x, mouse.y));
+    // 先排下一帧、再发回调：订阅者抛了异常，循环也不会就此停掉（停了的话 watching 还卡在 true，之后 pointermove 再也起不了这个循环）
     requestAnimationFrame(watchTick);
+    if (camMoved()) setHover(idAt(mouse.x, mouse.y));
   };
   const watch = () => {
     if (watching || disposed) return;
@@ -238,14 +258,14 @@ export function createPicker(canvas: HTMLCanvasElement, rig: CameraRig, getTarge
   };
   const onDown = (e: PointerEvent) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    down = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() };
+    down = { id: e.pointerId, x: e.clientX, y: e.clientY, t: eventTime(e.timeStamp, performance.now()) };
     if (e.pointerType === 'touch') setHover(idAt(e.clientX, e.clientY));
   };
   const onUp = (e: PointerEvent) => {
     const d = down;
     down = null;
     if (!d || d.id !== e.pointerId) return;
-    if (performance.now() - d.t >= CLICK_MS) return;
+    if (eventTime(e.timeStamp, performance.now()) - d.t >= CLICK_MS) return;
     if (Math.hypot(e.clientX - d.x, e.clientY - d.y) >= CLICK_PX) return;
     const id = idAt(e.clientX, e.clientY);
     if (e.pointerType === 'touch') {
@@ -344,13 +364,14 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
     onArm: (id) => { for (const cb of armCbs) cb(id); },
   });
 
-  // 镜头每帧都在动（跟随、转向），悬停每帧重算一次：8 个盒子的一条射线，很便宜。按住时也在这里看有没有按满、准星有没有移开
+  // 镜头每帧都在动（跟随、转向），悬停每帧重算一次：8 个盒子的一条射线，很便宜。按住时也在这里看有没有按满、准星有没有移开。
+  // 先排下一帧、再算和发回调：订阅者（悬停、附身、设机关的回调）抛了异常，每帧的循环也不会就此停掉
   const tick = () => {
     if (disposed) return;
+    requestAnimationFrame(tick);
     const id = aimed();
     setHover(id);
     input.frame(id);
-    requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
   // 丢了锁定：下一帧 aimed() 返回 null，悬停自己收起；按着的手势也作废（Esc 之后松手，松手事件到不了这里）
@@ -364,9 +385,9 @@ function createAimPicker(canvas: HTMLCanvasElement, rig: GhostRig, getTargets: (
   // pointerup 要等最后一个键松开才发，button 还是右键
   const onDown = (e: PointerEvent) => {
     if (e.button === 0 && locked) setHover(aimed());
-    input.down(e.button);
+    input.down(e.button, eventTime(e.timeStamp, performance.now()));
   };
-  const onButtons = (e: PointerEvent) => input.buttons(e.buttons);
+  const onButtons = (e: PointerEvent) => input.buttons(e.buttons, eventTime(e.timeStamp, performance.now()));
   const onCancel = () => input.cancel();
   canvas.addEventListener('pointerdown', onDown);
   canvas.addEventListener('pointermove', onButtons);

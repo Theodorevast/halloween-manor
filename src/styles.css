@@ -537,6 +537,14 @@ body {
   filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.95)) drop-shadow(0 0 5px rgba(125, 255, 168, 0.45));
 }
 
+/* 机关设下了（overlays.ts 给标记加 is-armed、把眼睛换成空心的）：不管有没有人看着它，眼睛一直睁着；霜的冷白，不用幽绿，
+ * 只留一圈黑边压住背景，不发绿光。优先级和上面 is-seen、is-ready 两条一样（两个类 + 一个类名），所以必须写在它们后面 */
+.ov-mark.is-armed .ov-eye {
+  color: rgb(190, 205, 224);
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.95));
+  transform: scaleY(1);
+}
+
 /* 悬停标签：标本签，用一根细线挂在物件上 */
 .ov-tip-in {
   display: flex;

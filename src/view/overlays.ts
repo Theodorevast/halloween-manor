@@ -53,7 +53,7 @@ function fearColor(f: number): string {
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
-/** 眼睛的内容：实心的（有人看得见它）和空心的（机关设下了：眼睑只有一道描边、里面透明，瞳孔是一个空圈） */
+/** 眼睛的内容：实心的（有人看得见它）和空心的（机关设下了：眼睑只有一道描边、里面透明，瞳孔是一个空圈；颜色、滤镜在 styles.css 的 .ov-mark.is-armed .ov-eye） */
 const EYE_SOLID =
   '<path d="M1.2 7C5 1.6 19 1.6 22.8 7 19 12.4 5 12.4 1.2 7Z" fill="rgba(5,6,8,.72)" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>' +
   '<circle cx="12" cy="7" r="3.4" fill="currentColor"/><circle cx="12" cy="7" r="1.4" fill="#050608"/>';
@@ -61,8 +61,6 @@ const EYE_HOLLOW =
   '<path d="M1.2 7C5 1.6 19 1.6 22.8 7 19 12.4 5 12.4 1.2 7Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>' +
   '<circle cx="12" cy="7" r="3.2" fill="none" stroke="currentColor" stroke-width="1.2"/>';
 const EYE = `<svg class="ov-eye" viewBox="0 0 24 14" aria-hidden="true" focusable="false">${EYE_SOLID}</svg>`;
-/** 空心眼睛的行内样式（styles.css 里 .ov-eye 的规则管不到它）：霜的冷白，不用幽绿；只留一圈黑边压住背景，不发绿光 */
-const HOLLOW_STYLE = { color: 'rgb(190,205,224)', filter: 'drop-shadow(0 0 2px rgba(0, 0, 0, 0.95))', transform: 'scaleY(1)' };
 const RING =
   '<svg class="ov-ring" viewBox="0 0 32 32" aria-hidden="true" focusable="false">' +
   `<circle class="ov-ring-track" cx="16" cy="16" r="${RING_R}"/>` +
@@ -112,7 +110,7 @@ interface Mark {
   inner: HTMLDivElement;
   fade: number;
   arc: SVGCircleElement;
-  /** 眼睛的 svg：机关设下时换内容、写行内样式 */
+  /** 眼睛的 svg：机关设下时换内容（样式靠 el 上的 is-armed 类，写在 styles.css） */
   eye: SVGSVGElement;
   cooling: boolean;
   seen: boolean;
@@ -310,15 +308,13 @@ export function createOverlays(
         m.ready = !cooling;
         m.el.classList.toggle('is-ready', !cooling);
       }
-      // 机关设下了：眼睛换成空心的，一直亮着（不管有没有人看着它）；解除 / 触发了换回去。只在变化时写
+      // 机关设下了：眼睛换成空心的，一直亮着（不管有没有人看着它）；解除 / 触发了换回去。只在变化时写。
+      // 颜色、滤镜、睁开多大都在 styles.css 的 .ov-mark.is-armed .ov-eye，这里只换内容和类名
       const armed = o.armed > 0;
       if (armed !== m.armed) {
         m.armed = armed;
         m.el.classList.toggle('is-armed', armed);
         m.eye.innerHTML = armed ? EYE_HOLLOW : EYE_SOLID;
-        m.eye.style.color = armed ? HOLLOW_STYLE.color : '';
-        m.eye.style.filter = armed ? HOLLOW_STYLE.filter : '';
-        m.eye.style.transform = armed ? HOLLOW_STYLE.transform : '';
       }
       if (cooling) {
         // 剩下的弧长 = 剩余冷却的比例
