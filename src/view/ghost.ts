@@ -16,7 +16,7 @@
 //   中间有墙的那支由 CPU 用格子视线判掉）。光锥里的部分变浓、轮廓收紧、带一点手电的暖色；光锥外还是原来的冷雾。
 //   只显形、不发光、不描边
 // - 主动现身（2026-10-28，调研 G2 / G3 / G4，参数见 GHOST.manifest / GHOST.solid）：听 manifest 事件。蓄力时借 lightfx.ts 让附近的灯
-//   暗两下、借 frost.ts 让脚下结霜；落下时灯暗一下，暗到最深的那一帧换上「实」的那份材质（普通混合、暗、挡光，被手电照着的那面亮一点），
+//   暗两下、借 frost.ts 让脚下结霜；落下时灯暗一下，暗到最深的那一帧换上「实」的那份材质（普通混合、暗、挡光、写深度，被手电照着的那面亮一点），
 //   停留时不飘、头慢慢抬起、只每秒更新 10 次，冷雾从下摆往下淌；收的时候再暗一下换回来。没有淡入淡出。
 //   「实」的那份标了 deferCompile，开场按钮可用之后由 main.ts 预编译
 // ?noghostfx：不画鬼魂（量开销的对照，和 house.ts 一致）
@@ -170,6 +170,12 @@ export const GHOST = {
    * soft：朝向镜头的程度在这之间淡入（轮廓不是一刀切）；hemFade 下摆淡出。
    * 头：身高 neck 以上的顶点（neckBlend 内渐变，脖子不折）绕 x 轴转，停留的 MANIFEST.hold 秒里从低着头 headPitch[0] 抬到 headPitch[1]
    * （弧度，正 = 低头）：在灯暗下去的那一下换成低着头的样子，再慢慢抬起来看人
+   * - depthCut：写深度（2026-10-29，最终审查 V-M1）。它画在冷雾前面，不写深度时身后的冷雾整团加在它上面，看着发虚；
+   *   换成网格模型以后，前后叠着的几层（袖子、兜帽里面）也要靠深度挡住。形状（soft × 侵蚀 × 下摆淡出，不算 opacity 和
+   *   镜头太近时的淡出）不到 depthCut 的片元整个丢掉、不写深度：侵蚀掉的缝、轮廓最外面几乎看不见的一圈不挡雾，丢掉的颜色本来就看不见。
+   *   0.05 是对比过的（dev/ghost.html?manifest&depthcut=…）：门槛越高，雾被挡住的那条硬边越往身体里走，看着像身上挖出的暗块；
+   *   0.05 时这条边就在轮廓上（地上的雾在下摆处齐齐断开，像长袍下沿挡在雾前面）。写了深度，停留时 AO（engine/postfx.ts）
+   *   也把它当实物算：贴墙站、镜头放低看地板，都看不出黑晕
    */
   solid: {
     opacity: 0.85,
@@ -178,6 +184,7 @@ export const GHOST = {
     soft: [0.0, 0.3] as [number, number],
     erode: [0.04, 0.6] as [number, number],
     hemFade: 0.3,
+    depthCut: 0.05,
     neck: 0.75,
     neckBlend: 0.07,
     headPitch: [(8 * Math.PI) / 180, 0] as [number, number],
@@ -554,14 +561,14 @@ export function createGhostMaterial(
 }
 
 /**
- * 现身停留时「实」的那份（G2，参数见 GHOST.solid）：普通混合、暗、挡光，只画正面；不飘、不拖，头绕脖子转 u.head；
+ * 现身停留时「实」的那份（G2，参数见 GHOST.solid）：普通混合、暗、挡光、写深度，只画正面；不飘、不拖，头绕脖子转 u.head；
  * 侵蚀噪声的时间降到每秒 stepRate 次（u.step = 1 时，G3）。和身体同一个网格、同一套 uniform，任何网格都能用。
  * 不受光照：被手电照到的那一面是按登记表和手电的参数自己算的漫反射（torchIrradiance；灯的数量变了也不重编）
  */
 export function createGhostSolidMaterial(u: GhostUniforms, look: GhostLook): THREE.MeshBasicNodeMaterial {
   const S = GHOST.solid, L = GHOST.body;
   const m = new THREE.MeshBasicNodeMaterial({
-    transparent: true, depthWrite: false, depthTest: true, blending: THREE.NormalBlending, side: THREE.FrontSide, fog: false,
+    transparent: true, depthWrite: true, depthTest: true, blending: THREE.NormalBlending, side: THREE.FrontSide, fog: false,
   });
   m.lights = false;
   const span = look.top - look.bottom;
@@ -580,6 +587,10 @@ export function createGhostSolidMaterial(u: GhostUniforms, look: GhostLook): THR
   const wisp = smoothstep(erode.sub(0.1), erode.add(0.24), n);
   const hem = smoothstep(0, S.hemFade, h);
   m.opacityNode = soft.mul(wisp).mul(hem).mul(S.opacity).mul(u.fade).mul(u.solid);
+  // 写深度（V-M1，见 GHOST.solid.depthCut）：不透明度不到门槛的片元丢掉（alpha ≤ 门槛就丢），不写深度。门槛和不透明度乘同样的
+  // opacity × fade × solid，丢不丢只看形状；uSolid = 0（平时藏着，main.ts 暖机那几帧显示出来编管线）时门槛、不透明度都是 0，
+  // 整个丢掉，什么深度都不留，不挡身体、雾晕和冷雾
+  m.alphaTestNode = u.solid.mul(u.fade).mul(S.opacity * S.depthCut);
   // 颜色：原来的冷白压暗（没被照着时是暗色剪影）；被手电照到的那一面按真的手电算漫反射（一件 albedo 这么暗的长袍）
   const c0 = GHOST.edge, c1 = GHOST.core;
   const base = mix(vec3(c0.r, c0.g, c0.b), vec3(c1.r, c1.g, c1.b), soft).mul(u.solidDark);
@@ -886,8 +897,8 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       hazes.push(h);
     });
     // 现身停留时换上的「实」的那份（G2）：同一个网格。平时藏着；不进开场那次阻塞的预编译，
-    // main.ts 在开场按钮可用之后再编（那几帧里 uSolid = 0，完全透明），第一次现身时不卡。
-    // 普通混合：画在冷雾（renderOrder − 0.05）之前，往下淌的雾落在它前面时盖得住
+    // main.ts 在开场按钮可用之后再编（那几帧里 uSolid = 0，片元全丢，不画也不写深度），第一次现身时不卡。
+    // 普通混合、写深度，画在冷雾（renderOrder − 0.05）之前：往下淌的雾落在它前面时盖得住，身后的雾被深度挡住（V-M1）
     const sm = make(p, solidMat, `ghost-solid${sfx}`);
     sm.visible = false;
     sm.userData.deferCompile = true;
