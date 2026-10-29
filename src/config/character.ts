@@ -157,5 +157,46 @@ export const VISITOR_SPECS: CharacterSpec[] = [
   },
 ];
 
+/**
+ * 联名皮肤（JOJO：翠宝穿承太郎、DIO 的衣服）。流水线和精修参数同上面四套（scripts/tripo/visitors.json 的 jotaro、dio）。
+ * 授权确认之前不进公开的访客轮换：只在地址带 ?collab 时并进 VISITOR_SPECS（dev/characters.html 也要带：?visitor=jotaro&collab）。
+ * 两套的腿短、膝盖低：calibrate() 量 run、flee 时把小腿骨（LeftLeg，骨头位置在膝盖）也当成贴地的脚，膝盖不像脚那样贴地后滑，量出来偏了
+ * （jotaro 1.094 / 0.684，dio 0.949 / 0.752）。run、flee 改用只算脚、脚尖四根骨头的量法（同样的贴地判断和中位数，Blender 里量；
+ * 这个量法在吸血鬼、骷髅上和上面写的数只差 1%–3%）。walk 两种量法一样
+ */
+export const COLLAB_SPECS: CharacterSpec[] = [
+  {
+    // 承太郎装（P2 + 四视图 + Blender 精修，默认参数，12863 三角面）。calibrate()：正面 1.596 / 1.633 / 1.518
+    url: `${import.meta.env.BASE_URL}assets/visitors/jotaro.glb`,
+    targetHeight: 1.1,
+    maxLength: 1.4,
+    facingOffset: Math.PI / 2,
+    clips: VISITOR_CLIPS,
+    loops: { flee: FLEE_LOOP },
+    walkRateAt1ms: 2.78,
+    runRateAt1ms: 0.847,
+    fleeRateAt1ms: 0.849,
+    measureIdle: true,
+    flashlightHeight: 0.6,
+  },
+  {
+    // DIO 装（同上，精修加 --trust arms：短袖跟着手臂，不然手垂下来袖子横着像翅膀；13356 三角面）。calibrate()：正面 1.595 / 1.599 / 1.547
+    url: `${import.meta.env.BASE_URL}assets/visitors/dio.glb`,
+    targetHeight: 1.1,
+    maxLength: 1.4,
+    facingOffset: Math.PI / 2,
+    clips: VISITOR_CLIPS,
+    loops: { flee: FLEE_LOOP },
+    walkRateAt1ms: 2.152,
+    runRateAt1ms: 0.718,
+    fleeRateAt1ms: 0.665,
+    measureIdle: true,
+    flashlightHeight: 0.6,
+  },
+];
+
+// node 里跑测试时没有 location：不并，测试看到的还是公开的四套
+if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('collab')) VISITOR_SPECS.push(...COLLAB_SPECS);
+
 /** 手电挂在角色身上的高度（米），按 targetHeight 的身高定；模型因 maxLength 变矮时按比例降低（占位狐狸约 0.52 米） */
 export const FLASHLIGHT_HEIGHT = 0.8;

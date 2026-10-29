@@ -1,6 +1,6 @@
 {
   "$comment": "由 scripts/tripo/visitors.mjs 生成，重跑 export 会覆盖对应条目。url 相对于 import.meta.env.BASE_URL；clips 的键对应 src/config/character.ts 的 clips，值是 GLB 里的片段原名（null = 没有）",
-  "updatedAt": "2026-10-28T15:48:39.257Z",
+  "updatedAt": "2026-10-29T10:08:06.699Z",
   "visitors": [
     {
       "id": "lantern-explorer",
@@ -308,6 +308,167 @@
         },
         "credits": 245,
         "exportedAt": "2026-10-28T15:48:39.256Z"
+      }
+    },
+    {
+      "id": "jotaro",
+      "label": "联名：承太郎装（JOJO）",
+      "url": "assets/visitors/jotaro.glb",
+      "clips": {
+        "idle": "idle",
+        "walk": "walk",
+        "run": "run",
+        "scared": "scared_01",
+        "look": "look_around",
+        "afraid": "afraid",
+        "flee": "flee_01",
+        "scared2": "scared_02"
+      },
+      "clipMatch": "name",
+      "presets": {
+        "idle": "preset:biped:idle",
+        "walk": "preset:biped:walk",
+        "run": "preset:biped:run",
+        "scared": "preset:biped:scared_01",
+        "look": "preset:biped:look_around",
+        "afraid": "preset:biped:afraid",
+        "flee": "preset:biped:flee_01",
+        "scared2": "preset:biped:scared_02"
+      },
+      "stats": {
+        "bytes": 2140176,
+        "triangles": 12863,
+        "textures": [
+          "1024x1024",
+          "2048x2048",
+          "1024x1024"
+        ],
+        "maxTexture": 2048,
+        "compression": "none",
+        "joints": 23,
+        "boneNaming": "mixamo（mixamorig 前缀）",
+        "durations": {
+          "afraid": 2.6,
+          "flee_01": 2.7,
+          "idle": 15.367,
+          "look_around": 15.6,
+          "run": 1.267,
+          "scared_01": 3.3,
+          "scared_02": 3.3,
+          "walk": 2.367
+        }
+      },
+      "game": {
+        "ok": true,
+        "problems": [],
+        "notes": []
+      },
+      "refine": {
+        "from": "assets-src/visitors/jotaro/animated.glb",
+        "merged": [
+          "assets-src/visitors/jotaro/animated2.glb"
+        ],
+        "report": "assets-src/visitors/jotaro/refine.json",
+        "sheet": "assets-src/visitors/jotaro/refine-preview/jotaro-sheet.png",
+        "warnings": []
+      },
+      "retint": {
+        "from": "assets-src/visitors/jotaro/refined.glb",
+        "report": "assets-src/visitors/jotaro/retint.json",
+        "changedTexels": 2081231,
+        "changedTexelsMR": 49785,
+        "warnings": []
+      },
+      "source": {
+        "from": "animate + 并入第 2 批动作 + Blender 精修 + 贴图后处理",
+        "tasks": {
+          "costume": "e21b687e-bc7f-4ebd-8e45-cce9d68fbed5",
+          "views": "e8dfee81-f5f6-401b-83c1-b9cc3107c6ea",
+          "model": "a40d633d-d18c-44ec-8743-f0f2817a1e14",
+          "rigcheck": "9e283dd4-6e14-4e9b-a43e-8f61c5c8c355",
+          "rig": "94498413-4494-4905-8c82-327ec6cc4c58",
+          "animate": "e21f673c-516a-4da0-bcf4-71774eb9d346",
+          "animate2": "b45367ae-df03-4716-aed0-afcaeae942b4"
+        },
+        "credits": 245,
+        "exportedAt": "2026-10-29T10:08:06.697Z"
+      }
+    },
+    {
+      "id": "dio",
+      "label": "联名：DIO 装（JOJO）",
+      "url": "assets/visitors/dio.glb",
+      "clips": {
+        "idle": "idle",
+        "walk": "walk",
+        "run": "run",
+        "scared": "scared_01",
+        "look": "look_around",
+        "afraid": "afraid",
+        "flee": "flee_01",
+        "scared2": "scared_02"
+      },
+      "clipMatch": "name",
+      "presets": {
+        "idle": "preset:biped:idle",
+        "walk": "preset:biped:walk",
+        "run": "preset:biped:run",
+        "scared": "preset:biped:scared_01",
+        "look": "preset:biped:look_around",
+        "afraid": "preset:biped:afraid",
+        "flee": "preset:biped:flee_01",
+        "scared2": "preset:biped:scared_02"
+      },
+      "stats": {
+        "bytes": 2081312,
+        "triangles": 13356,
+        "textures": [
+          "1024x1024",
+          "2048x2048",
+          "1024x1024"
+        ],
+        "maxTexture": 2048,
+        "compression": "none",
+        "joints": 23,
+        "boneNaming": "mixamo（mixamorig 前缀）",
+        "durations": {
+          "afraid": 2.6,
+          "flee_01": 2.7,
+          "idle": 15.367,
+          "look_around": 15.6,
+          "run": 1.267,
+          "scared_01": 3.3,
+          "scared_02": 3.3,
+          "walk": 2.367
+        }
+      },
+      "game": {
+        "ok": true,
+        "problems": [],
+        "notes": []
+      },
+      "refine": {
+        "from": "assets-src/visitors/dio/animated.glb",
+        "merged": [
+          "assets-src/visitors/dio/animated2.glb"
+        ],
+        "report": "assets-src/visitors/dio/refine.json",
+        "sheet": "assets-src/visitors/dio/refine-preview/dio-sheet.png",
+        "warnings": []
+      },
+      "source": {
+        "from": "animate + 并入第 2 批动作 + Blender 精修",
+        "tasks": {
+          "costume": "eaa94d2e-393a-49b3-b889-67cf7cc08328",
+          "views": "8e95e9c4-7c73-4cbd-9a87-ff215915f8ce",
+          "model": "b51aa8ec-43aa-4a1d-998f-f90aec44cd14",
+          "rigcheck": "b95ca99a-22a4-492c-a273-501fbfa9afc1",
+          "rig": "0c855eb4-50fb-450f-8928-3c5d6680b458",
+          "animate": "81ca058a-17b9-4f42-bfe7-271e7ef45384",
+          "animate2": "e955a856-d352-4a88-a310-2540b578e18d"
+        },
+        "credits": 245,
+        "exportedAt": "2026-10-29T08:34:58.444Z"
       }
     }
   ]
