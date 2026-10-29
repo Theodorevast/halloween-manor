@@ -161,8 +161,8 @@ export function normalizeModel(model: THREE.Object3D, height: number, facingOffs
 }
 
 /**
- * signal：给了就自己 fetch 整个文件（可以在下载途中 abort），下载完再交给 GLTFLoader 解析。streamOutfits 用它在 WebGL2 开局以后
- * 把还在下载的那一套停掉。不用 LoadingManager.abort：它连解析时内嵌贴图的 blob 读取也一起停掉，GLTFLoader 会打
+ * signal：给了就自己 fetch 整个文件（可以在下载途中 abort），下载完再交给 GLTFLoader 解析。streamOutfits 用它在等了
+ * main.ts 的 OUTFIT_WAIT 秒还没加完（WebGL2 上点了开始以后）和 dispose 时，把还在下载的那一套停掉。不用 LoadingManager.abort：它连解析时内嵌贴图的 blob 读取也一起停掉，GLTFLoader 会打
  * 「Couldn't load texture」的报错（2026-10-29 实测）；这样 abort 只会落在下载上，解析一开始就停不了了
  */
 export async function loadCharacterAsset(spec: CharacterSpec = CHARACTER, signal?: AbortSignal): Promise<CharacterAsset> {

@@ -49,6 +49,13 @@ let bgDone = false;
 let outfitsSettled = false;
 /** WebGL2：点了开始以后最多再等其余几套造型这么多秒，到时候还没加完就带着已经加好的几套开场（某一套下载卡住时遮罩不会一直挂着） */
 const OUTFIT_WAIT = 30;
+/**
+ * OUTFIT_WAIT 只停得住下载：已经在解析、编管线的那一套要等它自己做完。再过这么多秒（秒）无论如何都开场，
+ * 遮罩不会因为某一步挂住而永远不收起（2026-10-29 加载路复审 N1）
+ */
+const OUTFIT_GRACE = 10;
+/** 图形设备丢了：不再开场（动画循环的开场条件也看它），错误界面留着，点一下重新加载 */
+let lost = false;
 /** 不等其余几套了（boot 里设）：没下载完的停掉、还没开始加的不加了；正在编的那一套编完照样加，所有造型都有了着落才开场 */
 let stopOutfits: (() => void) | null = null;
 /** 收走后台预编译用的临时访客（boot 里设） */
@@ -107,7 +114,7 @@ function begin(): boolean {
   void audio.unlock();
   // 指针锁定也必须在这次点击的调用栈里
   if (rig && isGhostRig(rig)) rig.lockPointer();
-  if (ready && bgDone && outfitsSettled) {
+  if (ready && !lost && bgDone && outfitsSettled) {
     start();
     return true;
   }
@@ -116,7 +123,10 @@ function begin(): boolean {
   // 两种都是开场遮罩先留着、按钮写回「Lighting the candles…」，都好了（再整栋真画一帧）就收起遮罩开场，见动画循环。
   // 造型最多等 OUTFIT_WAIT 秒，从这次点击算起
   hud.setReady(false);
-  if (!outfitsSettled) setTimeout(() => { if (!outfitsSettled) stopOutfits?.(); }, OUTFIT_WAIT * 1000);
+  if (!outfitsSettled) {
+    setTimeout(() => { if (!outfitsSettled) stopOutfits?.(); }, OUTFIT_WAIT * 1000);
+    setTimeout(() => { outfitsSettled = true; }, (OUTFIT_WAIT + OUTFIT_GRACE) * 1000);
+  }
   return false;
 }
 
@@ -156,6 +166,7 @@ async function boot() {
   const onLost = c.renderer.onDeviceLost.bind(c.renderer);
   c.renderer.onDeviceLost = (info) => {
     onLost(info); // 原处理会标记设备已丢失，render 才会停止调用它
+    lost = true;
     started = false;
     audio.setMuted(true);
     hud.showError(STRINGS.deviceLost);
@@ -286,7 +297,8 @@ async function boot() {
       releaseStaged?.();
     }
     // 点了开始、在等后台预编译（WebGL2 上还在等其余几套造型）：都好了、整栋真画过一帧了，收起开场遮罩开场
-    if (wantBegin && !started && bgDone && !warmAll && outfitsSettled) {
+    // 设备丢了不再开场：不然下一帧 hideStart 会收起错误界面、把游戏又「开始」起来（2026-10-29 加载路复审发现，原来就有）
+    if (wantBegin && !started && !lost && bgDone && !warmAll && outfitsSettled) {
       hud.hideStart();
       start();
     }
@@ -298,7 +310,7 @@ async function boot() {
 
   ready = true;
   hud.setReady(true);
-  if (wantBegin && bgDone && outfitsSettled) start();
+  if (wantBegin && !lost && bgDone && outfitsSettled) start();
 
   // 开场按钮已经可用：趁玩家读标题，把延后的物件编好。compileAsync 编的是渲染器默认的渲染目标，
   // 而场景是后处理管线自己的 pass 画的（格式、多重采样都不一样），编出来的管线用不上，所以和预热一样真画一帧。

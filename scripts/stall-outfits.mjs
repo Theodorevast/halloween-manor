@@ -2,7 +2,7 @@
 //   · 每个超过 50 ms 的帧（rAF 间隔）和主线程长任务，从页面一打开就记
 //   · 开始以后同步新建的 WebGPU 渲染管线（第一次画到时现编，会卡；异步的是 compileAsync，不卡）
 //   · 其余几套造型加入轮换的时刻（characters.ts 打的「加入轮换」）、每个访客进门（第一次出现在模拟里）的时刻
-//   · characters.ts 打的警告（预编译对不上、材质没有底色贴图、WebGL2 开局以后不再加新造型等）
+//   · characters.ts 打的警告（预编译对不上、材质没有底色贴图、等太久不等了等）
 //
 // ！！升级 three 以后一定要重跑！！characters.ts 的 compileOutfit 靠 three r186 的内部接口（RenderContexts.get 的 callDepth、
 // Renderer._getShadowNodes）和 renderObject 给阴影材质赋值的顺序，换了版本可能悄悄对不上：不报错，只是开局以后加进来的造型，
@@ -19,7 +19,7 @@
 //   ./node_modules/.bin/vite preview --port 4173 --strictPort --host 127.0.0.1      （npm run preview 也是 4173）
 //   node scripts/stall-outfits.mjs                       4 Mbps、一能点就点开始：其余几套在开局以后才加进轮换，最要紧的一种
 //   node scripts/stall-outfits.mjs --wait 12 --net 0     不限速、标题页停 12 秒：其余几套在标题页上就加完了
-//   node scripts/stall-outfits.mjs --webgl               WebGL2 后端（地址加 ?webgl）：开局以后不再加新造型，剩下的不下载
+//   node scripts/stall-outfits.mjs --webgl               WebGL2 后端（地址加 ?webgl）：点了开始以后遮罩等其余造型都加完再开场（最多 OUTFIT_WAIT 秒）
 //   --no-parallel-compile   （WebGL2）假装浏览器没有 KHR_parallel_shader_compile：着色器链接变成同步的，看编到一半开局会不会卡
 //   --hang witch            这一套访客 GLB 的请求一直不回（下载卡死）：WebGL2 上点了开始以后遮罩最多等 main.ts 的 OUTFIT_WAIT 秒
 //   --fail witch            这一套访客 GLB 回 404：落空、跳过，不该拖住遮罩
