@@ -2,23 +2,25 @@
 // 顺带钉住娃娃屋屋外那圈雾的「屋外程度」（ART-10：顶点属性 outside）。
 //
 // 灯闪（WCAG 2.3.1，数法和 tests/lightfx.test.ts 一样：lightfx.ts 的 countDips，60 Hz 采样，从高点掉 0.1 以上算一次）：
-// 现身这一串灯（蓄力两下 + 落下一下）已经占满了「任意 1 秒最多 3 下」，所以雾这一圈不能自己再暗一下。
-// 雾的亮度曲线 = 气浪造成的密度倍数（waveDensity：着色器里 draftField 的 CPU 镜像；不透明度 = 1 − exp(−τ)，τ 正比于密度，所以亮度和它单调相关）。
-// 查三件事：
-// 1. 每一点上（半径、缕系数各取一遍）曲线只有一下：波前过来浓一下、过去薄一下、慢慢回来——是一次平滑的变化，不是来回抖。
-// 2. 整圈合起来看（半径 R0 以内按面积取平均）：雾只是被推开、挤到波前上，总量不少，平均亮度一次都不暗；叠上灯那一串仍是 3 下。
-// 3. 鬼魂脚下（半径 0.5 米以内）：变薄和落下那一下灯暗同一刻开始，叠上灯那一串仍是 3 下。
-// 已知（写在报告里）：波前扫过的那一圈（半径 0.6–2.3 米）里，灯 × 雾逐点相乘的最严口径下，最坏 4 下（蓄力 2 + 落下 1 + 波前过去的那一下）。
-// 那一圈只是一条窄带（半宽 0.35 米）在地面上往外走，每个点上就那一下，不是整屏闪；这里不把它当成通过
+// 现身这一串灯（蓄力两下 + 落下一下）已经占满了「任意 1 秒最多 3 下」，所以雾这一圈不能让任何一点的亮度再暗一下。
+// 最严的口径（主会话在修复第 1 轮定的）：灯的亮度 × 雾的亮度逐点相乘，数出来整串仍然最多 3 下；
+// 门槛取 0.08（比 countDips 默认的 0.1 严一点，留 0.02 的余量）。雾的亮度有两种算法，都查：
+// 1. 只看气浪造成的密度倍数（waveDensity，着色器里 draftField 的 CPU 镜像，不透明度 = 1 − exp(−τ)，τ 正比于密度）；
+// 2. 把噪声场和气浪的取样点位移（push：雾的花纹被推着挪，花纹的边挪过一个点时那一点的亮度也会变）都算进去（tests/fogField.ts：
+//    fogMaterial 里 rho、hs、光程的 CPU 镜像，噪声是 three 的 mx_noise_float 的 CPU 版），亮度取不透明度相对稳态的比（α / α0），
+//    只看稳态不透明度 ≥ 0.05 的点（再薄的雾几乎看不见，相对变化大也没有意义）。
+// 雾自己的飘（风、翻滚）不算在内：它是慢变化、本来就有，和现身没关系，所以噪声时间在每条曲线里定住。
+// 美术总监原定的数（compress 1.35 / trough 0.5 / push 0.3）在这个口径下波前扫过的那一圈最坏 4 下：下面有一条用它们证明这个口径数得出来
 import * as THREE from 'three/webgpu';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MANIFEST } from '../src/config/visitors';
 import { HOUSE_D, HOUSE_W, ROOMS } from '../src/config/house';
 import type { CameraRig, RenderCore } from '../src/engine/types';
 import type { SimEvent, WorldState } from '../src/sim/types';
-import { DRAFT, FOG, createFogView, topDownDim, waveAt, waveDensity } from '../src/view/fog';
+import { DRAFT, FOG, createFogView, topDownDim, waveAt, waveDensity, type WaveParams } from '../src/view/fog';
 import { manifestLights } from '../src/view/ghost';
 import { countDips, createLightFx, dipStarts } from '../src/view/lightfx';
+import { VIEWS, fogAlpha } from './fogField';
 
 const L = DRAFT.manifest;
 const HZ = 60;
@@ -29,9 +31,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('DRAFT.manifest：参数照美术总监定的', () => {
-  it('一圈气浪：2.6 米、1.1 秒、半宽 0.35、挤浓 1.35、变薄 0.5、推 0.3、起点 0.25、撕成缕 0.6', () => {
-    expect(DRAFT.manifest).toEqual({ reach: 2.6, time: 1.1, width: 0.35, spread: 1.0, compress: 1.35, trough: 0.5, push: 0.3, start: 0.25, stir: 0.6 });
+describe('DRAFT.manifest：参数', () => {
+  it('一圈气浪：几何照美术总监定的（2.6 米、1.1 秒、起点 0.25、扩散 1.0）；幅度按修复第 1 轮重新定（不变薄、挤浓 0.25、推 0.06 米、撕成缕 0.3、半宽 0.7）', () => {
+    expect(DRAFT.manifest).toEqual({ reach: 2.6, time: 1.1, width: 0.7, spread: 1.0, compress: 0.25, trough: 0, push: 0.06, start: 0.25, stir: 0.3 });
   });
   it('厨房门撞上的那一圈（slam）没改：照原来的数', () => {
     expect(DRAFT.slam).toEqual({ reach: 4.2, time: 1.8, width: 0.45, spread: 1.3, compress: 1.6, trough: 0.6, push: 0.45, start: 0.35, stir: 0.8 });
@@ -112,17 +114,25 @@ describe('waveAt：波前怎么走', () => {
 });
 
 describe('waveDensity：推开的是什么样子', () => {
-  it('落下后 0.4 秒：波前上浓（挤在一起）、里面薄（被推开）、前面没动，鬼魂周围一圈约 2 米半径', () => {
+  it('落下后 0.4 秒：波前上浓一点（> 1.1）、里面不薄（没有 trough，≥ 1）、前面没动，鬼魂周围一圈约 2 米半径', () => {
     const w = waveAt(L, 0.4, MIN_W.high);
-    expect(waveDensity(w, L, w.radius)).toBeGreaterThan(1.4); // 波前上
-    expect(waveDensity(w, L, w.radius * 0.45)).toBeLessThan(0.9); // 里面
+    expect(waveDensity(w, L, w.radius)).toBeGreaterThan(1.1); // 波前上
+    expect(waveDensity(w, L, w.radius * 0.45)).toBeGreaterThanOrEqual(1 - 1e-9); // 里面
     expect(waveDensity(w, L, w.radius + 4 * w.halfWidth)).toBeCloseTo(1, 3); // 前面没动
     expect(w.radius).toBeGreaterThan(1.5);
   });
-  it('没有「缕」（wisp = 1）时只是浓一下薄一下；有缕时撕成一缕一缕：缝里（0.2）比缕上（1.7）薄', () => {
+  it('没有变薄：没有「缕」（wisp = 1）时密度倍数处处 ≥ 1；有缕时最多掉一成（缝里 0.2）', () => {
+    for (let k = 0; k <= 80; k++) {
+      const w = waveAt(L, k / 60, MIN_W.high);
+      for (let r = 0; r <= 5; r += 0.05) {
+        expect(waveDensity(w, L, r, 1), `t = ${k / 60}, r = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(1 - 1e-9);
+        expect(waveDensity(w, L, r, DRAFT.wisp[0]), `t = ${k / 60}, r = ${r.toFixed(2)}`).toBeGreaterThan(0.9);
+      }
+    }
+  });
+  it('有缕时撕成一缕一缕：缝里（0.2）比缕上（1.7）薄；不在波前上（前面很远）时缕系数不起作用', () => {
     const w = waveAt(L, 0.3, MIN_W.high);
     expect(waveDensity(w, L, w.radius, 0.2)).toBeLessThan(waveDensity(w, L, w.radius, 1.7));
-    // 不在波前上、也不在里面（前面很远）时缕系数不起作用
     expect(waveDensity(w, L, w.radius + 6, 0.2)).toBeCloseTo(1, 6);
     expect(waveDensity(w, L, w.radius + 6, 1.7)).toBeCloseTo(1, 6);
   });
@@ -131,6 +141,15 @@ describe('waveDensity：推开的是什么样子', () => {
       const w = waveAt(L, k / 60, MIN_W.low);
       for (let r = 0; r <= 5; r += 0.1) expect(waveDensity(w, L, r, 0.2)).toBeGreaterThanOrEqual(0);
     }
+  });
+  it('圈还在（防止为了数得过去把它关掉）：波前上至少浓两成（compress ≥ 0.2）、花纹至少被推 5 厘米（push ≥ 0.05）、波前至少 0.5 米半宽', () => {
+    expect(L.compress).toBeGreaterThanOrEqual(0.2);
+    expect(L.push).toBeGreaterThanOrEqual(0.05);
+    expect(waveAt(L, 0.06, MIN_W.high).shove).toBeGreaterThanOrEqual(0.05 * 0.99);
+    expect(waveAt(L, 0.1, MIN_W.high).halfWidth).toBeGreaterThanOrEqual(0.5);
+    // 波前走到中途（0.25 秒，1.5 米）时，那一点上最浓能到 1.1 以上
+    const w = waveAt(L, 0.25, MIN_W.high);
+    expect(waveDensity(w, L, w.radius)).toBeGreaterThan(1.1);
   });
 });
 
@@ -172,95 +191,99 @@ function lampSeries(): { lamp: number[]; drop: number } {
   return { lamp, drop };
 }
 
-/** 一点上（离鬼魂 r 米、缕系数 wisp）雾的亮度曲线：落下之前是 1，之后是气浪的密度倍数 */
-const fogCurve = (n: number, drop: number, r: number, wisp: number, hz = HZ, minW = MIN_W.high) =>
-  Array.from({ length: n }, (_, k) => (k < drop * (hz / HZ) ? 1 : waveDensity(waveAt(L, k / hz - drop / HZ, minW), L, r, wisp)));
+/** 数的门槛：比 countDips 默认的 0.1 严一点，留 0.02 的余量（修复第 1 轮：逐点落差 ≤ 0.08） */
+const STRICT = 0.08;
+const LAMP = lampSeries();
 
-describe('雾的亮度曲线：用 countDips 数（和灯闪同一个口径）', () => {
-  it('前提：现身这一串灯自己是 3 下，已经占满了任意 1 秒的额度（所以雾不能再多一下）', () => {
-    const { lamp } = lampSeries();
-    expect(countDips(lamp, HZ)).toBeLessThanOrEqual(3);
-    // 最密的那 1 秒里正好是 3 下（蓄力 2 下 + 落下 1 下）
-    const starts = dipStarts(lamp, HZ);
-    expect(starts.filter((t) => t < MANIFEST.windup + 0.5).length).toBe(3);
-  });
+/** 一点上（离鬼魂 r 米、缕系数 wisp）只看密度倍数的雾亮度曲线：落下之前是 1，之后是气浪的密度倍数 */
+const fogCurve = (n: number, drop: number, r: number, wisp: number, p: WaveParams = L, hz = HZ, minW = MIN_W.high) =>
+  Array.from({ length: n }, (_, k) => (k < drop * (hz / HZ) ? 1 : waveDensity(waveAt(p, k / hz - drop / HZ, minW), p, r, wisp)));
 
-  it('每一点上只有一下：半径 0 到 reach + 3 个半宽（每 5 厘米）、缕系数 0.2–1.7（每 0.1），30 / 60 / 120 Hz，高档和低档的网格宽度', () => {
-    const wisp = (DRAFT.wisp as [number, number]);
-    let worst = 0;
-    let checked = 0;
-    for (const hz of [30, 60, 120]) {
-      for (const q of ['high', 'low'] as const) {
-        const n = Math.round((L.time + 0.5) * hz);
-        for (let r = 0; r <= L.reach + 3 * L.width * (1 + L.spread); r += 0.05) {
-          for (let w = wisp[0]; w <= wisp[1] + 1e-9; w += 0.1) {
-            const dips = countDips(fogCurve(n, 0, r, w, hz, MIN_W[q]), hz);
-            worst = Math.max(worst, dips);
-            checked++;
+/** 第一种算法（只看密度倍数）：最严口径下所有点的最大下数。半径 0 到 reach + 3 个半宽（每 5 厘米）、缕系数 0.2–1.7（每 0.1），高档和低档的网格宽度 */
+function worstByMultiplier(p: WaveParams, stopAt = Infinity): number {
+  let worst = 0;
+  for (const q of ['high', 'low'] as const) {
+    for (let r = 0; r <= p.reach + 3 * p.width * (1 + p.spread); r += 0.05) {
+      for (let w = DRAFT.wisp[0]; w <= DRAFT.wisp[1] + 1e-9; w += 0.1) {
+        const fog = fogCurve(LAMP.lamp.length, LAMP.drop, r, w, p, HZ, MIN_W[q]);
+        worst = Math.max(worst, countDips(LAMP.lamp.map((v, k) => v * fog[k]), HZ, STRICT));
+        if (worst >= stopAt) return worst;
+      }
+    }
+  }
+  return worst;
+}
+
+/**
+ * 第二种算法（噪声场 + 取样点位移都算进去）：鬼魂在 (8, 6)，围着它的地板上取点（半径 0.2–3.8 米每 0.2 米 × 8 个方向），
+ * 噪声时间、静态密度（空地 1、墙根堆积 1.8）、镜头（第三人称、娃娃屋）各取几种；每个点一条曲线：灯 × （α / α0），α0 是稳态不透明度，
+ * 只看 α0 ≥ 0.05 的点。返回最大下数和数过的曲线条数；stopAt 给了就在数到这么多下时收工（找反例用，不用数完）
+ */
+function worstByField(p: WaveParams, stopAt = Infinity): { worst: number; curves: number } {
+  const C = { x: 8, z: 6 };
+  let worst = 0, curves = 0;
+  for (const q of ['high', 'low'] as const) {
+    for (const T0 of [1.1, 9.3, 17.7, 31.7, 55.1, 71.3]) {
+      for (const dens of [1, 1.8]) {
+        for (const vk of ['third', 'doll'] as const) {
+          for (let r = 0.2; r <= 3.81; r += 0.2) {
+            for (let a = 0; a < 8; a++) {
+              const phi = (a / 8) * Math.PI * 2 + 0.17;
+              const sx = C.x + r * Math.cos(phi), sz = C.z + r * Math.sin(phi);
+              const a0 = fogAlpha(sx, sz, T0, null, VIEWS[vk], dens);
+              if (a0 < 0.05) continue;
+              const P = LAMP.lamp.map((l, k) => {
+                const age = (k - LAMP.drop) / HZ;
+                return age < 0 ? l : (l * fogAlpha(sx, sz, T0, { cx: C.x, cz: C.z, age, L: p, minW: MIN_W[q] }, VIEWS[vk], dens)) / a0;
+              });
+              worst = Math.max(worst, countDips(P, HZ, STRICT));
+              curves++;
+              if (worst >= stopAt) return { worst, curves };
+            }
           }
         }
       }
     }
-    expect(checked).toBeGreaterThan(5000);
-    expect(worst).toBeLessThanOrEqual(1);
+  }
+  return { worst, curves };
+}
+
+describe('灯闪：这一圈不能让任何一点的亮度多暗一下（灯 × 雾逐点相乘，countDips 门槛 0.08）', () => {
+  it('前提：现身这一串灯自己是 3 下（蓄力 2 + 落下 1），门槛 0.08 也一样；已经占满了任意 1 秒的额度，雾不能再多一下', () => {
+    expect(countDips(LAMP.lamp, HZ)).toBe(3);
+    expect(countDips(LAMP.lamp, HZ, STRICT)).toBe(3);
+    // 最密的那 1 秒里正好是 3 下
+    expect(dipStarts(LAMP.lamp, HZ, STRICT).filter((t) => t < MANIFEST.windup + 0.5).length).toBe(3);
   });
 
-  it('整圈合起来看：半径 3 / 4 / 6 米以内按面积取平均，雾的总量不少（推开、挤到波前上），平均亮度一次都不暗；叠上灯那一串仍是 3 下', () => {
-    const { lamp, drop } = lampSeries();
-    for (const R0 of [3, 4, 6]) {
-      const mean = (t: number) => {
-        let sum = 0, area = 0;
-        for (let r = 0.025; r < R0; r += 0.05) {
-          sum += waveDensity(waveAt(L, t, MIN_W.high), L, r, 1) * r;
-          area += r;
-        }
-        return sum / area;
-      };
-      const fog = lamp.map((_, k) => (k < drop ? 1 : mean((k - drop) / HZ)));
-      expect(Math.min(...fog), `R0 = ${R0}`).toBeGreaterThanOrEqual(1 - 1e-6);
-      expect(countDips(fog, HZ), `R0 = ${R0}`).toBeLessThanOrEqual(1);
-      expect(countDips(lamp.map((v, k) => v * fog[k]), HZ), `R0 = ${R0}`).toBeLessThanOrEqual(3);
-    }
-  });
+  it('第一种算法（只看气浪的密度倍数）：整串（蓄力 2 + 落下 1 + 这一圈）每一点上任意 1 秒最多 3 下', () => {
+    expect(worstByMultiplier(L)).toBeLessThanOrEqual(3);
+  }, 60_000);
 
-  it('鬼魂脚下（半径 0.5 米以内）：变薄和落下那一下灯暗同一刻开始（0.1 秒内），叠上灯那一串仍是 3 下', () => {
-    const { lamp, drop } = lampSeries();
-    for (let r = 0; r <= 0.5001; r += 0.05) {
-      for (const wisp of [0.2, 1, 1.7]) {
-        const fog = fogCurve(lamp.length, drop, r, wisp);
-        const starts = dipStarts(fog, HZ).map((t) => t - drop / HZ);
-        expect(starts.length, `r = ${r.toFixed(2)}, wisp = ${wisp}`).toBe(1);
-        expect(starts[0], `r = ${r.toFixed(2)}, wisp = ${wisp}`).toBeLessThan(0.1);
-        expect(countDips(lamp.map((v, k) => v * fog[k]), HZ), `r = ${r.toFixed(2)}, wisp = ${wisp}`).toBeLessThanOrEqual(3);
-      }
-    }
-  });
+  it('第二种算法（噪声场、取样点位移都算进去）：几千条曲线（高低档、两种镜头、几种噪声时间和静态密度），整串每一条任意 1 秒最多 3 下', () => {
+    const r = worstByField(L);
+    expect(r.curves).toBeGreaterThan(3000);
+    expect(r.worst).toBeLessThanOrEqual(3);
+  }, 60_000);
 
-  it('已知的限度（写在报告里）：灯 × 雾逐点相乘（最严的口径，假设那一点的亮度全来自被灯照亮的雾）时，波前扫过的那一圈（半径 0.6–2.3 米）最坏 4 下，'
-    + '其余半径（鬼魂脚下、2.4 米以外）仍是 3 下。钉住它别再变坏；它是一条窄带（半宽 0.35 米）往外走，每个点上就那一下，不是整屏闪', () => {
-    const { lamp, drop } = lampSeries();
-    let worst = 0;
-    for (let r = 0; r <= L.reach + 1.5; r += 0.1) {
-      let m = 0;
-      for (let w = DRAFT.wisp[0]; w <= DRAFT.wisp[1] + 1e-9; w += 0.1) {
-        const fog = fogCurve(lamp.length, drop, r, w);
-        m = Math.max(m, countDips(lamp.map((v, k) => v * fog[k]), HZ));
-      }
-      worst = Math.max(worst, m);
-      if (r <= 0.5 || r >= 2.4) expect(m, `r = ${r.toFixed(1)}`).toBeLessThanOrEqual(3);
-    }
-    expect(worst).toBeLessThanOrEqual(4);
-  });
+  it('这个口径数得出来：美术总监原定的数（compress 1.35 / trough 0.5 / push 0.3 / stir 0.6 / 半宽 0.35）在同样的口径下会多出一下（4 下）', () => {
+    const original: WaveParams = { ...L, width: 0.35, compress: 1.35, trough: 0.5, push: 0.3, stir: 0.6 };
+    expect(worstByMultiplier(original, 4)).toBeGreaterThanOrEqual(4);
+    expect(worstByField(original, 4).worst).toBeGreaterThanOrEqual(4);
+  }, 60_000);
 
-  it('曲线只有三段：涨（波前过来）、落（过去以后薄）、慢慢涨回 1，每一段都是单向的，不过冲、不来回', () => {
+  it('push 不能再大：0.15 米（现在的 2.5 倍）就有云边上的点多出一下；compress 0.4（现在的 1.6 倍）也有', () => {
+    expect(worstByField({ ...L, push: 0.15 }, 4).worst).toBeGreaterThanOrEqual(4);
+    expect(worstByField({ ...L, compress: 0.4 }, 4).worst).toBeGreaterThanOrEqual(4);
+  }, 60_000);
+
+  it('曲线只有「涨 → 落回 1」两段，每一段都是单向的，不过冲、不来回（只看密度倍数，缕系数 1）', () => {
     for (const r of [0.1, 0.2, 0.8, 1.5, 2.2, 2.8]) {
-      const fog = fogCurve(Math.round((L.time + 0.3) * 120), 0, r, 1, 120);
+      const fog = fogCurve(Math.round((L.time + 0.3) * 120), 0, r, 1, L, 120);
       const iMax = fog.indexOf(Math.max(...fog));
-      let iMin = iMax;
-      for (let k = iMax; k < fog.length; k++) if (fog[k] < fog[iMin]) iMin = k;
       for (let k = 1; k <= iMax; k++) expect(fog[k], `r = ${r} 涨, k = ${k}`).toBeGreaterThanOrEqual(fog[k - 1] - 1e-6);
-      for (let k = iMax + 1; k <= iMin; k++) expect(fog[k], `r = ${r} 落, k = ${k}`).toBeLessThanOrEqual(fog[k - 1] + 1e-6);
-      for (let k = iMin + 1; k < fog.length; k++) expect(fog[k], `r = ${r} 回, k = ${k}`).toBeGreaterThanOrEqual(fog[k - 1] - 1e-6);
+      for (let k = iMax + 1; k < fog.length; k++) expect(fog[k], `r = ${r} 落, k = ${k}`).toBeLessThanOrEqual(fog[k - 1] + 1e-6);
+      expect(Math.min(...fog)).toBeGreaterThanOrEqual(1 - 1e-9); // 没有变薄
       expect(fog[fog.length - 1]).toBeCloseTo(1, 2);
     }
   });
@@ -318,7 +341,7 @@ describe('现身事件：只有落下推雾', () => {
     run(0.4);
     expect(f.drafts[0].ring.value.x).toBeGreaterThan(1.8);
     expect(f.drafts[0].ring.value.x).toBeLessThan(2.2);
-    expect(f.drafts[0].amt.value.w).toBeGreaterThan(0.3);
+    expect(f.drafts[0].amt.value.w).toBeGreaterThan(0.3 * L.compress); // 0.4 秒时幅度还剩约一半（(1 − u)^1.5）
     run(L.time + 0.1);
     expect(f.drafts[0].amt.value.w).toBe(0);
     expect(f.drafts[0].ring.value.z).toBe(0);
