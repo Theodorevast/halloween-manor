@@ -770,8 +770,8 @@ describe('dawn()：天亮', () => {
     }
   });
 
-  test('天亮以后的兜底：要出门的人 8 秒里挪不到半米就放他出去（leaving 带 calm，逃跑的算吓跑）；天亮之前不管', () => {
-    // 摆一个要出门却动不了的人：每一步把他放回原处，等于被什么卡住了
+  test('门口卡死的兜底（一直开着）：逃跑的、天亮的 leaving 的人 8 秒里挪不到半米就放他出去（leaving 带 calm，逃跑的算吓跑）；闲逛的不管', () => {
+    // 摆一个动不了的人：每一步把他放回原处，等于被什么卡住了
     const hold = (n: NpcState) => {
       const at = { x: n.pos.x, z: n.pos.z };
       return () => {
@@ -783,55 +783,73 @@ describe('dawn()：天亮', () => {
       const w = createWorld({ seed, autoSpawn: false });
       const walker = w.spawn({ pos: BEDROOM_FAR, personality: 'brave' });
       const runner = w.spawn({ pos: { x: 8, z: 6 }, personality: 'timid' });
-      scareAway(runner);
-      runFor(w, 0.3);
-      expect(runner.mode).toBe('fleeing');
       const holds = [hold(walker), hold(runner)];
+      scareAway(runner); // 下一步起逃跑
       return { w, walker, runner, each: () => holds.forEach((h) => h()) };
     };
 
-    // 天亮之前：卡多久都不管（兜底不是平常的夜里用的），一个逃跑的、一个闲逛的都还在
-    const quiet = setup(52);
-    runFor(quiet.w, 30, quiet.each);
-    expect(quiet.w.state.npcs.map((n) => n.mode)).toEqual(['wander', 'fleeing']);
+    // 平常的夜里（没天亮）：卡住的逃跑的人 8 秒左右放出去，算吓跑；同样卡着的闲逛的人不归它管，一直在
+    const night = setup(52);
+    const exits0 = runFor(night.w, 30, night.each).filter((x) => x.e.type === 'exit');
+    expect(exits0.map((x) => x.e)).toEqual([{ type: 'exit', npc: night.runner.id, name: night.runner.name, total: 1 }]);
+    expect(exits0[0].t).toBeGreaterThan(7.9);
+    expect(exits0[0].t).toBeLessThan(8.3);
+    expect(night.w.state.npcs.map((n) => n.mode)).toEqual(['wander']);
+    expect(night.w.state.scaredOff).toBe(1);
 
-    // 天亮以后：8 秒左右放出去，各自按自己的身份算
+    // 天亮以后：闲逛的也成了 leaving，一样卡 8 秒左右放出去，带 calm、不算吓跑
     const { w, walker, runner, each } = setup(51);
     w.dawn();
-    const t0 = w.state.time;
-    const stamped = runFor(w, 12, each);
-    const exits = stamped.filter((x) => x.e.type === 'exit');
+    const exits = runFor(w, 12, each).filter((x) => x.e.type === 'exit');
     expect(exits.map((x) => x.e)).toEqual([
       { type: 'exit', npc: walker.id, name: walker.name, total: 0, calm: true },
       { type: 'exit', npc: runner.id, name: runner.name, total: 1 },
     ]);
     for (const x of exits) {
-      expect(x.t - t0).toBeGreaterThan(7.9);
-      expect(x.t - t0).toBeLessThan(8.3);
+      expect(x.t).toBeGreaterThan(7.9);
+      expect(x.t).toBeLessThan(8.3);
     }
     expect(w.state.scaredOff).toBe(1);
     expect(w.state.npcs.length).toBe(0);
   });
 
-  test('现有的毛病：两个逃跑的人在前门门洞里迎面对上会互相卡死（这一路没改它）；天亮以后 8 秒左右放他们出去，都算吓跑', () => {
-    const w = createWorld({ seed: 53, autoSpawn: false });
+  test('平常的夜里两个逃跑的人在前门门洞里迎面对上卡住（现有的毛病，没改它）：约 8 秒后被放出去、算吓跑，后面来的访客进得了门，不用等到天亮', () => {
+    // 正式游戏的开局（自动生成 + NIGHT.openingGaps）：第 2 秒、之后隔 openingGaps 的秒数各来一位
+    const w = createWorld({ seed: 53, openingGaps: NIGHT.openingGaps });
     // 两个人都朝南站在门洞北边一点（给了朝向，和种子无关）：同时吓跑，在门洞里一个往南一个往回走，正好迎面
     const a = w.spawn({ pos: { x: 8.05, z: 11.3 }, personality: 'timid', lookDir: Math.PI / 2 });
     const b = w.spawn({ pos: { x: 7.95, z: 11.9 }, personality: 'timid', lookDir: Math.PI / 2 });
     scareAway(a);
     scareAway(b);
-    // 前提：不到天亮，他们就卡在门洞里，一个钟头也出不去（以后要是把这个卡死修了，这一条前提会先失败：把这条测试改成别的卡法或者删掉）
-    runFor(w, 40);
-    expect(w.state.npcs.map((n) => n.mode)).toEqual(['fleeing', 'fleeing']);
+    // 前提：第 6 秒，两个人还卡在门洞里，第 2 秒到的那位访客被堵在门外进不来
+    // （以后要是把卡死从根上修了，这一条前提会先失败：把这条测试改成别的卡法）
+    const stamped = runTo(w, 6);
+    expect(w.state.npcs.map((n) => [n.id, n.mode])).toEqual([[a.id, 'fleeing'], [b.id, 'fleeing'], [3, 'entering']]);
     expect(Math.hypot(a.pos.x - FRONT_DOOR.inside.x, a.pos.z - FRONT_DOOR.inside.z)).toBeLessThan(2);
-    w.dawn();
-    const t0 = w.state.time;
-    const ev = events(runUntilEmpty(w, 20));
-    expect(w.state.npcs.length).toBe(0);
-    expect(w.state.time - t0).toBeGreaterThan(7.5); // 8 秒里没动才放
-    expect(w.state.time - t0).toBeLessThan(10);
-    expect(ofType(ev, 'exit').map((e) => [e.total, e.calm])).toEqual([[1, undefined], [2, undefined]]);
+    // 之后照常走到第 60 秒，记下每位访客走过的状态
+    const modes = new Map<number, Set<string>>();
+    stamped.push(...runTo(w, 60, () => {
+      for (const n of w.state.npcs) {
+        if (!modes.has(n.id)) modes.set(n.id, new Set());
+        modes.get(n.id)!.add(n.mode);
+      }
+    }));
+    // 卡住的两个人 8 秒左右被放出去，都算吓跑（没有 calm）
+    const exits = stamped.filter((x) => x.e.type === 'exit');
+    expect(exits.map((x) => x.e)).toEqual([
+      { type: 'exit', npc: a.id, name: a.name, total: 1 },
+      { type: 'exit', npc: b.id, name: b.name, total: 2 },
+    ]);
+    for (const x of exits) {
+      expect(x.t).toBeGreaterThan(7.9);
+      expect(x.t).toBeLessThan(8.3);
+    }
     expect(w.state.scaredOff).toBe(2);
+    // 后面来的三位访客（第 2、2 + g0、2 + g0 + g1 秒）都进了屋、闲逛，没有一位还堵在门外
+    const [g0, g1] = NIGHT.openingGaps;
+    expect(spawnTimes(stamped).slice(2).map((t) => Math.round(t))).toEqual([SPAWN.first, SPAWN.first + g0, SPAWN.first + g0 + g1]);
+    for (const id of [3, 4, 5]) expect(modes.get(id)?.has('wander')).toBe(true);
+    expect(w.state.npcs.map((n) => [n.id, n.mode === 'wander'])).toEqual([[3, true], [4, true], [5, true]]);
   });
 
   test('各个种子、各种折腾（附身、引诱、现身、鬼魂贴着）里天亮：之后没人回到闲逛 / 警觉 / 进门，没人进来，都出了门，吓跑的计数只算被吓跑的', () => {
