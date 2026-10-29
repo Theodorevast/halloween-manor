@@ -66,6 +66,28 @@ describe('机关：设下、上限、到期', () => {
     expect(ofType(run(w, 1), 'trap')).toEqual([]);
   });
 
+  test('到了时机却附身不了（物件在冷却中）：就在本该触发的那一步作废——armed 归零、发 trap expired，不发 sprung / trigger，之后不再试（最终审查 S M4）', () => {
+    // 同下面「背后型（摇椅）」那条：访客从旁边走过、摇椅到了他背后时触发
+    const play = (stuck: boolean) => {
+      const w = createWorld({ seed: 113, autoSpawn: false });
+      w.spawn({ pos: { x: 11.75, z: 4.25 }, personality: 'average', lookDir: 0, goal: { x: 15.25, z: 4.25 } });
+      expect(w.arm('rocking-chair')).toBe(true);
+      // 正常走不到：armTrap 要求冷却为 0，会设冷却的只有 triggerObject，它同时清掉 armed。这里直接改状态，模拟以后改出来的这种情形
+      if (stuck) obj(w, 'rocking-chair').cooldown = 30;
+      return { w, ...stepUntil(w, (e) => e.type === 'trap' && e.object === 'rocking-chair' && e.phase !== 'armed') };
+    };
+    const ok = play(false), stuck = play(true);
+    expect(ofType(ok.ev, 'trap')).toEqual([{ type: 'trap', object: 'rocking-chair', phase: 'sprung' }]);
+    expect(stuck.at).toBe(ok.at);
+    expect(ofType(stuck.ev, 'trap')).toEqual([{ type: 'trap', object: 'rocking-chair', phase: 'expired' }]);
+    expect(ofType([...stuck.before, ...stuck.ev], 'trigger')).toEqual([]);
+    expect(obj(stuck.w, 'rocking-chair').armed).toBe(0);
+    // 他还在背后的范围里：不再每步试着触发，也没有别的机关事件
+    const later = run(stuck.w, 2);
+    expect(ofType(later, 'trap')).toEqual([]);
+    expect(ofType(later, 'trigger')).toEqual([]);
+  });
+
   test('TRAP.expire 秒没人来：trap expired、armed 归零、物件没有触发（不进冷却）', () => {
     const w = createWorld({ seed: 112, autoSpawn: false });
     w.arm('portrait');

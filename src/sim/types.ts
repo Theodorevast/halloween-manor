@@ -166,7 +166,11 @@ export type SimEvent =
   | { type: 'reveal'; npc: number; on: boolean }
   /** 现身：windup 蓄力开始、drop 落下（scared = 被吓到的人）、end 收回 */
   | { type: 'manifest'; phase: 'windup' | 'drop' | 'end'; pos: Vec2; scared: number[] }
-  /** 机关：armed 设下、sprung 触发、expired 设下后一直没触发、到时间自动解除 */
+  /**
+   * 机关：armed 设下、sprung 触发、expired 设下后一直没触发、到时间自动解除（到了时机却附身不了时也按 expired 作废，见 world.ts 的 fireTrap）。
+   * 玩家直接附身设下的物件、让机关跟着作废时不发事件（最终审查 S M3）：机关状态以 ScareObjectState.armed 为准，
+   * 画面（霜、空心眼睛、悬停标签）都每帧读它，不靠这个事件
+   */
   | { type: 'trap'; object: string; phase: 'armed' | 'sprung' | 'expired' };
 
 /** setGhost 的参数：鬼魂在哪、此刻是不是在墙里（穿墙声）。只给 { x, z } 也行 */

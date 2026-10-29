@@ -245,6 +245,12 @@ export interface Npc {
   backedOff: boolean;
   /** 正在后退（retreat）：走的时候手电一直照着这里（吓到他的地方），到了以后面朝这里左右照 */
   retreatFrom: Vec2 | null;
+  /**
+   * 被现身吓到、后退完要接着去的地方（最终审查 S M7a，restore 里记下）：僵住前正在进门（接着走到 to，进门后的位置）、
+   * 正在警觉（接着去查看 to，声源），或者僵住期间听到了声音（去查看它）。后退、面朝吓到他的地方照完以后接着去（见 moveOn）；
+   * null = 照常闲逛。发毛后退半步（feelGhost）不记：那不是被吓到，退完照旧闲逛
+   */
+  afterRetreat: { mode: 'entering' | 'alert'; to: Vec2 } | null;
   /** 上一步他的手电照没照着鬼魂（world.ts 写；变了就发 reveal） */
   litGhost: boolean;
   /** 穿墙声：听见一次以后到什么时候（模拟时间）之前不再算（GHOST.hearCooldown） */
@@ -323,6 +329,7 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     onsetAt: Infinity,
     backedOff: false,
     retreatFrom: null,
+    afterRetreat: null,
     litGhost: false,
     wallReadyAt: -Infinity,
   };
@@ -647,7 +654,8 @@ const RETREAT_SAMPLE = 0.1;
 /**
  * 后退（发毛贴得太近、被现身吓到）：沿远离 from 的方向，找一个离 from 至少 dist 米、能走、离现在的位置最近的点
  * （正后方走不了就往两边偏，最多偏 90°），寻路走过去（转入闲逛）；走的时候手电一直照着 from，
- * 到了以后面朝 from 左右照一会儿，再照常闲逛。已经够远、或者附近没有能走的点，就原地转向 from 照一照。
+ * 到了以后面朝 from 左右照一会儿，再照常闲逛；被现身吓到的人有 afterRetreat 时接着做原来的事（见 restore、moveOn）。
+ * 已经够远、或者附近没有能走的点，就原地转向 from 照一照。
  * 受惊中调（被现身吓到）：先记下，僵住结束时再退；逃跑中、已离开的人不退
  */
 export function retreat(npc: Npc, ctx: NpcCtx, from: Vec2, dist: number): void {
@@ -759,7 +767,7 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
         npc.lookLeft -= dt;
         turnBack(npc, dt);
         lookToward(npc, dt, npc.lookBase + BEHAVIOR.sweepAmp * Math.sin((TAU * npc.lookT) / BEHAVIOR.sweepPeriod));
-        if (npc.lookLeft <= 0) beginWander(npc, ctx);
+        if (npc.lookLeft <= 0) moveOn(npc, ctx);
       }
       break;
     }
@@ -813,6 +821,7 @@ export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'> & Partial
   s.modeTime = 0;
   npc.source = null;
   npc.retreatFrom = null;
+  npc.afterRetreat = null;
   const [ci, cj] = cellOf(s.pos.x, s.pos.z);
   const here = roomAt(ci, cj);
   const choices = ROOM_IDS.filter((r) => r !== here);
@@ -874,6 +883,42 @@ function startLook(npc: Npc, ctx: Pick<NpcCtx, 'rng'>, base: number) {
   npc.lookBase = base;
 }
 
+/**
+ * 闲逛着后退完、照完（或者后退的路被挡住走不通）：有 afterRetreat 就接着去（最终审查 S M7a），没有就照常闲逛。
+ * 原来的目标在他要绕开的圈里（就是刚吓到他的那次现身附近）就不去了：被吓到的人绕开那里，闲逛也不挑那里。
+ * 平常闲逛到了、左右照完也走这里（那时 afterRetreat 为 null，就是 beginWander）
+ */
+function moveOn(npc: Npc, ctx: NpcCtx) {
+  const next = npc.afterRetreat;
+  npc.afterRetreat = null;
+  if (next && !avoided(npc, ctx, next.to)) {
+    if (next.mode === 'alert') {
+      beginAlert(npc, ctx, next.to);
+      return;
+    }
+    if (resumeEntering(npc, ctx, next.to)) return;
+  }
+  beginWander(npc, ctx);
+}
+
+/**
+ * 接着进门：走到 goal（进门后的位置），到了再开始闲逛。在屋里就寻路过去（绕开他要绕的圈），还在门外那一段就直线走（同 createNpc）。
+ * 已经到了返回 false
+ */
+function resumeEntering(npc: Npc, ctx: NpcCtx, goal: Vec2): boolean {
+  const s = npc.s;
+  if (Math.hypot(goal.x - s.pos.x, goal.z - s.pos.z) <= BEHAVIOR.arrive) return false;
+  const path = ctx.nav.grid.walkableAt(s.pos) ? pathFor(npc, ctx, goal) : [{ x: goal.x, z: goal.z }];
+  if (!path || path.length === 0) return false;
+  s.mode = 'entering';
+  s.modeTime = 0;
+  npc.source = null;
+  npc.retreatFrom = null;
+  setPath(npc, path);
+  npc.act = 'walk';
+  return true;
+}
+
 /** 警觉：按 alertPath 走过去（走到多近看性格：TRAITS.investigateDist）；已经在查看位置或寻路失败就原地查看 */
 function beginAlert(npc: Npc, ctx: NpcCtx, source: Vec2) {
   const s = npc.s;
@@ -881,6 +926,7 @@ function beginAlert(npc: Npc, ctx: NpcCtx, source: Vec2) {
   s.modeTime = 0;
   npc.source = { x: source.x, z: source.z };
   npc.retreatFrom = null;
+  npc.afterRetreat = null; // 新听到的声音（或者接着查看的那一个）就是现在的目标
   const path = alertPath(ctx.nav.grid, s.pos, source, TRAITS[s.personality].investigateDist, zonesOf(npc, ctx), ctx.now);
   if (path && path.length > 0) {
     setPath(npc, path);
@@ -944,6 +990,7 @@ function beginFlee(npc: Npc, ctx: NpcCtx) {
   npc.transfixPos = null;
   npc.pendingRetreat = null;
   npc.retreatFrom = null;
+  npc.afterRetreat = null;
   clearNotice(npc);
   const [i, j] = cellOf(s.pos.x, s.pos.z);
   const path = inGrid(i, j) ? pathFor(npc, ctx, DOOR_POINT) ?? [{ ...DOOR_POINT }] : [];
@@ -969,18 +1016,24 @@ function snapshot(npc: Npc): Resume {
 
 /**
  * 受惊结束：恢复之前的状态（路径还在 s.path 里），手电按限速转回去；僵住期间听到了声音就去查看。
- * 被现身吓到的（pendingRetreat）不回原来的事，转身后退。
+ * 被现身吓到的（pendingRetreat）先转身后退，退完、照完再接着做原来的事（最终审查 S M7a，见 afterRetreat）：
+ * 僵住前在进门的接着进门，在警觉的接着去查看，僵住期间听到了声音的去查看它。
  * 胆大的被惊吓物件吓完，有 TRAITS.recheck 的几率先再照一眼那个物件（察觉那一拍，盯 RECHECK_HOLD 秒）才走
  */
 function restore(npc: Npc, ctx: NpcCtx) {
   const back = npc.pendingRetreat;
   if (back) {
+    const r = npc.resume, s = npc.s;
     npc.pendingRetreat = null;
     npc.resume = null;
     npc.startleLeft = 0;
     npc.lastScareSrc = null;
-    npc.s.mode = 'wander'; // 先离开受惊（retreat 在受惊中只会记下、不会走）
-    npc.s.modeTime = 0;
+    // 原来要去哪（进门都是走到 FRONT_DOOR.inside）。僵住前已经在后退（闲逛）的，保留第一次记下的
+    if (r?.alertAt) npc.afterRetreat = { mode: 'alert', to: { ...r.alertAt } };
+    else if (r?.mode === 'alert' && r.source) npc.afterRetreat = { mode: 'alert', to: { ...r.source } };
+    else if (r?.mode === 'entering') npc.afterRetreat = { mode: 'entering', to: { ...FRONT_DOOR.inside } };
+    s.mode = 'wander'; // 先离开受惊（retreat 在受惊中只会记下、不会走）
+    s.modeTime = 0;
     retreat(npc, ctx, back.from, back.dist);
     return;
   }
@@ -1530,7 +1583,7 @@ function unstick(npc: Npc, ctx: NpcCtx): void {
     return;
   }
   if (replan(npc, ctx)) return;
-  if (s.mode === 'wander') beginWander(npc, ctx);
+  if (s.mode === 'wander') moveOn(npc, ctx);
   else if (s.mode === 'alert') startInvestigate(npc);
 }
 

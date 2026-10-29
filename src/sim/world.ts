@@ -89,10 +89,18 @@ export function createWorld(opts: WorldOptions): World {
 
   /**
    * 机关到了时机：和玩家点一下一样附身（恐惧值 × TRAP.fearMult），发 trap sprung + trigger。
-   * 背后型：蓄势的声音让附近听得见、还没看着它的人察觉（kind sound）、回头——回过头来看见了，照常被吓到
+   * 背后型：蓄势的声音让附近听得见、还没看着它的人察觉（kind sound）、回头——回过头来看见了，照常被吓到。
+   * 附身不了（物件在冷却中）：机关就此作废，和到期一样发 trap expired（最终审查 S M4）。不然它一直设着，
+   * 人在范围里时每步都想触发、倒计时也不走，等冷却一好就在随便哪一刻发作。现在走不到：armTrap 要求冷却为 0，
+   * 会设冷却的只有 triggerObject，它同时清掉 armed
    */
   function fireTrap(o: ScareObject) {
-    if (!triggerObject(o, TRAP.fearMult)) return;
+    if (!triggerObject(o, TRAP.fearMult)) {
+      o.state.armed = 0;
+      o.trapWait = null;
+      ctx.events.push({ type: 'trap', object: o.state.id, phase: 'expired' });
+      return;
+    }
     ctx.events.push({ type: 'trap', object: o.state.id, phase: 'sprung' });
     ctx.events.push({ type: 'trigger', object: o.state.id, scareType: o.state.type, variant: variantRng.next() });
     if (trapKind(o) !== 'behind') return;
