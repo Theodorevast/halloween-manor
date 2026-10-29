@@ -334,7 +334,7 @@ interface Walker {
   creakAt: number;
 }
 
-const WALKING = new Set(['entering', 'wander', 'alert', 'fleeing']);
+const WALKING = new Set(['entering', 'wander', 'alert', 'fleeing', 'leaving']);
 
 /** timed：声道的移动按 now 安排进参数时间线（离线测量：渲染开始前就要把整段走路排好）；实时用不着 */
 export function createCrowd(bus: Bus, timed = false): Crowd {

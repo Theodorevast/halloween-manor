@@ -14,7 +14,11 @@ export type Personality = 'timid' | 'average' | 'brave';
  * entering 进门：从门外走进门厅
  * gone     已离开（下一步从 npcs 里移除）
  */
-export type NpcMode = 'entering' | 'wander' | 'alert' | 'startled' | 'fleeing' | 'gone';
+/**
+ * leaving（2026-10-30「一夜」的天亮）：不是被吓跑，是天快亮了自己走：按走路的速度走到前门出去（exit 事件带 calm）。
+ * 路上照样能被吓到（吓到就改成 fleeing）
+ */
+export type NpcMode = 'entering' | 'wander' | 'alert' | 'startled' | 'fleeing' | 'leaving' | 'gone';
 
 /** 察觉的来源：声音（引诱、尖叫、鬼魂穿墙声）、手电照到鬼魂、开始发毛、现身蓄力 */
 export type NoticeKind = 'sound' | 'ghost' | 'chill' | 'manifest';
@@ -152,7 +156,8 @@ export type SimEvent =
   /** 恐惧值涨满，开始逃跑（同时触发 hit-stop） */
   | { type: 'flee'; npc: number }
   /** 走出前门。total = 今晚累计吓跑人数 */
-  | { type: 'exit'; npc: number; name: string; total: number }
+  /** calm：天亮自己走的（World.dawn），不算吓跑，total 不加 */
+  | { type: 'exit'; npc: number; name: string; total: number; calm?: boolean }
   /**
    * 鬼魂贴近带来的寒意（第三人称改版）。neck = true 时是「后颈一凉」的惊吓（贴得很近停留够久），
    * 紧跟着同一步有一个 object = GHOST_SOURCE 的 startle；
@@ -202,6 +207,11 @@ export interface World {
   close(): void;
   /** 收夜以后玩家选 Keep haunting：照常补人（和开局之后一样，按 SPAWN.delay 一个一个来） */
   reopen(): void;
+  /**
+   * 天亮（2026-10-30：用户要「5 分钟内能玩完的完整游戏」）：屋里还没走的人（不在逃跑的）都改成 leaving，按走路的速度出前门，
+   * 出门时 exit 事件带 calm。不再有人进来（等于先 close）
+   */
+  dawn(): void;
 }
 
 export interface SpawnOptions {

@@ -63,6 +63,9 @@ export const STRINGS = {
     /** 一夜（2026-10-30）：收夜那一刻；收夜时屋里没人、最后再来的那一位 */
     lastCall: 'No one else is coming tonight.',
     lastArrival: (name: string) => `${name} is the last to arrive.`,
+    /** 天亮：还没被吓走的人自己出门（World.dawn） */
+    dawn: 'The sky is growing pale.',
+    leftCalm: (name: string) => `${name} walked out into the morning`,
   },
   /**
    * 上手（2026-10-30 试玩报告 P1-1 / P1-2 / P1-3，用户选了「开场和提示」「标签说实话」）。
@@ -117,11 +120,15 @@ export const STRINGS = {
     scream: (time: string) => `ran when someone screamed, at ${time}`,
     trap: (prop: string, time: string) => `the ${prop.toLowerCase()} was waiting for them at ${time}`,
     stillInside: 'still inside',
+    /** 天亮自己走的（exit 带 calm） */
+    leftAtDawn: (time: string) => `walked out at ${time}, unafraid`,
     /** 人太多时：只写前面这么多行，剩下的一句带过 */
     andOthers: (n: string) => `and ${n} others`,
     /** 页脚两三句：数字用英文单词写在句子里，不做大号数字、不做表格、不打分 */
     footer: {
       cameRan: (came: string, ran: string) => `${came} came in. ${ran} ran.`,
+      /** 有人天亮自己走了 */
+      neverRan: (n: string) => `${n} never ran.`,
       noneSaw: 'None of them saw you.',
       someSaw: (n: string) => `${n} of them saw you.`,
       mostWork: (prop: string) => `The ${prop.toLowerCase()} did most of the work.`,
