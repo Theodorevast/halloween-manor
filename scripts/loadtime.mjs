@@ -41,10 +41,19 @@ const JSON_OUT = opt('--json', `.logs/loadtime-${new Date().toISOString().replac
 /** 等开场按钮最多多久；按钮可用以后，等其余几套造型下载完、加入轮换最多多久（毫秒） */
 const TIMEOUT = { ready: 180000, rest: 120000 };
 
-/** 资源归类：访客模型单独列（第一套 / 其余），其余按扩展名 */
-const kindOf = (url, firstGlb) => {
+/**
+ * 资源归类：GLB 按路径分——访客造型（public/assets/visitors/，最先请求的那一套是「第一套」，开场按钮只等它）、
+ * 鬼魂模型（public/assets/ghost/，和第一套同时下载，见 main.ts 的 boot）、占位狐狸（mascot/）；其余按扩展名
+ */
+const isVisitorGlb = (url) => /\/visitors\/[^/]+\.glb$/i.test(new URL(url).pathname);
+const kindOf = (url, firstVisitor) => {
   const path = new URL(url).pathname;
-  if (/\.glb$/i.test(path)) return url === firstGlb ? 'glb 第一套' : 'glb 其余';
+  if (/\.glb$/i.test(path)) {
+    if (isVisitorGlb(url)) return url === firstVisitor ? 'glb 第一套造型' : 'glb 其余造型';
+    if (path.includes('/ghost/')) return 'glb 鬼魂';
+    if (path.includes('/mascot/')) return 'glb 占位狐狸';
+    return 'glb 其他';
+  }
   if (/\.js$/i.test(path)) return 'js';
   if (/\.css$/i.test(path)) return 'css';
   if (/\.woff2?$/i.test(path)) return '字体';
@@ -60,14 +69,22 @@ async function measure(target, profile) {
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text().slice(0, 200)); });
-    // 开场按钮从禁用变成可用的那一刻（页面自己的时钟：离导航开始多少毫秒）；其余造型加入轮换的消息（characters.ts 打的）
+    // 开场按钮从禁用变成可用的那一刻（页面自己的时钟：离导航开始多少毫秒）；其余造型加入轮换的消息（characters.ts 打的），
+    // 还有一套造型落空的警告（加载失败跳过、WebGL2 开局以后不再加）：这些造型等不到「加入轮换」，不能干等
     await page.addInitScript(() => {
       window.__joins = [];
+      window.__skips = 0;
       const log = console.log;
       console.log = (...a) => {
         const t = typeof a[0] === 'string' ? a[0] : '';
         if (t.includes('加入轮换')) window.__joins.push(Math.round(performance.now()));
         return log.apply(console, a);
+      };
+      const warn = console.warn;
+      console.warn = (...a) => {
+        const t = typeof a[0] === 'string' ? a[0] : '';
+        if (t.startsWith('[characters]') && /加载失败|不再加进轮换/.test(t)) window.__skips++;
+        return warn.apply(console, a);
       };
       const check = () => {
         const b = document.querySelector('.hud-begin');
@@ -99,27 +116,27 @@ async function measure(target, profile) {
     await page.goto(target.url + (QUERY ? (target.url.includes('?') ? '&' : '?') + QUERY : ''), { waitUntil: 'commit' });
     await page.waitForFunction(() => window.__readyAt !== undefined, null, { timeout: TIMEOUT.ready, polling: 100 });
     const readyAt = await page.evaluate(() => window.__readyAt);
-    // 按钮可用以后：等网络空下来，而且（按钮可用之后才下载完的访客模型有几套）就等几条「加入轮换」
+    // 按钮可用以后：等网络空下来，而且按钮可用之后才下载完的访客造型，每一套都有了着落（加入轮换，或者打了落空的警告）。
+    // 网络层就失败、被 abort 的请求不算（它们不会走到加入轮换那一步）
     const t0 = Date.now();
     for (;;) {
-      const visitors = [...reqs.values()].filter((r) => /\/visitors\/.+\.glb$/i.test(r.url));
-      const late = visitors.filter((r) => r.end !== null && (r.end - navTs) * 1000 > readyAt).length;
+      const late = [...reqs.values()].filter((r) => isVisitorGlb(r.url) && r.end !== null && !r.failed && (r.end - navTs) * 1000 > readyAt).length;
       const pending = [...reqs.values()].filter((r) => r.end === null).length;
-      const joins = await page.evaluate(() => window.__joins.length);
-      if (!pending && joins >= late) break;
+      const settled = await page.evaluate(() => window.__joins.length + window.__skips);
+      if (!pending && settled >= late) break;
       if (Date.now() - t0 > TIMEOUT.rest) {
-        errors.push(`等其余造型超时（还有 ${pending} 个请求没完，加入轮换 ${joins}/${late}）`);
+        errors.push(`等其余造型超时（还有 ${pending} 个请求没完，有着落的 ${settled}/${late}）`);
         break;
       }
       await new Promise((r) => setTimeout(r, 250));
     }
     const joins = await page.evaluate(() => window.__joins);
     const all = [...reqs.values()].filter((r) => r.end !== null && !r.failed);
-    const firstGlb = all.filter((r) => /\.glb$/i.test(r.url)).sort((a, b) => a.start - b.start)[0]?.url;
+    const firstVisitor = [...reqs.values()].filter((r) => isVisitorGlb(r.url)).sort((a, b) => a.start - b.start)[0]?.url;
     const bytes = { 开场前: {}, 开场后: {} };
     for (const r of all) {
       const when = (r.end - navTs) * 1000 <= readyAt ? '开场前' : '开场后';
-      const k = kindOf(r.url, firstGlb);
+      const k = kindOf(r.url, firstVisitor);
       bytes[when][k] = (bytes[when][k] ?? 0) + r.bytes;
     }
     return { label: target.label, profile: profile.name, readyAt, allJoinedAt: joins.length ? joins[joins.length - 1] : null, joins, bytes, errors };
@@ -134,8 +151,13 @@ const results = [];
 for (const profile of profiles) {
   for (let run = 1; run <= RUNS; run++) {
     for (const target of urls) {
-      const r = await measure(target, profile);
+      // 某一次超时、浏览器崩了也接着量下一次，这一次记成失败（不让整批结果和 JSON 都丢了）
+      const r = await measure(target, profile).catch((err) => ({ label: target.label, profile: profile.name, readyAt: null, allJoinedAt: null, joins: [], bytes: { 开场前: {}, 开场后: {} }, errors: [String(err?.message ?? err).split('\n')[0]] }));
       results.push({ ...r, run });
+      if (r.readyAt === null) {
+        console.log(`${profile.name} 第 ${run} 次 [${r.label}] 失败：${r.errors.join(' | ')}`);
+        continue;
+      }
       const joined = r.allJoinedAt === null ? '' : `，其余造型全部加入轮换 ${r.allJoinedAt} ms`;
       console.log(`${profile.name} 第 ${run} 次 [${r.label}] 开场按钮可用 ${r.readyAt} ms${joined}`);
       console.log(`    开场前 ${MB(sum(r.bytes.开场前))} MB（${fmtBytes(r.bytes.开场前)}）；开场后 ${MB(sum(r.bytes.开场后))} MB${sum(r.bytes.开场后) ? `（${fmtBytes(r.bytes.开场后)}）` : ''}${r.errors.length ? `\n    错误：${r.errors.join(' | ')}` : ''}`);
@@ -152,10 +174,16 @@ console.log('\n| 网速 | 版本 | 开场按钮可用（中位数，最小–最
 console.log('|---|---|---|---|---|---|');
 for (const profile of profiles) {
   for (const target of urls) {
-    const rs = results.filter((r) => r.profile === profile.name && r.label === target.label);
+    const all = results.filter((r) => r.profile === profile.name && r.label === target.label);
+    const rs = all.filter((r) => r.readyAt !== null);
+    const failed = all.length - rs.length ? `，失败 ${all.length - rs.length} 次` : '';
+    if (!rs.length) {
+      console.log(`| ${profile.name} / ${profile.latency} ms | ${target.label} | —（${all.length} 次都失败） | — | — | — |`);
+      continue;
+    }
     const ready = rs.map((r) => r.readyAt);
     const joined = rs.map((r) => r.allJoinedAt).filter((x) => x !== null);
-    console.log(`| ${profile.name} / ${profile.latency} ms | ${target.label} | ${Math.round(median(ready))}（${Math.min(...ready)}–${Math.max(...ready)}） | ${joined.length ? Math.round(median(joined)) : '—'} | ${MB(median(rs.map((r) => sum(r.bytes.开场前))))} MB | ${MB(median(rs.map((r) => sum(r.bytes.开场后))))} MB |`);
+    console.log(`| ${profile.name} / ${profile.latency} ms | ${target.label} | ${Math.round(median(ready))}（${Math.min(...ready)}–${Math.max(...ready)}${failed}） | ${joined.length ? Math.round(median(joined)) : '—'} | ${MB(median(rs.map((r) => sum(r.bytes.开场前))))} MB | ${MB(median(rs.map((r) => sum(r.bytes.开场后))))} MB |`);
   }
 }
 mkdirSync('.logs', { recursive: true });

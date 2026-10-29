@@ -160,10 +160,23 @@ export function normalizeModel(model: THREE.Object3D, height: number, facingOffs
   return { template: face, front, halfWidth, height: size.y * scale, rawSize: size, scale };
 }
 
-export async function loadCharacterAsset(spec: CharacterSpec = CHARACTER): Promise<CharacterAsset> {
+/**
+ * signal：给了就自己 fetch 整个文件（可以在下载途中 abort），下载完再交给 GLTFLoader 解析。streamOutfits 用它在 WebGL2 开局以后
+ * 把还在下载的那一套停掉。不用 LoadingManager.abort：它连解析时内嵌贴图的 blob 读取也一起停掉，GLTFLoader 会打
+ * 「Couldn't load texture」的报错（2026-10-29 实测）；这样 abort 只会落在下载上，解析一开始就停不了了
+ */
+export async function loadCharacterAsset(spec: CharacterSpec = CHARACTER, signal?: AbortSignal): Promise<CharacterAsset> {
   const loader = new GLTFLoader();
   loader.setMeshoptDecoder(MeshoptDecoder); // 吉祥物可能是 gltfpack / meshopt 压缩导出的
-  const gltf = await loader.loadAsync(spec.url);
+  let gltf: Awaited<ReturnType<GLTFLoader['loadAsync']>>;
+  if (signal) {
+    // 和 FileLoader 一样：同源带凭据，状态码不对就算失败
+    const res = await fetch(spec.url, { credentials: 'same-origin', signal });
+    if (!res.ok) throw new Error(`${spec.url}：HTTP ${res.status}`);
+    gltf = await loader.parseAsync(await res.arrayBuffer(), THREE.LoaderUtils.extractUrlBase(spec.url));
+  } else {
+    gltf = await loader.loadAsync(spec.url);
+  }
   const clips = gltf.animations;
   console.log(`[characters] ${spec.url}：动画片段 ${clips.length} 个`, clips.map((c) => `${c.name} (${c.duration.toFixed(2)}s)`));
   for (const [role, name] of Object.entries(spec.clips)) {
@@ -262,6 +275,12 @@ export interface OutfitCompileTarget {
   /** 此刻在主线程上卡一下玩家也看不见（开场遮罩还挡着）。加新造型的重活没法放在后台做时（WebGL2），开局之后不再加，见 join */
   hidden(): boolean;
 }
+
+/**
+ * compileOutfit 照着核对过的 three 版本（THREE.REVISION）。换了版本，内部接口的名字可能还在、行为却变了（比如 RenderContexts.get 的
+ * 第三个参数、renderObject 给阴影材质赋值的顺序），编出来的就会悄悄对不上：第一次编的时候打一条警告，要重跑 scripts/stall-outfits.mjs 核对
+ */
+const THREE_VERIFIED = '186';
 
 /** compileOutfit 要用到的 three r186 内部接口（换版本以后没有了，就退回普通的 compileAsync，见 compileOutfit） */
 interface RendererInternals {
@@ -385,7 +404,8 @@ export interface CharactersView extends Module {
    * 其余几套造型（loadFirstOutfit 的 rest）：一套一套在后台下载（不分带宽，第二套最早到），下载好一套就上传贴图、
    * 异步编好它的管线（compileOutfit：编出来的就是真画时用的那批，不卡），临时访客在地板下面真画几帧，才放进轮换。
    * 在那之前进门的人只穿已经能用的几套。after：等它结束再开始编（main.ts 传后台预编译整栋房子的那一次：点了开始要等它编完，
-   * 不跟它抢）；下载不等。WebGL2 上贴图上传是同步的，只能趁开场遮罩挡着时加，不等 after，开局以后下载好的不再加（见 join）。
+   * 不跟它抢）；下载不等。WebGL2 上贴图上传是同步的，只能趁开场遮罩挡着时加，不等 after；开局以后下载好的不再加（见 join），
+   * 没下载的也不下载了，正在下载的 abort 掉。
    * 全部处理完时 resolve，不会 reject
    */
   streamOutfits(target: OutfitCompileTarget, after?: Promise<unknown>): Promise<void>;
@@ -889,6 +909,8 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
     return { vs, release };
   };
 
+  /** compileOutfit 核对过 three 的版本和内部接口了（只核对、只警告一次） */
+  let checkedInternals = false;
   /**
    * 把临时访客要用的渲染管线异步编好（GPU 在后台编，不卡），而且编出来的正是之后真画时用的那一批：真画时一条管线都不用现编。
    * three r186 的 compileAsync 原样用有两处和真画对不上（2026-10-29 记下 GPUDevice.createRenderPipeline / createShaderModule 查到）：
@@ -901,17 +923,36 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
    *    这里照同样的状态做一份代理材质（连属性的先后都照抄：缓存键按 Object.keys 的顺序拼），用它在月光的阴影图上编。
    *    只编月光：每个访客走到哪儿都在它的阴影图里；手电的阴影管线和原来一样，第一次照到时才编（一次一两条，没有超过 50 ms 的帧）。
    * 半透明的双面材质真画时分背面、正面两遍（side 临时改成 BackSide / FrontSide），也是编的时候已经改回 DoubleSide，同样用两份代理（克隆，只改 side）。
-   * 用到的内部接口（_renderContexts、_getShadowNodes）没有了就退回普通的 compileAsync：管线还是会在临时访客真画的那几帧现编（卡一下），不会出错。
+   *
+   * 对不上的时候（换了 three 版本、内部接口没了或者行为变了；材质没有底色贴图，见 shadowPasses）不会出错，只是退回现编：
+   * 开局之前（开场遮罩挡着），兜底真画的那几帧会把场景 pass 和阴影一起现编，看不见；开局以后临时访客不投影，兜底真画只兜得住场景 pass，
+   * 月光阴影的管线要等第一个穿这套的真访客进门时才同步现编，卡一下（2026-10-29 实测 83–167 ms）——正好是这里要消掉的那一下。
+   * 所以第一次编的时候核对一遍版本和接口，对不上就打一条警告（只打一次），要重跑 scripts/stall-outfits.mjs。
+   *
    * 代理材质用完不 dispose：dispose 会把它们的渲染对象一起销毁，编好的节点和管线引用数归零，three 就从缓存里删掉，
-   * 真访客进门时又得同步重编（2026-10-29 实测：缓存键完全一样，照样现编，就是这个原因）。不 dispose 的代理跟着临时访客一起被回收，
-   * 引用数不减，缓存一直留着（three 对移出场景的物体也是这样）；每套造型三五个，不占什么
+   * 真访客进门时又得同步重编（2026-10-29 实测：缓存键完全一样，照样现编，就是这个原因）。不 dispose 的代理也不会被回收：
+   * r186 的 RenderObjects 把每个渲染对象放在一个强引用的 Set 里（_renderObjects），不 dispose 就一直留着，
+   * 临时访客的网格、骨骼和代理材质整局都在，缓存的节点和管线也就一直有人引用。占用有上限：每套造型 2 个临时访客、2–5 个代理
    */
-  const compileOutfit = (roots: THREE.Object3D[], target: OutfitCompileTarget): Promise<void> => {
+  const compileOutfit = (roots: THREE.Object3D[], target: OutfitCompileTarget, label: string): Promise<void> => {
     const R = core.renderer;
     const internals = R as unknown as RendererInternals;
     const contexts = internals._renderContexts;
     const getContext = typeof contexts?.get === 'function' ? contexts.get : null;
     const shadowNodes = typeof internals._getShadowNodes === 'function' ? internals._getShadowNodes.bind(R) : null;
+    if (!checkedInternals) {
+      checkedInternals = true;
+      const problems = [
+        THREE.REVISION !== THREE_VERIFIED ? `three 是 r${THREE.REVISION}，核对过的是 r${THREE_VERIFIED}` : '',
+        getContext ? '' : 'renderer._renderContexts.get 没有了',
+        shadowNodes ? '' : 'renderer._getShadowNodes 没有了',
+      ].filter(Boolean);
+      if (problems.length) {
+        console.warn(`[characters] 后加的访客造型预编译可能对不上（${problems.join('；')}）：会退回普通的 compileAsync，`
+          + '开局以后加进来的造型，第一个穿它的访客进门时可能同步现编管线、卡一下。用 node scripts/stall-outfits.mjs 核对');
+      }
+    }
+    let warnedColor = false;
     const meshes: THREE.Mesh[] = [];
     for (const r of roots) r.traverse((o) => { if ((o as THREE.Mesh).isMesh && !Array.isArray((o as THREE.Mesh).material)) meshes.push(o as THREE.Mesh); });
     const jobs: Promise<void>[] = [];
@@ -941,6 +982,13 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
       if (!shadowNodes) return [];
       const src = m as THREE.Material & Record<string, unknown>;
       const nodes = shadowNodes(m);
+      if (!nodes.colorNode && !warnedColor) {
+        // 没有底色贴图（也没有 colorNode / castShadowNode / maskNode）的材质，three 真画阴影时用的是阴影材质自己的那个
+        // vec4(0,0,0,1) 节点，代理里 new 的这个编号不同（节点的缓存键默认就是编号），对不上
+        warnedColor = true;
+        console.warn(`[characters] ${label}：材质 ${m.name || m.type} 没有底色贴图，月光阴影的预编译对不上，`
+          + '穿这套的访客第一次进门时会同步现编阴影管线、卡一下');
+      }
       const side = R.shadowMap.type === THREE.VSMShadowMap ? (m.shadowSide ?? m.side) : (m.shadowSide ?? SHADOW_SIDE[m.side]);
       // 原式照抄：不透明的材质算出来是 null 不是 false，缓存键里两者不一样
       const transparent = m.transparent || (src.transmission as number) > 0 || (src.transmissionNode && (src.transmissionNode as THREE.Node).isNode) || (src.backdropNode && (src.backdropNode as THREE.Node).isNode);
@@ -1047,16 +1095,18 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
     const roots = vs.map((v) => v.root);
     try {
       // compileOutfit 在调用的同步部分就收集完物体了：调用时露着，一返回就藏起来，编完之前真画的帧不会碰到它们（碰到就是同步现编）
-      const compiled = compileOutfit(roots, target);
+      const compiled = compileOutfit(roots, target, outfit.spec.url);
       for (const r of roots) r.visible = false;
       await compiled;
     } catch (err) {
-      // 编不成也照样放进轮换：下面露出来真画的那几帧现编，大不了卡一下
+      // 编不成也照样放进轮换：开局之前，下面露出来真画的那几帧现编（遮罩挡着，看不见）；
+      // 开局以后临时访客不投影，阴影管线要等第一个穿这套的访客进门时现编，会卡一下
       console.warn(`[characters] 造型 ${outfit.spec.url} 的管线预编译失败，改为真画时现编`, err);
     }
-    // 编完露出来真画几帧（兜底：万一有没编到的，在这里现编，不等到有人穿着它进门）。已经开局了就只画场景 pass、不投影：
-    // 临时访客不做视锥剔除，投影的话会画进每一支亮着的手电的阴影图，屋里人多时一帧里要现编好几条手电的阴影管线；
-    // 月光的阴影上面已经编好了，手电的阴影和原来一样，等手电第一次照到穿这套的人时再编（WebGPU 上一次一两条，不卡）
+    // 编完露出来真画几帧兜底：万一有没编到的，在这里现编，不等到有人穿着它进门。开局之前连阴影一起兜住（遮罩挡着）；
+    // 已经开局了就只画场景 pass、不投影：临时访客不做视锥剔除，投影的话会画进每一支亮着的手电的阴影图，屋里人多时一帧里要现编
+    // 好几条手电的阴影管线。所以开局以后这里兜不住阴影：月光阴影要是没编到（compileOutfit 对不上），要等第一个穿这套的访客进门时才现编；
+    // 手电的阴影和原来一样，等手电第一次照到穿这套的人时再编（WebGPU 上一次一两条，不卡）
     if (!target.hidden()) {
       for (const v of vs) {
         v.root.traverse((o) => { o.castShadow = false; });
@@ -1111,18 +1161,39 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
       // 编要等 after；只在开场遮罩挡着时才能加的（WebGL2，见 inBackground）不等：点了开始、遮罩还留着等 after 的那几秒正好用来加
       let joined: Promise<void> = Promise.resolve();
       const ready = (inBackground && after ? after : Promise.resolve()).catch(() => undefined);
+      // WebGL2 开局以后下载好的也不会再加（见 join），剩下的就不下载了，正在下载的那一套也 abort 掉（只停下载，见 loadCharacterAsset）：
+      // WebGL2 多半是手机（娃娃屋模式），最多能省 5.30 MB 流量
+      const abort = new AbortController();
+      let stopped = false;
+      let downloading = true;
+      const stop = () => {
+        if (stopped || inBackground || target.hidden()) return stopped;
+        stopped = true;
+        abort.abort();
+        console.warn('[characters] 这个浏览器开局以后不再加新造型（贴图同步上传会卡，见 join），其余几套不下载了');
+        return true;
+      };
+      if (!inBackground) {
+        // 下载期间每帧看一眼开没开局，开局了马上停（等这一套下载完再看，就白下了这一套）
+        const watch = () => {
+          if (downloading && !stop()) requestAnimationFrame(watch);
+        };
+        requestAnimationFrame(watch);
+      }
       for (const [i, spec] of rest.entries()) {
-        if (disposed) break;
+        if (disposed || stop()) break;
         let asset: CharacterAsset;
         try {
-          asset = await loadCharacterAsset(spec);
+          asset = await loadCharacterAsset(spec, abort.signal);
         } catch (err) {
+          if (stopped) break; // 开局时 abort 掉的
           console.warn(`[characters] 角色模型 ${spec.url} 加载失败，跳过。`, err);
           continue;
         }
         const outfit: Outfit = { spec, asset };
         joined = joined.then(() => ready).then(() => join(outfit, i, target)).catch((err) => console.warn('[characters] 造型加入轮换失败', err));
       }
+      downloading = false;
       await joined;
     },
     onEvent(e: SimEvent, state: WorldState) {
