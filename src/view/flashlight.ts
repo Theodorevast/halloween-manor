@@ -8,7 +8,7 @@
 //
 // 手电登记表（2026-10-28 手电照出鬼魂，见 torches.ts）：每支手电建的时候按模块级计数分一个槽，
 // 每帧把位置、光轴、光锥、强度写进 torches[槽]（鬼魂的着色器按它算谁照着自己）；强度再乘 torchDim[槽]
-// （lightfx.ts 写：现身时附近的手电跟着暗），暗下去时颜色往暖红偏（钨丝灯越暗越红）
+// （lightfx.ts 写：现身时附近的手电跟着暗），暗下去时颜色往暖红偏（钨丝灯越暗越红）；手上那个镜片也跟着一起暗、一起偏色
 import * as THREE from 'three/webgpu';
 import {
   abs, color, dot, mix, mx_noise_float, normalView, normalize, positionView, positionWorld, pow, smoothstep, time, uniform, uv, vec3,
@@ -18,6 +18,21 @@ import { VISION } from '../config/visitors';
 import type { Quality } from '../engine/types';
 import { PALETTE } from './palette';
 import { GHOST_SHADOW_LAYER, TORCH_COUNT, torchDim, torches } from './torches';
+
+/**
+ * 地址带 ?oldflicker 时两处灯闪（props/lamp.ts 的台灯、这里的紧张手电）都用旧的，看样时对比新旧；用户定了以后连这个开关和旧的一起删。
+ * 载入时读一次（地址在页面生命周期里不会变）；node 里跑测试没有 location
+ */
+const OLD_FLICKER = typeof location !== 'undefined' && new URLSearchParams(location.search).has('oldflicker');
+
+/**
+ * 紧张时手电亮度闪烁的深度（强度最多掉这么多）：
+ * - old = 0.22（旧值）：100 个种子 × 30 秒（tests/flicker.test.ts）里任意 1 秒最多暗 4–5 下（85 个种子 4 下、15 个种子 5 下），
+ *   超了 WCAG 2.3.1 的每秒 3 下；叠上现身蓄力的灯闪（lightfx 写的 torchDim）还会把现身自己那 3 下叠成 4 下
+ * - safe = 0.08：比 countDips 的门槛（亮度掉 0.1 才算暗一下）还小，一次「暗一下」都数不出来，叠上现身那一串也不多出一下；
+ *   手在抖主要靠光束的抖动（TORCH.nervous.jitter）表现，亮度只留一点点不稳
+ */
+export const NERVOUS_FLICKER = { old: 0.22, safe: 0.08 };
 
 /** 手电的全部手感参数（导出给 dev/characters.ts 调参用；正式代码不要在运行时改它） */
 export const TORCH = {
@@ -41,8 +56,8 @@ export const TORCH = {
     bias: -0.0008,
     normalBias: { high: 0.03, low: 0.05 } as Record<Quality, number>,
   },
-  /** 紧张：亮度闪烁的深度、光束抖动的幅度（弧度） */
-  nervous: { flicker: 0.22, jitter: 0.035 },
+  /** 紧张：亮度闪烁的深度（见 NERVOUS_FLICKER）、光束抖动的幅度（弧度） */
+  nervous: { flicker: OLD_FLICKER ? NERVOUS_FLICKER.old : NERVOUS_FLICKER.safe, jitter: 0.035 },
   /** 假体积光：最长多少米、最亮时的不透明度 */
   beam: { length: 3.4, opacity: 0.085, radius: Math.tan(VISION.halfAngle * 0.8) },
   /** 被 torchDim 压暗时颜色往这个暖红偏：偏多少 = (1 − 压暗系数) × dimWarmK（和 lightfx.ts 的 LIGHTFX 一样） */
@@ -76,6 +91,18 @@ export interface Flashlight {
 
 /** 下一支手电分到登记表的哪个槽（characters.ts 一次建 TORCH_COUNT 支，调用处不用改；开发页多建的按余数轮回） */
 let nextSlot = 0;
+/** 手电多于登记表的槽数、槽位回绕时已经提醒过了（只提醒一次，最终审查 V-M5） */
+let warnedWrap = false;
+
+/**
+ * 紧张时亮度的起伏（0..1，1 = 最深）：两个不成倍数的正弦相乘，偶尔叠出一次深一点的暗闪（dip）。
+ * 乘上 TORCH.nervous.flicker 才是强度掉多少。拆出来是为了测试按种子、按时间直接数（tests/flicker.test.ts）
+ */
+export function nervousWave(time: number, seed: number): number {
+  const n = Math.max(0, Math.sin(time * 17.3 + seed) * Math.sin(time * 6.1 + seed * 2.3));
+  const dip = Math.sin(time * 1.9 + seed) > 0.94 ? 0.5 : 0;
+  return Math.min(1, n + dip);
+}
 
 /**
  * 这一次画光锥的相机：1 = 透视（第三人称），0 = 正交（娃娃屋）。所有手电共用，光锥画之前按相机设。
@@ -110,15 +137,24 @@ function sharedParts() {
   const lens = new THREE.CircleGeometry(0.026, 12);
   lens.translate(0, 0, 0.0155);
   const bodyMat = new THREE.MeshStandardNodeMaterial({ color: PALETTE.wallTrim, roughness: 0.45, metalness: 0.6 });
-  // 镜片不受光照，直接是亮芯的颜色（泛光会把它晕开一点）
-  const lensMat = new THREE.MeshBasicNodeMaterial({ color: PALETTE.torchCore });
+  // 镜片不受光照，直接是亮芯的颜色（泛光会把它晕开一点）；跟着 torchDim 一起暗（最终审查 V-M4）：颜色按物体传
+  // （每支手电写自己镜片的 userData.lensColor），材质所有手电共用这一份——每支一份材质的话 three.js 会各编一份着色器
+  // （characters.ts 的访客材质吃过这个亏）
+  const lensMat = new THREE.MeshBasicNodeMaterial();
+  lensMat.colorNode = uniform(new THREE.Color(PALETTE.torchCore)).onObjectUpdate(({ object }) => object?.userData.lensColor as THREE.Color | undefined);
   shared = { cone, body, lens, bodyMat, lensMat };
   return shared;
 }
 
-export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flashlight {
+/** seed：手抖的相位（默认随机；测试里固定，好按种子数） */
+export function createFlashlight(parent: THREE.Object3D, quality: Quality, seed = Math.random() * 100): Flashlight {
   const parts = sharedParts();
-  const slot = nextSlot++ % TORCH_COUNT;
+  const n = nextSlot++;
+  if (n >= TORCH_COUNT && !warnedWrap) {
+    warnedWrap = true;
+    console.warn(`[flashlight] 建了第 ${n + 1} 支手电，登记表只有 ${TORCH_COUNT} 个槽（torches.ts 的 TORCH_COUNT）：多出来的和前面的共用槽位、互相覆盖，鬼魂只看得见其中一支的光锥。调大 TORCH_COUNT，或者少建几支`);
+  }
+  const slot = n % TORCH_COUNT;
   const reg = torches[slot];
   const halo = new THREE.SpotLight(PALETTE.torchHalo, 0, TORCH.distance, TORCH.halo.angle, TORCH.halo.penumbra, TORCH.decay);
   const core = new THREE.SpotLight(PALETTE.torchCore, 0, TORCH.distance, TORCH.core.angle, TORCH.core.penumbra, TORCH.decay);
@@ -137,6 +173,10 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
   const hand = new THREE.Group();
   const body = new THREE.Mesh(parts.body, parts.bodyMat);
   const lens = new THREE.Mesh(parts.lens, parts.lensMat);
+  lens.name = 'torch-lens';
+  // 镜片此刻的颜色（共用材质每画这一个镜片前读它）：和亮芯那盏灯同一个颜色 × torchDim，见下面 update
+  const lensColor = new THREE.Color(PALETTE.torchCore);
+  lens.userData.lensColor = lensColor;
   const strength = uniform(0);
   const beamMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
   beamMat.colorNode = color(PALETTE.torchHalo);
@@ -162,7 +202,6 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
   let q = quality;
   let parked = false;
   let nerv = 0; // 紧张程度的平滑值
-  const seed = Math.random() * 100;
   const dirV = new THREE.Vector3();
   const fwd = new THREE.Vector3(0, 0, 1);
   // 压暗时的偏色：两盏灯原来的颜色、往哪个颜色偏；压暗系数没变就不重算颜色
@@ -203,19 +242,18 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality): Flas
         hand.visible = true;
       }
       nerv += ((p.nervous ? 1 : 0) - nerv) * (1 - Math.exp(-4 * dt));
-      // 紧张：手在抖，光也不稳——两个不成倍数的正弦相乘，偶尔叠出一次深一点的暗闪
-      const n = Math.max(0, Math.sin(time * 17.3 + seed) * Math.sin(time * 6.1 + seed * 2.3));
-      const dip = Math.sin(time * 1.9 + seed) > 0.94 ? 0.5 : 0;
-      const flick = 1 - nerv * TORCH.nervous.flicker * Math.min(1, n + dip);
+      // 紧张：手在抖，光也不稳（亮度的起伏见 nervousWave，深度小到任意 1 秒都数不出「暗一下」）
+      const flick = 1 - nerv * TORCH.nervous.flicker * nervousWave(time, seed);
       const dir = p.dir + nerv * TORCH.nervous.jitter * Math.sin(time * 21 + seed * 3);
 
-      // 灯闪（lightfx.ts 写的压暗系数）：强度直接乘；颜色往暖红偏，越暗越红
+      // 灯闪（lightfx.ts 写的压暗系数）：强度直接乘；颜色往暖红偏，越暗越红；手上的镜片跟着一起暗、一起偏色
       const dim = torchDim[slot];
       if (dim !== lastDim) {
         lastDim = dim;
         const w = Math.max(0, 1 - dim) * TORCH.dimWarmK;
         halo.color.copy(haloColor).lerp(warm, w);
         core.color.copy(coreColor).lerp(warm, w);
+        lensColor.copy(core.color).multiplyScalar(dim);
       }
       halo.intensity = TORCH.halo.intensity * p.power * flick * dim;
       core.intensity = TORCH.core.intensity * p.power * flick * dim;
