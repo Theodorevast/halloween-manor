@@ -72,7 +72,7 @@ function lampRig() {
     trigger() {
       obj.active = 1.5;
       obj.broken = 6;
-      rig.trigger({} as WorldState);
+      rig.trigger({} as WorldState, { type: 'trigger', object: 'lamp', scareType: 'lamp' });
     },
     run(seconds: number, hz: number) {
       const out: number[] = [];
@@ -447,7 +447,7 @@ describe('?oldflicker（看样时对比新旧；node 里没有 location 也不�
     });
     const glow = (light!.userData.lightfx as { glow: { value: number } }).glow;
     const obj: ScareObjectState = { id: 'lamp', type: 'lamp', pos: { x: 0, z: 0 }, facing: 0, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0 };
-    rig.trigger({} as WorldState);
+    rig.trigger({} as WorldState, { type: 'trigger', object: 'lamp', scareType: 'lamp' });
     rig.update({ dt: 1 / 60, time: 1 / 60, obj, state: {} as WorldState });
     expect(glow.value).toBe(1.6);
     // 旧的复原也是硬切：0 秒那一档是全黑
