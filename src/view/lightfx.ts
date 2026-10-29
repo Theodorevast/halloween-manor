@@ -119,6 +119,19 @@ interface Effect {
   pattern: string | null;
   depth: number;
   stopped: boolean;
+  /** 会自己演闪烁的灯（标记带 busy 的，见 LightFxTag）不吃这个效果（见 LightFxOpts） */
+  skipOwned: boolean;
+}
+
+/**
+ * pulse / dipAll 的选项。
+ * skipOwned：会自己演闪烁的灯（标记带 busy 字段的，也就是台灯）整段都不跟着这个效果，门廊灯、手电照旧。
+ * busy 只挡得住「台灯自己在闪的同时」叠上来的压暗，挡不住前后接上：台灯附身之前刚跟着现身的蓄力暗了两下、
+ * 或者复原刚闪完两下 busy 一清就接上蓄力，任意 1 秒会暗到 4–5 下（2026-10-29 最终审查 I1）。
+ * 现身的蓄力、收那两下带它（ghost.ts 的 manifestLights）；落下、停留照旧压台灯
+ */
+export interface LightFxOpts {
+  skipOwned?: boolean;
 }
 
 /**
@@ -126,7 +139,8 @@ interface Effect {
  * - glow：一个数值 uniform（台灯：灯罩、灯泡的自发光都乘它，台灯每帧自己写）。灯罩的颜色是着色器里的常量，
  *   换颜色要重编材质，所以只跟着暗、不偏色（台灯的光本身照样偏暖红）
  * - emissive：用 material.color 画的自发光材质（门廊的灯笼）：颜色跟着暗，也和灯一样往暖红偏
- * - busy：主人自己正在演闪烁时设成 true（附身的台灯），这段时间这盏灯不叠加别的压暗：两套闪叠起来最多会到每秒 6 下（2026-10-29）
+ * - busy：主人自己正在演闪烁时设成 true（附身的台灯），这段时间这盏灯不叠加别的压暗：两套闪叠起来最多会到每秒 6 下（2026-10-29）。
+ *   带了这个字段（不管此刻真假）就算「会自己演闪烁的灯」：带 skipOwned 的效果整段都不碰它（见 LightFxOpts）
  */
 export type LightFxTag = true | { glow?: { value: number }; emissive?: { color: THREE.Color }; busy?: boolean };
 
@@ -151,8 +165,11 @@ interface Managed {
   writtenColor: THREE.Color;
   glow: { ref: { value: number }; base: number; written: number } | null;
   emissive: { mat: { color: THREE.Color }; base: THREE.Color; written: THREE.Color } | null;
-  /** 主人自己正在演闪烁（标记的 busy，见 LightFxTag）：这时不再叠加压暗，两套闪叠起来会超过每秒 3 下 */
-  owner: { busy?: boolean } | null;
+  /**
+   * 会自己演闪烁的灯（标记带 busy 字段，见 LightFxTag），没有就是 null。busy 为真（正在演）时不再叠加压暗，两套闪叠起来会超过每秒 3 下；
+   * 带 skipOwned 的效果整段都不碰它
+   */
+  owner: { busy: boolean } | null;
   level: number;
   /** 没在压暗：不碰这盏灯 */
   idle: boolean;
@@ -161,11 +178,11 @@ interface Managed {
 export interface LightFx extends Module {
   /**
    * center 附近 radius 米内的灯按节奏表 pattern 闪 seconds 秒（每秒 10 个字母，放完从头再来）。
-   * 返回一个函数，调了就提前结束（比如现身停留时压着的灯，收的时候放开）；不用可以不管
+   * 返回一个函数，调了就提前结束（比如现身停留时压着的灯，收的时候放开）；不用可以不管。opts 见 LightFxOpts
    */
-  pulse(center: Vec2, radius: number, pattern: string, seconds: number): () => void;
-  /** center 附近 radius 米内的灯一起暗 ms 毫秒，暗到原来的 depth（0.15 = 剩 15%，不全灭） */
-  dipAll(center: Vec2, radius: number, depth: number, ms: number): void;
+  pulse(center: Vec2, radius: number, pattern: string, seconds: number, opts?: LightFxOpts): () => void;
+  /** center 附近 radius 米内的灯一起暗 ms 毫秒，暗到原来的 depth（0.15 = 剩 15%，不全灭）。opts 见 LightFxOpts */
+  dipAll(center: Vec2, radius: number, depth: number, ms: number, opts?: LightFxOpts): void;
   /** p 点此刻的压暗系数（所有效果叠起来、还没过热惯性），1 = 不变。鬼魂自己的明暗跟着它（借光出入） */
   level(p: Vec2): number;
   update(ctx: FrameCtx): void;
@@ -198,18 +215,23 @@ export function createLightFx(core: RenderCore): LightFx {
         baseColor: l.color.clone(), writtenColor: l.color.clone(),
         glow: g ? { ref: g, base: g.value, written: g.value } : null,
         emissive: e ? { mat: e, base: e.color.clone(), written: e.color.clone() } : null,
-        owner: typeof tag === 'object' ? tag : null,
+        // 带 busy 字段的才是会自己演闪烁的灯（台灯）；门廊灯的标记也是对象，但没有 busy
+        owner: typeof tag === 'object' && typeof tag.busy === 'boolean' ? (tag as { busy: boolean }) : null,
         level: 1, idle: true,
       });
     });
     return out;
   };
 
-  /** p 点在时刻 t 的压暗系数：覆盖到这里的效果里取最暗的那个（只有冲高的效果时才会 > 1） */
-  const levelAt = (p: Vec2, t: number) => {
+  /**
+   * p 点在时刻 t 的压暗系数：覆盖到这里的效果里取最暗的那个（只有冲高的效果时才会 > 1）。
+   * owned：算的是一盏会自己演闪烁的灯（Managed.owner 不为 null），带 skipOwned 的效果不算
+   */
+  const levelAt = (p: Vec2, t: number, owned = false) => {
     let k = Infinity;
     for (const e of effects) {
       if (e.stopped || !(t >= e.t0 && t < e.t0 + e.dur)) continue;
+      if (owned && e.skipOwned) continue;
       const d = Math.hypot(p.x - e.center.x, p.z - e.center.z);
       if (d >= e.radius) continue;
       const w = 1 - smooth01(e.radius * (1 - LIGHTFX.edge), e.radius, d);
@@ -271,19 +293,19 @@ export function createLightFx(core: RenderCore): LightFx {
     prevHook.call(core.scene, ...args);
   };
 
-  const add = (e: Omit<Effect, 't0' | 'stopped'>): Effect => {
-    const full: Effect = { ...e, center: { x: e.center.x, z: e.center.z }, t0: NaN, stopped: false };
+  const add = (e: Omit<Effect, 't0' | 'stopped' | 'skipOwned'>, opts?: LightFxOpts): Effect => {
+    const full: Effect = { ...e, center: { x: e.center.x, z: e.center.z }, t0: NaN, stopped: false, skipOwned: opts?.skipOwned === true };
     effects.push(full);
     return full;
   };
 
   const self: LightFx = {
-    pulse(center, radius, pattern, seconds) {
-      const e = add({ center, radius, dur: Math.max(0, seconds), pattern, depth: 1 });
+    pulse(center, radius, pattern, seconds, opts) {
+      const e = add({ center, radius, dur: Math.max(0, seconds), pattern, depth: 1 }, opts);
       return () => { e.stopped = true; };
     },
-    dipAll(center, radius, depth, ms) {
-      add({ center, radius, dur: Math.max(0, ms) / 1000, pattern: null, depth: Math.min(1, Math.max(LIGHTFX.minLevel, depth)) });
+    dipAll(center, radius, depth, ms, opts) {
+      add({ center, radius, dur: Math.max(0, ms) / 1000, pattern: null, depth: Math.min(1, Math.max(LIGHTFX.minLevel, depth)) }, opts);
     },
     level(p) {
       return levelAt(p, now);
@@ -302,8 +324,9 @@ export function createLightFx(core: RenderCore): LightFx {
 
       for (const m of lights) {
         if (m.idle && !busy) continue;
-        // 主人自己在闪（附身的台灯）：这盏灯这时不叠加现身的压暗，回到 1（主人的闪本身已经守着每秒 3 下）
-        const target = busy && !m.owner?.busy ? levelAt(m.pos, now) : 1;
+        // 主人自己在闪（附身的台灯）：这盏灯这时不叠加现身的压暗，回到 1（主人的闪本身已经守着每秒 3 下）；
+        // 不在闪的时候也不吃带 skipOwned 的效果（现身的蓄力、收，见 LightFxOpts）
+        const target = busy && !m.owner?.busy ? levelAt(m.pos, now, m.owner !== null) : 1;
         if (m.idle) {
           if (target === 1) continue;
           wake(m);

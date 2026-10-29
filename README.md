@@ -29,7 +29,7 @@
 - `?fx=-ao` 关掉部分后处理（`?fx=legacy` 回到旧管线）；`?gputime` 配合 `?debug` 读 GPU 时间：`__haunt.fx.gpu()`
 - `?solid=0.1` 现身时「实」的那份没被照着时的暗度（默认 0.03 是暗色剪影；0.1 偏灰，像一团实雾）。看样时对比用
 - `?debug` 下还有：`__haunt.events()` 取走记下的模拟事件（现身、机关、察觉……）；控制台的 `[boot]` 几行是冷启动各段的时刻；`?pipelog` 记下新建的渲染管线（`__pipelog.stop()`）
-- `?collab` 联名皮肤（翠宝穿承太郎、DIO 的衣服）也进访客轮换。授权确认之前只在本机看：开发服务器直接能用；构建要 `COLLAB=1 npm run build`，默认的构建不带这两个模型
+- `?collab` 联名皮肤（翠宝穿承太郎、DIO 的衣服）也进访客轮换，插在第一套后面（开场还是公开的那一套，第 2、3 个进门的人穿联名）。授权确认之前只在本机看：开发服务器直接能用；构建要 `COLLAB=1 npm run build`，默认的构建不带这两个模型，JS 里也没有它们的地址（`?collab` 不起作用），`assets/visitors/manifest.json` 也不进 `dist/`
 - `?oldflicker` 附身台灯、访客紧张时的手电换回旧的闪法（旧的超过每秒 3 下，看样对比用）
 - `?procghost` 鬼魂换回程序化的兜帽人形（默认用 `public/assets/ghost/ghost.glb`，见 `src/config/ghost.ts`）
 
@@ -54,7 +54,7 @@
 4. 导出前自动用本机 Blender 精修（`scripts/blender/refine.mjs`，可以单独跑）：球身、帽子、披风整块跟着躯干，挂在腿边的配件不跟着腿拉伸，同时清碎片、限面数和贴图、去根运动。预览表在 `assets-src/visitors/<id>/refine-preview/<id>-sheet.png`，第一行是权重：蓝色跟身体，橙色跟腿和手臂
 5. 不联网的自测：`node scripts/tripo/selftest.mjs`。先看要花多少：`--dry-run`
 
-导出后在 `src/config/character.ts` 的 `VISITOR_SPECS` 里登记（片段名照 `public/assets/visitors/manifest.json` 填），再用 `/dev/characters.html?visitor=<id>` 跑 `await __chars.calibrate()` 量朝向和步频（腿很短的模型它会把小腿当成脚，run、flee 量偏，见 `character.ts` 里联名两套的注释）。开场按钮只等第一套；其余几套开场后边玩边下载，编好管线才加入轮换（WebGL2 上点了开始以后等它们加完再开场，最多 30 秒）。进门的人接着上一个人往下轮，相邻两人穿得不一样；一套都加载不到时用占位狐狸（`?fox` 强制只用狐狸）。联名的两套登记在 `COLLAB_SPECS`，只在 `?collab` 时加进来。
+导出后在 `src/config/character.ts` 的 `VISITOR_SPECS` 里登记（片段名照 `public/assets/visitors/manifest.json` 填），再用 `/dev/characters.html?visitor=<id>` 跑 `await __chars.calibrate()` 量朝向和步频（腿很短的模型它会把小腿当成脚，run、flee 量偏，见 `character.ts` 里联名两套的注释）。开场按钮只等第一套；其余几套开场后边玩边下载，编好管线才加入轮换（WebGL2 上点了开始以后等它们加完再开场，最多 30 秒）。进门的人接着上一个人往下轮，相邻两人穿得不一样；一套都加载不到时用占位狐狸（`?fox` 强制只用狐狸）。联名的两套登记在 `COLLAB_SPECS`，只在 `?collab` 时加进来，插在第一套后面（默认的构建里没有，见 `vite.config.ts`）。
 
 现在有四套：维多利亚吸血鬼、提灯夜行的探险家、女巫、手绘骷髅（2026-10-28；从换装图到动作一共花了 825 积分，其中四视图、建模、绑骨、动作 780）。另有两套联名（2026-10-29：翠宝穿承太郎、DIO 的衣服，换装图修图走素材中台的 GPT Image，3D 一共 490 积分；承太郎的手套、大衣颜色由导出时的 `scripts/blender/retint.py` 调，规则在 `visitors.json` 的 `retint`）。每套约 1.1–1.7 MB：底色贴图 2048、法线和粗糙度 1024，都是 WebP。
 
@@ -92,7 +92,7 @@ Claude 听不到声音，下面这些按「最没把握」排序。打开 `/dev/
 - 开场按钮只等房子和第一套访客造型（开场前下载 2.83 MB，2026-10-29 限速实测：50 Mbps 约 4.5 秒、10 Mbps 约 6.1 秒、4 Mbps 约 9.7 秒可用）；别的房间的物体在后台编，这之前点了开始，开场遮罩会留着、按钮写「Lighting the candles…」，编完才开场。其余几套造型开场后边玩边下载（5.30 MB），编好管线才加入轮换，加入时不卡（`node scripts/stall-outfits.mjs` 探针）。编管线用到了 three r186 的内部接口：升级 three 以后对不上会在控制台警告一次，并且要重跑这个探针（WebGPU 和 `--webgl` 各一次）
 - 访客的材质同一套造型的人共用（透明度按物体传），这样预编译编过的管线进门时直接能用。以前每人复制一份，每个新访客进门都要现编
 - 第一次飞到落地镜跟前可能有一下约 0.13 秒（只有第一次，原因没查到）
-- 附身台灯、访客紧张时的手电原来都超过「灯闪每秒最多 3 下」（防光敏，WCAG 2.3.1），2026-10-29 改成不超过（`src/view/props/lamp.ts` 的 `LAMP_PATTERN`、`src/view/flashlight.ts` 的 `TORCH.nervous`），`?oldflicker` 对比旧的。台灯自己在闪时，现身的压暗不再叠上去
+- 附身台灯、访客紧张时的手电原来都超过「灯闪每秒最多 3 下」（防光敏，WCAG 2.3.1），2026-10-29 改成不超过（`src/view/props/lamp.ts` 的 `LAMP_PATTERN`、`src/view/flashlight.ts` 的 `TORCH.nervous`），`?oldflicker` 对比旧的。台灯和附近的现身叠在一起时也不超过：台灯自己在闪（附身、复原）时现身的压暗不叠上去；前后脚接上时（现身蓄力后不到 1 秒附身台灯、台灯刚复原就现身，原来会到每秒 4–5 下），台灯不跟着现身的蓄力、收那两下，只跟着落下、停留暗。代价是蓄力那 0.6 秒台灯不再跟着暗两下（门廊灯、手电照旧），看样时确认。门廊灯平时的摇曳压到单独数不出来（`src/view/house.ts` 的 `porchFlicker`）。台灯平时的轻闪也压到数不出来（`BLIP_DEPTH`，原来附身前刚好轻闪完一下时会凑成 4 下，约万分之七的附身时刻；防光敏优先，轻闪看起来更轻一点）
 - 平衡里几条不变量余量很薄（加衣柜以后：第三人称中位存活余 1.0 秒、加鬼魂吓跑的倍数余 1.4、会用引诱的多 1 局）。机器人用固定种子，不会随机失败，但改模拟时容易翻。穿墙声先不涨恐惧值（用户 2026-10-29），鬼魂本身的威胁主要靠现身。衣柜当机关是背后型（用户 2026-10-29 定的），机器人测平衡时不用它当机关：真人用它连着吓胆大的会不会太强，要试玩看
 - 骷髅的后背是纯黑的（四视图生成时只在正面画了骨头）；要的话可以单独改背面那张视图（约 5 积分）再重做 3D
 - 性能：本机显卡上 4 个访客满载约 7 ms/帧；纯 CPU 软件渲染下 Low 档约 8 fps（最差情况）。场景约 14 盏灯，每个像素都要算一遍，开销主要和分辨率成正比，所以 Low 档按 75% 分辨率渲染
@@ -100,7 +100,7 @@ Claude 听不到声音，下面这些按「最没把握」排序。打开 `/dev/
 ## 部署前还要做的
 
 - 选托管平台并部署（需要你同意）。`npm run build` 的 `dist/` 是纯静态文件，放哪儿都行
-- 联名皮肤（JOJO）要先确认授权：确认之前用默认的 `npm run build`，联名的两个模型不进 `dist/`；确认之后用 `COLLAB=1 npm run build`，再决定要不要让它们不带 `?collab` 也进轮换
+- 联名皮肤（JOJO）要先确认授权：确认之前用默认的 `npm run build`，联名的两个模型、JS 里它们的地址、写着联名的 `assets/visitors/manifest.json` 都不进 `dist/`；确认之后用 `COLLAB=1 npm run build`，再决定要不要让它们不带 `?collab` 也进轮换
 - 确定域名后，在 `index.html` 加 `og:image`（完整的绝对地址，1200×630 的游戏截图），分享链接时才有预览图
 - 换模型、改访客之后重跑 `npm run smoke` 和 `node scripts/perf.mjs`（四套访客满载：High、Low 都是 60 fps，最长一帧 17.5 ms，2026-10-29）
 - 开场时间用 `node scripts/loadtime.mjs` 量（三档限速，见上面「已知问题」里的数）；托管平台要对 `.glb` 开压缩或者至少开长缓存

@@ -8,7 +8,7 @@
 //   3. 时间轴改了，声音跟着走：把 WARDROBE 拉长、整体后移再量一遍（证明没有把数抄一份）；只改 slamTime，撞击声也要跟着后移
 //   4. 低频冲击和床的 BED_HIT 一个分量、比现身落下的轻；衣柜有自己的声音，不再借厨房门的
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SCARES, WARDROBE } from '../src/config/scares';
+import { SCARES, WARDROBE, WARDROBE_SHUT } from '../src/config/scares';
 import { BED_HIT, LEVEL, MANIFEST_HIT, TRIGGER, WARDROBE_HIT, WARDROBE_SFX, door, rng, wardrobe, wardrobeCues, type Bus, type WardrobeCues } from '../src/audio/sfx';
 
 /** 声音从这一刻起播（和 dev 页面一样前面留一点空）；下面的时刻都换算成相对它的秒数 */
@@ -193,8 +193,8 @@ const SLAM_TOL = 0.02;
 /** 吱呀的摩擦脉冲在 end 之后多留 0.02 秒（creakExcite 的收尾），包络那时已经是 0；hold 开头这点时间不算有声 */
 const TAIL = 0.03;
 /**
- * 门撞上门框的那一刻：门从 slamAt 起关，slamTime 秒后撞上（view/props/wardrobe.ts 的 SHUT），撞击声落在这里。
- * 读的是此刻的 WARDROBE（时间轴被改过，这里跟着变），不拿时刻表自己的数当基准
+ * 门撞上门框的那一刻：门从 slamAt 起关，slamTime 秒后撞上（config/scares.ts 的 WARDROBE_SHUT），撞击声落在这里。
+ * 读的是此刻的 WARDROBE（时间轴被改过，这里跟着变），自己算一遍，不拿时刻表、也不拿 config 里的那个函数当基准
  */
 const shutAt = () => WARDROBE.slamAt + WARDROBE.slamTime;
 
@@ -217,11 +217,11 @@ function expectCuesAligned(c: WardrobeCues) {
   for (const t of onsets) expect(t > W.hold[0] + EPS && t < shut - SLAM_TOL - EPS).toBe(false);
   // 闷响、锁舌、低频冲击都落在门撞上门框的那一刻（slamAt + slamTime）± 0.02 秒
   for (const t of [c.thud, c.slamLatch, c.hit]) expect(Math.abs(t - shut)).toBeLessThanOrEqual(SLAM_TOL + EPS);
-  // 木头的抖动、落灰在撞上之后；灰在 slamAt + settle 之前落完
+  // 木头的抖动、落灰在撞上之后；灰在撞上之后 settle 秒之内落完（和画面的落灰同一个起点：撞上那一刻）
   expect(c.rattle[0]).toBeGreaterThanOrEqual(c.thud);
   expect(c.dust[0]).toBeGreaterThanOrEqual(c.thud);
   expect(c.dust[1]).toBeGreaterThan(c.dust[0]);
-  expect(c.dust[1]).toBeLessThanOrEqual(W.slamAt + W.settle + EPS);
+  expect(c.dust[1]).toBeLessThanOrEqual(shut + W.settle + EPS);
 }
 
 /** 真的把 wardrobe 跑一遍，对账每个声源 */
@@ -294,13 +294,12 @@ describe('衣柜声音的时刻表对得上 WARDROBE', () => {
     expect(c.slamLatch - WARDROBE.slamAt).toBeGreaterThanOrEqual(WARDROBE.slamTime - SLAM_TOL - EPS);
   });
 
-  it('模拟里「落下」的那一刻（SCARES.wardrobe.hitAt）在门关上的这一段 [slamAt, slamAt + slamTime] 里，撞击声不早于它、最多晚 slamTime（合并时 hitAt 挪到接触那一刻也成立）', () => {
-    const h = SCARES.wardrobe.hitAt;
-    const hit = wardrobeCues().hit;
-    expect(h).toBeGreaterThanOrEqual(WARDROBE.slamAt - EPS);
-    expect(h).toBeLessThanOrEqual(shutAt() + EPS);
-    expect(hit - h).toBeGreaterThanOrEqual(-EPS);
-    expect(hit - h).toBeLessThanOrEqual(WARDROBE.slamTime + EPS);
+  it('模拟里「落下」的那一刻（SCARES.wardrobe.hitAt）、撞击声（闷响、低频冲击）、画面撞上门框都是同一个数 WARDROBE_SHUT（config/scares.ts，只算一处）', () => {
+    expect(WARDROBE_SHUT).toBe(shutAt());
+    expect(SCARES.wardrobe.hitAt).toBe(WARDROBE_SHUT);
+    const c = wardrobeCues();
+    expect(c.hit).toBe(WARDROBE_SHUT);
+    expect(c.thud).toBe(WARDROBE_SHUT);
   });
 
   it('撞上之前至少 0.6 秒的空白（调研原则 11：先抽空再落下）：hold 本身够长，吱呀结束到撞击也隔得够久', () => {
@@ -460,13 +459,13 @@ describe('门关上要多久（slamTime）：撞击声跟着它走，别的时�
   });
 });
 
-describe('落灰的上限：不晚于 slamAt + settle', () => {
+describe('落灰的上限：不晚于撞上之后 settle 秒（和画面的落灰同一个起点）', () => {
   it('settle 缩短（比落灰自己的长度还短）以后，落灰跟着提前收，时刻表照样对得上', () => {
     const keep = WARDROBE.settle;
     WARDROBE.settle = 1.5;
     try {
       const c = wardrobeCues();
-      expect(c.dust[1]).toBeCloseTo(WARDROBE.slamAt + 1.5, 9);
+      expect(c.dust[1]).toBeCloseTo(shutAt() + 1.5, 9);
       expect(c.dust[1]).toBeGreaterThan(c.dust[0]);
       expectCuesAligned(c);
     } finally {

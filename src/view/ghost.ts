@@ -35,7 +35,7 @@ import { MANIFEST, VISION } from '../config/visitors';
 import { ghostSees } from '../engine/ghostRig';
 import type { FrameCtx, GhostRig, Module, Quality, RenderCore } from '../engine/types';
 import { wrapAngle, yawFor } from '../lib/angle';
-import type { SimEvent, WorldState } from '../sim/types';
+import type { SimEvent, Vec2, WorldState } from '../sim/types';
 import { TORCH } from './flashlight';
 import type { Frost } from './frost';
 import { MANIFEST_WINDUP_PATTERN, thermal, type LightFx } from './lightfx';
@@ -144,8 +144,9 @@ export const GHOST = {
    *   材质（不淡入）；之后灯压在 hold 这一档（'c' ≈ 42%，设计文档：40% 左右），收的时候放开，holdSlack 秒是兜底；
    * - 停留：不飘，头慢慢抬起（solid.headPitch），连同位置、朝向只每秒更新 stepRate 次（G3）；冷雾从下摆往下淌（GHOST_MIST.pour）；
    * - 收：再暗 end.ms 毫秒，暗下那一帧换回原来的雾。
+   * 台灯不跟着蓄力、收这两下（只吃落下、停留）：它自己的附身、复原和现身前后脚接上时会超过每秒 3 下，见 manifestLights。
    * 平时的鬼魂（加法、自己发光）跟着附近灯的明暗一起暗（follow，1 = 完全跟着），借暗下去的那一下出入，不会在暗下去时反而更显眼。
-   * 节奏表加上落下那一下，任意 1 秒内最多暗 3 下（tests/lightfx.test.ts 查）
+   * 节奏表加上落下那一下，任意 1 秒内最多暗 3 下（tests/lightfx.test.ts 查；和台灯前后接上的情况 tests/flicker.test.ts 查）
    */
   manifest: {
     radius: 5,
@@ -869,6 +870,32 @@ export function ghostRevealAmount(): number {
 /** uReveal 在身体上取这几点估（模型局部 y：头、胸口、下摆上面一点）：手电只照到头或只照到下摆也算 */
 const REVEAL_PROBES = [0.25, -0.15, -0.65];
 
+/** lightfx 的选项：会自己演闪烁的灯（台灯）不跟着这一下（见 manifestLights） */
+const SKIP_OWNED = { skipOwned: true } as const;
+
+/**
+ * 现身的每个阶段让附近的灯做什么（GHOST.manifest）。onManifest 照它调，tests 的灯闪检查也走它，调用的顺序和选项不另抄一份：
+ * - windup：按 windup 的节奏闪 MANIFEST.windup 秒；
+ * - drop：暗一下（drop），接着压在 hold 这一档；返回放开它的函数（收的时候调，holdSlack 秒是兜底）；
+ * - end：再暗一下（end）。
+ * 蓄力、收这两下带 skipOwned：台灯（会自己演附身、复原的闪）不跟着暗，收的时候直接放开。不然台灯的附身、复原和附近的现身前后脚接上时
+ * （附身之前刚跟着蓄力暗了两下；复原刚闪完两下就接上蓄力），任意 1 秒会暗到 4–5 下（2026-10-29 最终审查 I1）。
+ * 落下、停留照旧压台灯（换材质那一下整片暗下去）。代价：蓄力那 0.6 秒里台灯不再跟着暗两下，门廊灯、手电照旧
+ */
+export function manifestLights(lights: LightFx, phase: Extract<SimEvent, { type: 'manifest' }>['phase'], pos: Vec2): (() => void) | null {
+  const M = GHOST.manifest;
+  if (phase === 'windup') {
+    lights.pulse(pos, M.radius, M.windup, MANIFEST.windup, SKIP_OWNED);
+    return null;
+  }
+  if (phase === 'drop') {
+    lights.dipAll(pos, M.radius, M.drop.depth, M.drop.ms);
+    return lights.pulse(pos, M.radius, M.hold, MANIFEST.hold + M.holdSlack);
+  }
+  lights.dipAll(pos, M.radius, M.end.depth, M.end.ms, SKIP_OWNED);
+  return null;
+}
+
 /**
  * 现身时要借的另外两个模块（main.ts 建好、放进 modules，再传进来）：灯闪（lightfx.ts）、地上的霜（frost.ts）。
  * 没给的那个就不做：没有灯闪时落下、收不等暗下去，事件一到就换材质
@@ -1030,22 +1057,21 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
     pours++;
   };
 
-  /** 现身事件：蓄力时灯闪、霜往外长；落下、收的时候灯暗一下，暗到最深的那一帧换材质（见 GHOST.manifest） */
+  /** 现身事件：蓄力时灯闪、霜往外长；落下、收的时候灯暗一下，暗到最深的那一帧换材质（见 GHOST.manifest；灯怎么闪见 manifestLights） */
   const onManifest = (e: Extract<SimEvent, { type: 'manifest' }>) => {
     const M = GHOST.manifest;
     const lights = fx.lights ?? null;
     if (e.phase === 'windup') {
-      lights?.pulse(e.pos, M.radius, M.windup, MANIFEST.windup);
+      if (lights) manifestLights(lights, 'windup', e.pos);
       fx.frost?.grow(e.pos, M.frost, MANIFEST.windup);
     } else if (e.phase === 'drop') {
-      lights?.dipAll(e.pos, M.radius, M.drop.depth, M.drop.ms);
       holdRelease?.();
-      holdRelease = lights ? lights.pulse(e.pos, M.radius, M.hold, MANIFEST.hold + M.holdSlack) : null;
+      holdRelease = lights ? manifestLights(lights, 'drop', e.pos) : null;
       swap = { to: true, delay: lights ? (M.drop.ms / 1000) * M.swapAt : 0, at: NaN };
     } else {
       holdRelease?.();
       holdRelease = null;
-      lights?.dipAll(e.pos, M.radius, M.end.depth, M.end.ms);
+      if (lights) manifestLights(lights, 'end', e.pos);
       swap = { to: false, delay: lights ? (M.end.ms / 1000) * M.swapAt : 0, at: NaN };
     }
   };

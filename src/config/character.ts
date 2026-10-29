@@ -159,7 +159,8 @@ export const VISITOR_SPECS: CharacterSpec[] = [
 
 /**
  * 联名皮肤（JOJO：翠宝穿承太郎、DIO 的衣服）。流水线同上面四套，精修参数各自不同（见 scripts/tripo/visitors.json 的 jotaro、dio）。
- * 授权确认之前不进公开的访客轮换：只在地址带 ?collab 时并进 VISITOR_SPECS（dev/characters.html 也要带：?visitor=jotaro&collab）。
+ * 授权确认之前不进公开的访客轮换：只在开发服务器、COLLAB=1 构建（__COLLAB__，见 vite.config.ts）里、而且地址带 ?collab 时并进 VISITOR_SPECS
+ * （dev/characters.html 也要带：?visitor=jotaro&collab）；默认构建里连这两套的地址都没有。
  * 两套的腿短、膝盖低：calibrate() 量 run、flee 时把小腿骨（LeftLeg，骨头位置在膝盖）也当成贴地的脚，膝盖不像脚那样贴地后滑，量出来偏了
  * （jotaro 1.094 / 0.684，dio 0.949 / 0.752）。run、flee 改用只算脚、脚尖四根骨头的量法（同样的贴地判断和中位数，Blender 里量；
  * 这个量法在吸血鬼、骷髅上和上面写的数只差 1%–3%）。walk 两种量法一样
@@ -195,8 +196,11 @@ export const COLLAB_SPECS: CharacterSpec[] = [
   },
 ];
 
+// 默认构建里 __COLLAB__ 是 false（vite.config.ts）：这一句是死代码，COLLAB_SPECS 被摇掉，两个 GLB 的地址不进 JS。
+// 插在第一套后面，不排到最后：开场照旧是公开的那一套（开场按钮只等第一套），第 2、3 个进门的人就穿联名，
+// 看样时不用等前面的人被吓跑（排在最后时是第 5、6 个，2026-10-29 最终审查 M3）。
 // node 里跑测试时没有 location：不并，测试看到的还是公开的四套
-if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('collab')) VISITOR_SPECS.push(...COLLAB_SPECS);
+if (__COLLAB__ && typeof location !== 'undefined' && new URLSearchParams(location.search).has('collab')) VISITOR_SPECS.splice(1, 0, ...COLLAB_SPECS);
 
 /** 手电挂在角色身上的高度（米），按 targetHeight 的身高定；模型因 maxLength 变矮时按比例降低（占位狐狸约 0.52 米） */
 export const FLASHLIGHT_HEIGHT = 0.8;

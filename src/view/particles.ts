@@ -19,7 +19,7 @@
 import * as THREE from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { PROPS, propCenter } from '../config/house';
-import { WARDROBE } from '../config/scares';
+import { WARDROBE, WARDROBE_SHUT } from '../config/scares';
 import type { FrameCtx, Module, Quality, RenderCore } from '../engine/types';
 import { yawFor } from '../lib/angle';
 import type { ScareType, SimEvent, WorldState } from '../sim/types';
@@ -30,7 +30,7 @@ import { MOTES, createMotes } from './particles/motes';
 import { PLASTER, createPlaster, type BurstShape } from './particles/plaster';
 import { BED_TIMELINE, bedDustSpot } from './props/bed';
 import { PORTRAIT_TIMELINE } from './props/portrait';
-import { WARDROBE_SHUT, wardrobeDustSpot, wardrobeLayout } from './props/wardrobe';
+import { wardrobeDustSpot, wardrobeLayout } from './props/wardrobe';
 
 export { BREATH } from './particles/breath';
 export { MOTES } from './particles/motes';
@@ -66,8 +66,8 @@ export const DUST_BURSTS: Partial<Record<ScareType, DustBurst>> = {
     spot: bedDustSpot,
     shape: { halfW: 0.22, halfL: 0.26, edgeShare: 0.4, count: 0.5, size: 0.75, speed: 0.6, chips: false },
   },
-  // 衣柜：门被从里面拉上、撞上门框的那一下（WARDROBE_SHUT = slamAt + slamTime；slamAt 那一刻门才开始关）。
-  // 落点是整个柜顶（到顶檐外沿）；大半从四边翻出去（前沿最多，见 PLASTER.dust.far），在 WARDROBE.settle 秒里慢慢落到
+  // 衣柜：门被从里面拉上、撞上门框的那一下（config/scares.ts 的 WARDROBE_SHUT = slamAt + slamTime；slamAt 那一刻门才开始关）。
+  // 落点是整个柜顶（到顶檐外沿）；大半从四边翻出去（前沿最多，见 PLASTER.dust.far），从撞上那一刻起在 WARDROBE.settle 秒里慢慢落到
   // 门前、柜子两边的地上（fall；靠墙那条边的、顶面上震起来的照旧悬一会儿就淡掉）；灰细、不崩碎屑
   wardrobe: {
     at: WARDROBE_SHUT,

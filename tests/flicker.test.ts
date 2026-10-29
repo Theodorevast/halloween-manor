@@ -2,18 +2,24 @@
 // 数法和 tests/lightfx.test.ts 一样：lightfx.ts 的 countDips（60 Hz 采样，从高点掉 0.1 以上算一次），全项目的灯闪检查口径一致。
 // 台灯、手电都是跑真的 createLamp / createFlashlight（node 里不渲染，只读它们写出来的亮度），不是只看表；
 // 旧的两处（地址带 ?oldflicker 时还用它们，看样时对比新旧）也在这里量一遍：它们确实超了，这就是改的理由。
-// 顺带钉住最终审查的两个小修：手电镜片跟着 torchDim 一起暗（V-M4）、手电多于登记表的槽数时只提醒一次（V-M5）
+// 顺带钉住最终审查的两个小修：手电镜片跟着 torchDim 一起暗（V-M4）、手电多于登记表的槽数时只提醒一次（V-M5）。
+// 最终审查 I1：台灯的附身、复原和附近的现身前后脚接上（不只是同时），门廊灯自己的微抖加上现身（M2），也在这里扫
 import * as THREE from 'three/webgpu';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SCARES } from '../src/config/scares';
 import { MANIFEST, SPAWN } from '../src/config/visitors';
 import { lamp as lampSfx, rng, type Bus } from '../src/audio/sfx';
 import type { RenderCore } from '../src/engine/types';
 import type { ScareObjectState, WorldState } from '../src/sim/types';
 import { NERVOUS_FLICKER, TORCH, nervousWave } from '../src/view/flashlight';
-import { GHOST } from '../src/view/ghost';
+import { GHOST, manifestLights } from '../src/view/ghost';
+import { porchFlicker } from '../src/view/house';
 import { LIGHTFX, countDips, createLightFx, dipStarts, letterLevel, thermal } from '../src/view/lightfx';
 import { PALETTE } from '../src/view/palette';
-import { FLICKER_END, LAMP_FLICKER, LAMP_FLICKER_OLD, LAMP_PATTERN, LAMP_RELIGHT, createLamp, sampleTable } from '../src/view/props/lamp';
+import {
+  BLIP_DEPTH,
+  BLIP_QUIET, FLICKER_END, LAMP_FLICKER, LAMP_FLICKER_OLD, LAMP_PATTERN, LAMP_RELIGHT, createLamp, sampleTable,
+} from '../src/view/props/lamp';
 import { TORCH_COUNT, torchDim, torches } from '../src/view/torches';
 
 /** 要查的几种帧率：手机 30、常见 60、高刷 120 / 144（硬切的表和过了热惯性的亮度，数出来都不能超） */
@@ -327,7 +333,7 @@ describe('访客紧张时手电的亮度闪烁（TORCH.nervous.flicker）', () =
   });
 
   it('叠上现身的灯闪（lightfx 写的 torchDim：蓄力、落下、停留、收）也不超：100 个种子 × 现身放在 30 秒里的 3 个位置；旧的深度会叠成 4 下', () => {
-    const M = GHOST.manifest, hz = 60, dt = 1 / hz;
+    const hz = 60, dt = 1 / hz;
     const scene = new THREE.Scene();
     const houseRoot = new THREE.Group();
     scene.add(houseRoot);
@@ -345,13 +351,13 @@ describe('访客紧张时手电的亮度闪烁（TORCH.nervous.flicker）', () =
           dim.push(torchDim[0]);
         }
       };
-      fx.pulse(pos, M.radius, M.windup, MANIFEST.windup);
+      // 和 ghost.ts 的 onManifest 一样调（manifestLights）：蓄力 → 落下 + 停留压着 → 收
+      manifestLights(fx, 'windup', pos);
       run(MANIFEST.windup);
-      fx.dipAll(pos, M.radius, M.drop.depth, M.drop.ms);
-      const release = fx.pulse(pos, M.radius, M.hold, MANIFEST.hold + M.holdSlack);
+      const release = manifestLights(fx, 'drop', pos);
       run(MANIFEST.hold);
-      release();
-      fx.dipAll(pos, M.radius, M.end.depth, M.end.ms);
+      release?.();
+      manifestLights(fx, 'end', pos);
       run(1);
     } finally {
       Object.assign(torches[0], saved);
@@ -369,6 +375,198 @@ describe('访客紧张时手电的亮度闪烁（TORCH.nervous.flicker）', () =
     };
     expect(stacked(TORCH.nervous.flicker)).toBeLessThanOrEqual(3);
     expect(stacked(NERVOUS_FLICKER.old)).toBeGreaterThanOrEqual(4);
+  });
+});
+
+// ── 台灯、门廊灯和附近的现身前后接上（2026-10-29 最终审查 I1、M2；路 F Minor 3）────────
+
+const HZ = 60;
+/** 附近现身的鬼魂站在这里（房屋坐标）。台灯放在 (1, 1)，离它 0.63 米 */
+const GHOST_AT = { x: 1.6, z: 1.2 };
+/** 开头 6 秒一次轻闪都没有的台灯种子（下面第一条先查一遍）：扫附身 / 复原和现身叠不叠时，不让平时的轻闪掺进来（轻闪另有一组） */
+const QUIET_SEED = 5;
+
+/**
+ * 一盏真的台灯（createLamp）挂进场景、真的 lightfx 收集它；附近的现身按 ghost.ts 的 manifestLights 调（和 onManifest 一样的调用、
+ * 一样的选项）：蓄力在第 at.windup 帧，落下、停留在 MANIFEST.windup 秒后，收在再过 MANIFEST.hold 秒后。
+ * 台灯的附身（at.trigger）、复原（at.reset）也按帧插进去，和模拟层一样：附身时 broken = SCARES.lamp.broken，复原时清零再 reset。
+ * 每帧先台灯写自己的亮度、再 lightfx 乘上压暗（游戏里两个模块谁先不一定，lightfx 渲染前还会再补一次，结果一样），
+ * 记下 lightfx 之后灯罩的 glow（和灯的强度是同一个乘数）。返回 n 帧、60 Hz 的亮度
+ */
+function lampNearManifest(seed: number, n: number, at: { windup?: number; trigger?: number; reset?: number }): number[] {
+  const scene = new THREE.Scene();
+  const houseRoot = new THREE.Group();
+  scene.add(houseRoot);
+  const rig = createLamp(seed);
+  rig.model.position.set(1, 0, 1);
+  houseRoot.add(rig.model);
+  let light: THREE.PointLight | undefined;
+  rig.model.traverse((o) => {
+    if ((o as THREE.PointLight).isPointLight) light = o as THREE.PointLight;
+  });
+  const glow = (light!.userData.lightfx as { glow: { value: number } }).glow;
+  const obj: ScareObjectState = { id: 'lamp', type: 'lamp', pos: { x: 1, z: 1 }, facing: 0, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0 };
+  const fx = createLightFx({ scene, houseRoot } as unknown as RenderCore);
+  const drop = at.windup === undefined ? -1 : at.windup + frames(HZ, MANIFEST.windup);
+  const end = drop < 0 ? -1 : drop + frames(HZ, MANIFEST.hold);
+  let release: (() => void) | null = null;
+  const out: number[] = [];
+  let time = 0;
+  try {
+    for (let k = 0; k < n; k++) {
+      if (k === at.trigger) {
+        obj.active = SCARES.lamp.active;
+        obj.broken = SCARES.lamp.broken;
+        rig.trigger({} as WorldState, { type: 'trigger', object: 'lamp', scareType: 'lamp' });
+      }
+      if (k === at.reset) {
+        obj.broken = 0;
+        rig.reset();
+      }
+      if (k === at.windup) manifestLights(fx, 'windup', GHOST_AT);
+      if (k === drop) release = manifestLights(fx, 'drop', GHOST_AT);
+      if (k === end) {
+        release?.();
+        manifestLights(fx, 'end', GHOST_AT);
+      }
+      time += 1 / HZ;
+      rig.update({ dt: 1 / HZ, time, obj, state: {} as WorldState });
+      fx.update({ dt: 1 / HZ, time, state: {} as WorldState });
+      out.push(glow.value);
+    }
+  } finally {
+    fx.dispose();
+  }
+  return out;
+}
+
+/** 扫一串错开（帧），每一种跑一遍 run，返回数出来最多的那一种：几下、在哪个错开（秒） */
+function worstOver(offsets: number[], run: (s: number) => number[]) {
+  let worst = { dips: -1, at: NaN };
+  for (const s of offsets) {
+    const dips = countDips(run(s), HZ);
+    if (dips > worst.dips) worst = { dips, at: s / HZ };
+  }
+  return worst;
+}
+/** a..b 帧（含两端） */
+const span = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
+
+describe('台灯的附身、复原和附近的现身前后接上（最终审查 I1）：任意 1 秒最多暗 3 下', () => {
+  it('前提：台灯在现身的影响范围里（不在最外面减弱的那一圈）；这个种子的台灯开头 6 秒一次轻闪都没有', () => {
+    expect(Math.hypot(GHOST_AT.x - 1, GHOST_AT.z - 1)).toBeLessThan(GHOST.manifest.radius * (1 - LIGHTFX.edge));
+    expect(lampNearManifest(QUIET_SEED, 6 * HZ, {}).every((v) => v === 1)).toBe(true);
+  });
+
+  it('附身台灯相对现身蓄力开始 −1 到 +3 秒（步长 1/60 秒）：每一种错开都不超过 3 下（修之前蓄力后 0.35–1.0 秒、收之后 0.15–0.2 秒附身是 4 下）', () => {
+    const W = 3 * HZ;
+    const worst = worstOver(span(-HZ, 3 * HZ), (s) => lampNearManifest(QUIET_SEED, W + 5 * HZ, { windup: W, trigger: W + s }));
+    // 附身自己就是 3 下（连熄灭那一下）：最坏正好是它，一下不多
+    expect(worst.dips, `最坏在附身比蓄力晚 ${worst.at.toFixed(3)} 秒时`).toBe(3);
+  });
+
+  it('台灯复原相对现身蓄力开始 −1 到 +3 秒（步长 1/60 秒；复原之前 SCARES.lamp.broken 秒被附身、一直黑着）：每一种错开都不超过 3 下（修之前复原后 0.2–0.75 秒开始现身最坏 5 下）', () => {
+    const W = 8 * HZ, broken = frames(HZ, SCARES.lamp.broken);
+    const worst = worstOver(span(-HZ, 3 * HZ), (s) =>
+      lampNearManifest(QUIET_SEED, W + 5 * HZ, { windup: W, trigger: W + s - broken, reset: W + s }));
+    // 6 秒前那次附身自己是 3 下：最坏正好是它
+    expect(worst.dips, `最坏在复原比蓄力晚 ${worst.at.toFixed(3)} 秒时`).toBe(3);
+  });
+
+  it('没被附身的台灯照旧跟着落下、停留暗下去（只是不跟着蓄力、收）：停留时压在 hold 那一档', () => {
+    const W = HZ;
+    const lv = lampNearManifest(QUIET_SEED, W + 3 * HZ, { windup: W });
+    // 蓄力那 0.6 秒台灯不动（代价：看样时确认）
+    expect(lv.slice(W, W + frames(HZ, MANIFEST.windup)).every((v) => v === 1)).toBe(true);
+    // 停留的中间压在 hold（'c' ≈ 42%）
+    const mid = lv[W + frames(HZ, MANIFEST.windup + MANIFEST.hold / 2)];
+    expect(mid).toBeCloseTo(letterLevel(GHOST.manifest.hold), 3);
+    // 收：直接放开，没有再暗一下（从停留的最后一帧起，亮度只往上走）
+    const after = lv.slice(W + frames(HZ, MANIFEST.windup + MANIFEST.hold) - 1);
+    for (let i = 1; i < after.length; i++) expect(after[i]).toBeGreaterThanOrEqual(after[i - 1] - 1e-12);
+  });
+});
+
+describe('台灯平时的轻闪不留到复原以后（路 F Minor 3，随最终审查 I1 一起修）', () => {
+  /**
+   * 种子 1 的台灯平时第一次轻闪开始的那一帧（单独跑它量：亮度第一次掉到 0.995 以下）。
+   * 2026-10-29 起轻闪压到 countDips 数不出来（lamp.ts 的 BLIP_DEPTH），不能再用 dipStarts 找它
+   */
+  const firstBlip = () => lampNearManifest(1, 8 * HZ, {}).findIndex((v) => v < 0.995);
+  /**
+   * 复原收尾的那一帧（复原开始后第几帧；LAMP_RELIGHT 最后一段从 0.5 秒起 0.15 秒爬满，lamp.ts 到 0.65 秒收尾），下一帧起就是平时。
+   * 平时的轻闪倒数 BLIP_QUIET 秒，最早在平时的第 frames(BLIP_QUIET) 帧开始：从收尾那一帧起往后 frames(BLIP_QUIET) 帧都不该有
+   */
+  const BACK = frames(HZ, 0.65) - 1;
+  const broken = frames(HZ, SCARES.lamp.broken);
+
+  it('附身那一刻轻闪快来了、或者正闪着：复原亮回以后 BLIP_QUIET 秒里亮度只往上走，不接着闪', () => {
+    const b = firstBlip();
+    expect(b).toBeGreaterThan(HZ);
+    for (const x of span(0, frames(HZ, 0.3))) {
+      // 附身在那一下轻闪暗下去之前 x 帧，6 秒后复原
+      const R = b - x + broken;
+      const lv = lampNearManifest(1, R + BACK + frames(HZ, BLIP_QUIET), { trigger: b - x, reset: R });
+      const quiet = lv.slice(R + BACK);
+      expect(quiet).toHaveLength(frames(HZ, BLIP_QUIET));
+      for (let i = 1; i < quiet.length; i++) expect(quiet[i], `附身在轻闪之前 ${x} 帧`).toBeGreaterThanOrEqual(quiet[i - 1] - 1e-12);
+    }
+  });
+
+  it('再碰上附近现身的落下（复原的两下 + 一下轻闪 + 落下）：任意 1 秒也不超过 3 下（修之前 4 下）', () => {
+    const b = firstBlip();
+    let worst = { dips: -1, at: NaN };
+    for (const x of span(0, frames(HZ, 0.3))) {
+      const R = b - x + broken;
+      // 蓄力从复原前 0.1 秒到复原后 0.6 秒开始：落下在复原后 0.5–1.2 秒，正好是轻闪原来接上的地方
+      const w = worstOver(span(-6, 36), (s) => lampNearManifest(1, R + 4 * HZ, { trigger: b - x, reset: R, windup: R + s }));
+      if (w.dips > worst.dips) worst = w;
+    }
+    expect(worst.dips, `最坏在蓄力比复原晚 ${worst.at.toFixed(3)} 秒时`).toBeLessThanOrEqual(3);
+  });
+});
+
+describe('门廊灯自己的微抖（最终审查 M2）：单独数不出来，附近现身时也不超过 3 下', () => {
+  it('峰谷差不到 0.1（countDips 的门槛）：单独 60 秒一下都数不出来', () => {
+    const lv = Array.from({ length: 60 * HZ }, (_, i) => porchFlicker(i / HZ));
+    expect(Math.max(...lv) - Math.min(...lv)).toBeLessThan(0.1);
+    expect(countDips(lv, HZ)).toBe(0);
+  });
+
+  it('附近现身（真的 lightfx，按 manifestLights 调）：现身放在微抖的 600 个相位上，任意 1 秒最多 3 下（修之前最坏 4 下）', () => {
+    const worst = worstOver(span(0, 600 - 1), (phase) => {
+      // 门廊灯：标记和 house.ts 一样（带灯笼的 emissive，没有 busy），主人每帧在 lightfx 之前写强度。底数取 1，强度就是亮度
+      const scene = new THREE.Scene();
+      const houseRoot = new THREE.Group();
+      scene.add(houseRoot);
+      const porch = new THREE.PointLight(0xffb35c, 1, 2.4, 2);
+      porch.position.set(1, 1.35, 1);
+      porch.userData.lightfx = { emissive: new THREE.MeshBasicNodeMaterial({ color: 0x8c6232 }) };
+      houseRoot.add(porch);
+      const fx = createLightFx({ scene, houseRoot } as unknown as RenderCore);
+      const W = HZ / 2, drop = W + frames(HZ, MANIFEST.windup), end = drop + frames(HZ, MANIFEST.hold);
+      let release: (() => void) | null = null;
+      const out: number[] = [];
+      try {
+        for (let k = 0; k < end + HZ; k++) {
+          if (k === W) manifestLights(fx, 'windup', GHOST_AT);
+          if (k === drop) release = manifestLights(fx, 'drop', GHOST_AT);
+          if (k === end) {
+            release?.();
+            manifestLights(fx, 'end', GHOST_AT);
+          }
+          const t = (phase + k) / HZ;
+          porch.intensity = porchFlicker(t);
+          fx.update({ dt: 1 / HZ, time: t, state: {} as WorldState });
+          out.push(porch.intensity);
+        }
+      } finally {
+        fx.dispose();
+      }
+      return out;
+    });
+    // 现身自己就是 3 下（蓄力两下、落下一下；门廊灯照旧跟着蓄力）：最坏正好是它
+    expect(worst.dips, `最坏在相位 ${worst.at.toFixed(3)} 秒时`).toBe(3);
   });
 });
 
@@ -466,5 +664,29 @@ describe('?oldflicker（看样时对比新旧；node 里没有 location 也不�
     const none = await fresh();
     expect(none.flash.TORCH.nervous.flicker).toBe(none.flash.NERVOUS_FLICKER.safe);
     expect(none.lamp.LAMP_FLICKER).not.toEqual(none.lamp.LAMP_FLICKER_OLD);
+  });
+});
+
+describe('台灯平时的轻闪数不成一下（2026-10-29：附身前刚轻闪完会凑成 4 下，按体验定成把轻闪压到门槛以下）', () => {
+  it('深度上限小于 countDips 的门槛 0.1', () => {
+    expect(BLIP_DEPTH[1]).toBeLessThan(0.1);
+  });
+  it('真的台灯不附身放 600 秒（4 个种子、60 帧）：一下都数不出来，但确实在轻闪（亮度会掉下来）', () => {
+    for (const seed of [1, 2, 3, 7]) {
+      const rig = createLamp(seed);
+      let light: THREE.PointLight | undefined;
+      rig.model.traverse((o) => { if ((o as THREE.PointLight).isPointLight) light = o as THREE.PointLight; });
+      const glow = (light!.userData.lightfx as { glow: { value: number } }).glow;
+      const obj: ScareObjectState = { id: 'lamp', type: 'lamp', pos: { x: 0, z: 0 }, facing: 0, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0 };
+      const levels: number[] = [];
+      let time = 0;
+      for (let k = 0; k < 600 * 60; k++) {
+        time += 1 / 60;
+        rig.update({ dt: 1 / 60, time, obj, state: {} as WorldState });
+        levels.push(glow.value);
+      }
+      expect(dipStarts(levels, 60)).toEqual([]);
+      expect(Math.min(...levels)).toBeLessThan(0.99);
+    }
   });
 });

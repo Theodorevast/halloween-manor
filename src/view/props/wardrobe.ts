@@ -21,7 +21,7 @@
 import * as THREE from 'three/webgpu';
 import { color, positionGeometry, smoothstep } from 'three/tsl';
 import { CELL, FURNITURE, PROPS, buildTiles, propCenter } from '../../config/house';
-import { WARDROBE } from '../../config/scares';
+import { WARDROBE, WARDROBE_SHUT } from '../../config/scares';
 import type { Quality } from '../../engine/types';
 import type { WorldState } from '../../sim/types';
 import { FURNITURE_TOP, WARDROBE_BOX, furnitureFrame } from '../furniture';
@@ -60,10 +60,9 @@ export const WARDROBE_LOOK = {
 const W = WARDROBE;
 const LK = WARDROBE_LOOK;
 /**
- * 门撞上门框的那一刻（秒，从 trigger 算起）= slamAt + slamTime：硬停、震、柜顶落灰都从这一刻起；
- * 声音的闷响也放在这一刻（合并时 SCARES.wardrobe.hitAt 也改成它）。particles.ts、测试都读这一个，不各算一遍
+ * 门撞上门框的那一刻（config/scares.ts 的 WARDROBE_SHUT = slamAt + slamTime，只在那里算；声音的闷响、模拟里惊吓落下的那一刻也是它）：
+ * 硬停、震、柜顶落灰都从这一刻起
  */
-export const WARDROBE_SHUT = W.slamAt + W.slamTime;
 const SHUT = WARDROBE_SHUT;
 /** 演完：撞上、震完，再留一点给门里那件外套晃完（门已经关上，看不见），之后回到静止 */
 const END = SHUT + 0.3;
