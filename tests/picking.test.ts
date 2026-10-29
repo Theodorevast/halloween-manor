@@ -8,7 +8,7 @@ import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W } from '../src/config/house';
 import { TRAP } from '../src/config/visitors';
 import { setGhostUi } from '../src/engine/ghostRig';
-import { createHoldGesture, createHoldInput, createPicker } from '../src/engine/picking';
+import { EVENT_STAMP, createHoldGesture, createHoldInput, createPicker, eventTime } from '../src/engine/picking';
 import type { CameraRig, GhostRig } from '../src/engine/types';
 
 const HOLD = TRAP.holdToArm * 1000;
@@ -421,6 +421,67 @@ describe('输入层：普通的点一下和按住', () => {
   });
 });
 
+// ── 按住多久按事件的时间戳算（P-3）────────────────────────────────────────────────
+// 主线程卡了一下（着色器编译、垃圾回收）时，指针事件排在后面才被处理；用处理那一刻的 performance.now() 算按了多久，
+// 按下和松手之间卡一下就会把点一下读成按住。事件自己的 timeStamp 是它真正发生的那一刻，按它算
+
+describe('输入层：按住多久按事件的时间戳算', () => {
+  it('按下之后卡了 0.9 秒才处理松手（松手事件自己的时间戳显示只按了 120 毫秒）：还是点一下，不读成按住设机关', () => {
+    const r = rig();
+    r.at(0); r.input.down(0, 0);
+    r.at(900); r.input.buttons(0, 120);
+    expect(r.picks).toEqual(['bed']);
+    expect(r.arms).toEqual([]);
+  });
+
+  it('按下的事件排在后面才被处理（它发生在 100，处理时已是 700），松手事件显示一共按了 550 毫秒：是设机关，不是点一下', () => {
+    const r = rig();
+    r.at(700); r.input.down(0, 100);
+    r.at(701); r.input.buttons(0, 650);
+    expect(r.arms).toEqual(['bed']);
+    expect(r.picks).toEqual([]);
+  });
+
+  it('按下的事件排在后面才处理、松手还没来：按满的判定从真正按下的那一刻起算（帧里 0.5 秒前就按下了，就是按满了）', () => {
+    const r = rig();
+    r.at(700); r.input.down(0, 100);
+    r.frame(701);
+    expect(r.arms).toEqual(['bed']);
+  });
+
+  it('不给时间戳就用 now()：和以前一样（上面那些组的测试都是这样调的）', () => {
+    const r = rig();
+    r.at(0); r.input.down(0);
+    r.at(HOLD - 1); r.input.buttons(0);
+    expect(r.picks).toEqual(['bed']);
+  });
+});
+
+describe('事件时间戳（eventTime）：在 performance.now() 的时间轴上才用，不然用现在', () => {
+  it('在过去、没超过 EVENT_STAMP.maxAge：原样用（卡了一阵才处理的事件，时间戳就是它真正发生的那一刻）', () => {
+    expect(eventTime(1000, 1900)).toBe(1000);
+    expect(eventTime(1900 - EVENT_STAMP.maxAge, 1900)).toBe(1900 - EVENT_STAMP.maxAge);
+  });
+
+  it('就是现在、或比现在略晚（时间戳精度、两条时钟的一点误差）：夹到现在', () => {
+    expect(eventTime(1900, 1900)).toBe(1900);
+    expect(eventTime(1900 + EVENT_STAMP.futureSlack, 1900)).toBe(1900);
+  });
+
+  it('不在同一条时间轴上（毫秒级的 Date.now()、比现在晚得多、比现在早得多）：用现在', () => {
+    expect(eventTime(1.7e12, 1900)).toBe(1900);
+    expect(eventTime(1900 + EVENT_STAMP.futureSlack + 1, 1900)).toBe(1900);
+    expect(eventTime(1900 - EVENT_STAMP.maxAge - 1, 1900)).toBe(1900);
+    expect(eventTime(5, 100000)).toBe(100000);
+  });
+
+  it('不是有限的数（NaN、Infinity、没有这个字段）：用现在', () => {
+    expect(eventTime(Number.NaN, 1900)).toBe(1900);
+    expect(eventTime(Number.POSITIVE_INFINITY, 1900)).toBe(1900);
+    expect(eventTime(undefined as unknown as number, 1900)).toBe(1900);
+  });
+});
+
 // ── DOM 接线：假画布派发指针事件，真的 createPicker ────────────────────────────────────────
 // 上面的 createHoldInput 只测了判定；剩下的是几行 addEventListener：事件的哪个字段交给谁、什么时候摘监听、每帧的循环。
 // 这里用一个 EventTarget 做的假画布把它们跑一遍（时间用 clock、帧用 queued，都由测试控制）
@@ -679,6 +740,37 @@ describe('DOM 接线：假画布派发指针事件，真的 createPicker', () =>
       expect(e.arms).toEqual([]);
     });
 
+    // P-3：按住多久按事件自己的时间戳算（clock 是处理事件时的 performance.now()；timeStamp 是事件真正发生的那一刻）
+    it('按下之后主线程卡了 0.9 秒才处理松手（松手事件的时间戳显示只按了 120 毫秒）：还是点一下，不读成按住设机关', () => {
+      const e = ghostEnv();
+      e.down(); // 时间戳 1000
+      clock = 1900; // 卡了 0.9 秒
+      e.up({ timeStamp: 1120 });
+      expect(e.picks).toEqual(['bed']);
+      expect(e.arms).toEqual([]);
+    });
+
+    it('按下的事件排在后面才处理（发生在 1000，处理时已是 1700），松手事件显示一共按了 550 毫秒：是设机关', () => {
+      const e = ghostEnv();
+      clock = 1700;
+      e.down({ timeStamp: 1000 });
+      e.up({ timeStamp: 1550 });
+      expect(e.arms).toEqual(['bed']);
+      expect(e.picks).toEqual([]);
+    });
+
+    it('事件时间戳不在 performance.now() 的时间轴上（比如是 5）：退回用现在，一按下不会马上设机关', () => {
+      const e = ghostEnv();
+      clock = 100000;
+      e.down({ timeStamp: 5 });
+      clock = 100016;
+      runFrame();
+      expect(e.arms).toEqual([]);
+      clock = 100000 + TRAP.holdToArm * 1000;
+      runFrame();
+      expect(e.arms).toEqual(['bed']);
+    });
+
     // P-2：每帧的循环要先排下一帧、再发回调。订阅者（悬停、附身、设机关的回调）抛了异常，循环不能就此停掉
     it('悬停的订阅者抛了异常：下一帧已经排好，循环不会就此停掉，之后按满照样设机关（以前这里排不上下一帧，悬停和按住设机关从此全没了）', () => {
       const e = ghostEnv();
@@ -828,6 +920,23 @@ describe('DOM 接线：假画布派发指针事件，真的 createPicker', () =>
       e.look(0, 1.5, -3);
       runFrame();
       expect(e.hovers).toEqual(['bed', null, 'bed']);
+    });
+
+    // P-3：点击的 400 毫秒也按事件自己的时间戳算
+    it('按下之后主线程卡了 0.9 秒才处理松手（松手事件的时间戳显示只按了 120 毫秒）：照样是点击', () => {
+      const e = topEnv();
+      e.down(); // 时间戳 1000
+      clock = 1900;
+      e.up({ timeStamp: 1120 });
+      expect(e.picks).toEqual(['bed']);
+    });
+
+    it('事件时间戳显示按了 450 毫秒：不算点击，哪怕处理得很及时', () => {
+      const e = topEnv();
+      clock = 1450;
+      e.down({ timeStamp: 1000 }); // 按下的事件排在后面才处理
+      e.up({ timeStamp: 1450 });
+      expect(e.picks).toEqual([]);
     });
 
     // P-2：看镜头的循环也一样，先排下一帧再发回调；以前回调一抛，循环停了，watching 还卡成 true，之后 pointermove 再也起不了这个循环
