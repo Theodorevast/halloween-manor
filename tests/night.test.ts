@@ -346,6 +346,36 @@ describe('close()：收夜', () => {
     expect(last.mode === 'wander' || last.mode === 'alert').toBe(true);
   });
 
+  test('最后一位当场就来，不等 SPAWN.delay：close() 一返回人就在屋里（门外 entering），紧接着的那一步就带回 spawn 事件（last）', () => {
+    // 正式游戏的样子（开局间隔 + 自动生成）：第一个人在第二个进门之前走了，屋里空着，收夜
+    const w = createWorld({ seed: 25, openingGaps: [25, 25] });
+    runTo(w, 8);
+    scareAway(w.state.npcs[0]);
+    runUntilEmpty(w);
+    expect(w.state.npcs.length).toBe(0);
+    const t0 = w.state.time;
+    w.close();
+    // 收夜检测（已收夜、屋里没人）在这一刻看到的屋里已经有人了：不会先开始收尾、再被打断
+    expect(w.state.npcs.length).toBe(1);
+    const last = w.state.npcs[0];
+    expect(last.mode).toBe('entering');
+    expect(last.pos).toEqual(FRONT_DOOR.outside);
+    // 紧接着的这一步就返回带 last 的 spawn 事件（一步 1/60 秒，远不到 SPAWN.delay 的 8 秒）
+    const ev = w.step(DT);
+    expect(ofType(ev, 'spawn')).toEqual([{ type: 'spawn', npc: last.id, last: true }]);
+    expect(w.state.time - t0).toBeLessThan(0.1);
+    expect(w.state.time - t0).toBeLessThan(SPAWN.delay[0]);
+
+    // 刚有人开始逃跑（hit-stop 里时间不走）时收夜：事件照样在下一次 step 里带回来
+    const v = createWorld({ seed: 26, autoSpawn: false });
+    const runner = v.spawn({ pos: { x: 8, z: 6 }, personality: 'timid' });
+    scareAway(runner);
+    v.step(DT);
+    expect(v.state.hitStop).toBeGreaterThan(0);
+    v.close();
+    expect(ofType(v.step(DT), 'spawn').filter((e) => e.last)).toEqual([{ type: 'spawn', npc: 2, last: true }]);
+  });
+
   test('收夜时屋里的人都在逃跑也算没人：最后再进来一位', () => {
     const w = createWorld({ seed: 15, autoSpawn: false });
     const a = w.spawn({ pos: { x: 8, z: 6 }, personality: 'timid' });
