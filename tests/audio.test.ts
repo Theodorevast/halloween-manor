@@ -286,6 +286,45 @@ describe('被照到的压力声：照着鬼魂的访客走了，它不会一直�
     r.sync(world(), 3);
     expect(fades).toEqual([IN, { target: 0, at: 3, tau: REVEAL.out / 3 }]);
   });
+
+  // AudioContext 没在跑（挂起、Safari 的 interrupted、resume 还没完成）时 engine 不攒声音，但「谁在照鬼魂」是模拟的状态，不是声音：
+  // 照样用 note 记账，恢复后第一次 sync 把压力声对到名单上（以前这几帧的 on / off 直接丢了，压力声和模拟对不上，要等下一次照到 / 移开）
+  it('没在跑时 note(照到)：记进名单但不出声；恢复后第一次 sync 才把压力声淡入，之后不重复', () => {
+    const r = newRouter();
+    r.note(reveal(1, true));
+    expect(fades).toEqual([]);
+    r.sync(world(npc(1)), 5);
+    expect(fades).toEqual([{ target: 1, at: 5, tau: REVEAL.in / 3 }]);
+    r.sync(world(npc(1)), 6);
+    expect(fades).toHaveLength(1);
+  });
+
+  it('压力声响着时没在跑、手电移开：note(移开) 也记账，恢复后第一次 sync 淡出（不用等那个人走掉）', () => {
+    const r = newRouter();
+    r.play([reveal(1, true)], world(npc(1)), 1);
+    r.note(reveal(1, false));
+    expect(fades).toEqual([IN]);
+    r.sync(world(npc(1)), 5);
+    expect(fades).toEqual([IN, { target: 0, at: 5, tau: REVEAL.out / 3 }]);
+  });
+
+  it('没在跑时照一下又移开：名单还是空的，恢复后什么也不放', () => {
+    const r = newRouter();
+    r.note(reveal(1, true));
+    r.note(reveal(1, false));
+    r.sync(world(npc(1)), 5);
+    expect(fades).toEqual([]);
+  });
+
+  it('note 只管 reveal：吓跑、现身落下这类别的事件不出声也不记账', () => {
+    const r = newRouter();
+    played.braam.length = played.manifestHit.length = played.coldBreath.length = 0;
+    r.note({ type: 'flee', npc: 1 });
+    r.note({ type: 'manifest', phase: 'drop', pos: { x: 8, z: 6 }, scared: [1] });
+    r.sync(world(npc(1)), 5);
+    expect([played.braam, played.manifestHit, played.coldBreath]).toEqual([[], [], []]);
+    expect(fades).toEqual([]);
+  });
 });
 
 describe('现身落下时冲击让路：条件是「这一批真的放了 braam」', () => {

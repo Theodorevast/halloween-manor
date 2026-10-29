@@ -31,7 +31,9 @@
 //     （现身的冲击不算 braamAt：否则现身后 0.8 秒内吓跑的人就没有 braam 了）
 //   - 被手电照到（reveal 事件）：lit 集合里有人就淡入压力声（ghost.ts 的 createRevealLayer），空了就淡出。lit 不能只靠 on / off 事件：
 //     模拟那边走了的人（mode = gone，下一步就从 npcs 里删掉）不会再有 off，逃跑中的人又不理会鬼魂（canBeScared），所以 tick 每帧最先调 sync，
-//     把 lit 里「已经不在 state.npcs 里 / gone / fleeing」的人清掉，没人了压力声就淡出，不会一直响下去（tests/audio.test.ts 守着）
+//     把 lit 里「已经不在 state.npcs 里 / gone / fleeing」的人清掉，没人了压力声就淡出，不会一直响下去（tests/audio.test.ts 守着）。
+//     AudioContext 没在 running（挂起、Safari 的 interrupted、resume 还没完成）时不攒声音，但 reveal 的 on / off 是模拟的状态不是声音，
+//     照样用 note 记进 lit，恢复后第一帧的 sync 把压力声对上（不然这几帧的 on / off 丢了，压力声要等下一次照到 / 移开才对得上；tests/audio-engine.test.ts 守着）
 //   - 察觉（notice 事件）：只有手电照到鬼魂（kind = ghost）时那个人倒吸一口很轻的气（调研 3.1），同一个人 NOTICE_GAP 秒内最多一次；其余种类没有声音
 //   - 机关（trap 事件）：armed 一声极轻的冰裂声（不定位，只有玩家听得见）；sprung 走物件本来的 trigger 声；expired 无声
 //   - 喘气、呜咽：不是事件，是恐惧值的函数，每帧由 breath.ts 排程（凑近才听得见，耳朵是鬼魂）
@@ -214,6 +216,11 @@ export function silence(bus: MixBus, t: number, hold: number) {
 export interface Router {
   play(batch: readonly SimEvent[], state: WorldState, t: number): void;
   /**
+   * AudioContext 没在跑（挂起、Safari 的 interrupted、resume 还没完成）时收到的事件：不出声（恢复之后一下子放出一串过时的声音更糟），
+   * 只有「谁在照鬼魂」（reveal 的 on / off）照样记进名单——那是模拟的状态，不是声音；压力声在恢复后第一次 sync 里对到名单上。别的事件什么也不做
+   */
+  note(e: SimEvent): void;
+  /**
    * 每帧：把 lit（手电照着鬼魂的人）对齐到模拟。不在 state.npcs 里的（走了、被删掉）、mode 是 gone 或 fleeing 的人一律清掉
    * （他们不会再有 reveal off，或者根本不再理会鬼魂），清完没人了压力声就淡出。离线测量里没有「每帧」，不用调
    */
@@ -239,6 +246,8 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
   const manifest = createManifestSound(bus);
   const reveal = createRevealLayer(bus);
   const lit = new Set<number>();
+  /** 名单在没出声的时候变过（note）：下一次 sync 要把压力声对一遍 */
+  let litDirty = false;
   const noticeAt = new Map<number, number>();
   const P = (p: Vec2 | undefined) => {
     if (!p) return 0;
@@ -263,8 +272,15 @@ export function createRouter(bus: MixBus, pan: (p: Vec2) => number, crowd?: Crow
 
   const r: Router = {
     tension: 0,
+    note(e) {
+      if (e.type !== 'reveal') return;
+      if (e.on) lit.add(e.npc);
+      else lit.delete(e.npc);
+      litDirty = true;
+    },
     sync(state, t) {
-      let changed = false;
+      let changed = litDirty;
+      litDirty = false;
       for (const id of lit) {
         const n = state.npcs.find((x) => x.id === id);
         // 还在屋里、没在逃跑的人才可能还照着鬼魂（sim/npc.ts 的 canBeScared：逃跑中和已离开的不算）
@@ -450,8 +466,13 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
     const state = queueState;
     queue = [];
     queueState = null;
-    if (!batch.length || !state || !ac || !router || ac.state !== 'running') return;
+    if (!batch.length || !state || !ac || !router) return;
     const r = router;
+    if (ac.state !== 'running') {
+      // 排队时还在跑、放出去之前被挂起了：不放声音，被照到的名单照样记账
+      for (const e of batch) r.note(e);
+      return;
+    }
     const t = ac.currentTime + LOOKAHEAD;
     guard(() => r.play(batch, state, t));
   };
@@ -536,8 +557,14 @@ export function createAudio(pan: (p: Vec2) => number): AudioSys {
     },
 
     onEvent(e, state) {
-      // 还没解锁、或被挂起时不攒事件：恢复之后一下子放出一串过时的声音更糟
-      if (!ac || ac.state !== 'running') return;
+      // 还没解锁：没有 router，没地方记账
+      if (!ac || !router) return;
+      // 被挂起 / 恢复中不攒事件：恢复之后一下子放出一串过时的声音更糟。但「谁在照鬼魂」是模拟的状态不是声音，照样记账，
+      // 恢复后第一帧的 sync 把压力声对上（不然这几帧里的 on / off 丢了，压力声和模拟对不上）
+      if (ac.state !== 'running') {
+        router.note(e);
+        return;
+      }
       queue.push(e);
       queueState = state;
       if (!pending) {
