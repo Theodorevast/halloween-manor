@@ -245,6 +245,36 @@ describe('reachOf：现身（蓄力察觉 + 落下时看得见）', () => {
     expect(drop.scared).toEqual([]);
   });
 
+  it('天亮往外走的人（leaving）蓄力时不转过来：鬼魂在他背后不算、落下时也确实没吓到；在他前面（光锥里）照样算、照样吓到', () => {
+    // 走廊正中 (8, 6) 的人：天亮以后往南穿过门厅的门洞、走向前门（npc.ts 的 beginLeave），边走边照前面
+    const setup = (at: Vec2, seed: number) => {
+      const w = createWorld({ seed, autoSpawn: false });
+      const n = stand(w, { x: 8.0, z: 6.0 }, Math.PI / 2);
+      drive(w, 0.1, at);
+      w.dawn();
+      drive(w, 0.3, at);
+      return { w, n };
+    };
+    // 背后：客厅里、隔着客厅的门洞有视线，5 米内——不往外走的人蓄力时会转过来（会算），他不会
+    const behind = { x: 8.0, z: 3.5 };
+    const a = setup(behind, 37);
+    expect(a.n.mode).toBe('leaving');
+    expect(grid.lineOfSight(a.n.pos, behind)).toBe(true);
+    expect(Math.hypot(a.n.pos.x - behind.x, a.n.pos.z - behind.z)).toBeLessThan(MANIFEST.noticeRadius);
+    expect(reachOf(grid, a.w.state, { kind: 'manifest', at: behind })).toEqual([]);
+    expect(a.w.manifest()).toBe(true);
+    const dropA = ofType(drive(a.w, MANIFEST.windup + 0.1, behind), 'manifest').find((e) => e.phase === 'drop')!;
+    expect(dropA.scared).toEqual([]);
+    // 前面：门厅里、他正走过去的方向上（光锥里），落下时看得见
+    const ahead = { x: 8.0, z: 9.5 };
+    const b = setup(ahead, 38);
+    expect(b.n.mode).toBe('leaving');
+    expect(reachOf(grid, b.w.state, { kind: 'manifest', at: ahead })).toEqual([b.n.id]);
+    expect(b.w.manifest()).toBe(true);
+    const dropB = ofType(drive(b.w, MANIFEST.windup + 0.1, ahead), 'manifest').find((e) => e.phase === 'drop')!;
+    expect(dropB.scared).toEqual([b.n.id]);
+  });
+
   it('逃跑中的人不算（和结算一样用 canBeScared）', () => {
     const w = createWorld({ seed: 35, autoSpawn: false });
     const at = { x: 8.0, z: 6.0 };

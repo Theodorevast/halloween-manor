@@ -5,31 +5,24 @@
 // - 引诱类：触发那一步结算，能被吓（canBeScared）、听得见（canHear，隔墙打折）的人
 // - 现身：鬼魂所在的格子挡视线（墙、窗）时模拟不让现身，空；否则落下时看得见那里（canSee，MANIFEST.range）的人，
 //   加上蓄力时会转过来的人：MANIFEST.noticeRadius 米内、有视线（蓄力察觉不看视线、隔墙也转头，但隔着墙落下时看不见）、
-//   此刻能察觉（受惊僵着的人 notice 不接，手电还定在吓到他的东西上，见 npc.ts 的 notice）。
+//   此刻能察觉（npc.ts 的 canNotice，notice 自己也用它：受惊僵着的人手电还定在吓到他的东西上；天亮往外走的人只顾着出门）。
 //   蓄力 0.6 秒里手电以 BEHAVIOR.turnRate × NOTICE.torchTurn = 10 弧度/秒转过来，转得到
-// 「能不能被吓」直接用 npc.ts 的 canBeScared（逃跑中、已离开的不算），不另写一份
+// 「能不能被吓」「能不能察觉」都直接用 npc.ts 的 canBeScared、canNotice（只看 NpcState），不另写一份
 import { cellOf } from '../config/house';
 import { SCARES } from '../config/scares';
 import { MANIFEST } from '../config/visitors';
 import type { Grid } from './grid';
-import { canBeScared, type Npc } from './npc';
+import { canBeScared, canNotice } from './npc';
 import { canHear, canSee } from './perception';
 import type { NpcState, Vec2, WorldState } from './types';
 
 /** 玩家下一个动作：附身物件 id，或者在 at 处现身 */
 export type ReachAct = { kind: 'object'; id: string } | { kind: 'manifest'; at: Vec2 };
 
-/**
- * canBeScared 收的是模拟内部的 Npc，它只看 NpcState（n.s.mode）：包一层，画面拿到的 NpcState 也能直接问。
- * 规则还是 npc.ts 那一份，以后改了这里自动跟上
- */
-const scareable = (n: NpcState) => canBeScared({ s: n } as Npc);
-
-/**
- * 蓄力那一步会不会转过来（npc.ts 的 notice 对现身的那一拍：能被吓、不在受惊僵着；现身的察觉优先级最高，不会被别的来源挡掉）。
- * 天亮自己往外走的人（leaving，模拟那一路）只顾着出门、不察觉，所以也不转过来
- */
-const turnsToward = (n: NpcState) => scareable(n) && n.mode !== 'startled' && n.mode !== 'leaving';
+/** canBeScared、canNotice 只看 n.s（参数类型是 Pick<Npc, 's'>）：画面拿到的 NpcState 包一层就能问，规则还是 npc.ts 那一份 */
+const scareable = (n: NpcState) => canBeScared({ s: n });
+/** 蓄力那一步会不会转过来：notice 的门槛（现身的察觉优先级最高，不会被别的来源挡掉，所以只看这一条） */
+const turnsToward = (n: NpcState) => canNotice({ s: n });
 
 /** 下一个动作 act 会影响到的访客 id（引诱类：会听见、会过来；惊吓类、现身：会被吓到），按 state.npcs 的顺序 */
 export function reachOf(grid: Grid, s: Readonly<WorldState>, act: ReachAct): number[] {

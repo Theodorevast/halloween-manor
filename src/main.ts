@@ -268,13 +268,13 @@ async function boot() {
   // 登记簿翻开着时不附身、不设机关：它自己的底子盖着画面，这里再保险一下（俯视模式点到底下的物件）
   picker.onPick((id) => { if (started && !registerView.isOpen) world.trigger(id); });
   // 第三人称：按住设机关；右键或 F 现身（冷却中、正在现身、鬼魂在墙格里时模拟自己不理）。
-  // 做不到时回应一句（hints.refused，判断在 ui/hints.ts）：机关满了（这个物件自己没设着）；够不着；
-  // 现身被拒：冷却中说 Not yet，就绪却被拒是在墙里，正在现身（蓄力、停留）时再按不回应
+  // 做不到时回应一句（hints.refused，判断在 ui/hints.ts）：机关满了（这个物件自己没设着）；
+  // 现身被拒：冷却中说 Not yet，就绪却被拒是在墙里，正在现身（蓄力、停留）时再按不回应。
+  // 够不着不在这里回应：准星一对准，悬停标签就写着 Too far away.（手感分析 FEEL-7，view/overlays.ts），点下去再说一句是重复
   picker.onArm((id) => {
     if (!started || registerView.isOpen || world.arm(id)) return;
     if (trapsFull(world.state.objects, id)) hints.refused('trapsFull');
   });
-  picker.onTooFar(() => { if (started && !registerView.isOpen) hints.refused('tooFar'); });
   if (isGhostRig(r)) r.onManifest(() => {
     if (!started || world.manifest()) return;
     const why = manifestRefusal(world.state.manifest.phase);
