@@ -21,17 +21,16 @@
 //   喘气、呜咽是恐惧值的函数，没有事件：第三人称区有演示按钮（访客站在鬼魂面前，恐惧值从低涨到高），离线版直接喂 breath.ts
 //   没有事件可发、直接调合成函数的声音（呜咽 whimper、冷气 coldBreath、灯暗的咔哒 lightClick）和听者站在卧室里的 3D 床标 shot：出单发按钮，
 //   在页面自己备的一条实时总线上放离线测量用的那份 render（createAudio 不把总线交出来；听者的站位在 render 里摆）。window.__audio.fire(name) 也能点它们
-// 2026-10-29 新增衣柜 wardrobe（trigger 事件，时刻全读 config/scares.ts 的 WARDROBE：锁舌 + 门板被推 → 合页吱呀 → 空白 → 被拉上 + 低频冲击 + 落灰）：
+// 2026-10-29 新增衣柜 wardrobe（trigger 事件，时刻全读 config/scares.ts 的 WARDROBE：锁舌 + 门板被推 → 合页吱呀 → 空白 → 门撞上门框 + 低频冲击 + 落灰）：
 //   立体声版走真正的 createAudio（出实时按钮，也进离线测量）；3D 版是单发 shot，听者站在卧室里、衣柜正前方 2.5 米
 import { FRONT_DOOR, HOUSE_W, PROPS, propCenter } from '../src/config/house';
-import { SCARES, WARDROBE } from '../src/config/scares';
 import { FEAR } from '../src/config/visitors';
 import { createAmbience, dreadTarget, AMB } from '../src/audio/ambience';
 import { createBreath } from '../src/audio/breath';
 import { createAudio, createBus, createRouter, type MixBus, type Router } from '../src/audio/engine';
 import { createCrowd, stepBanks } from '../src/audio/footsteps';
 import { createGhostSound, wallWhoosh } from '../src/audio/ghost';
-import { Snd, bandNoise, braam, lightClick, rng } from '../src/audio/sfx';
+import { Snd, bandNoise, braam, lightClick, rng, wardrobeCues } from '../src/audio/sfx';
 import type { Vec3 } from '../src/audio/space';
 import { coldBreath, whimper } from '../src/audio/voices';
 import type { GhostState } from '../src/engine/types';
@@ -423,10 +422,11 @@ const CASES: Case[] = [
   } },
   { name: 'trap: armed (very light ice crack, not positional)', group: 'trap', seconds: 2, win: [0, 0.5], nominal: 0, rmsRange: [-68, -52], events: [trap('bed', 'armed')], render: viaRouter([trap('bed', 'armed')]) },
 
-  // ── 衣柜（trigger wardrobe）：latch 锁舌 + 门板被推 → open 合页吱呀 → hold 空白 → slamAt 被拉上（时刻都读 config/scares.ts 的 WARDROBE）──
-  { name: 'trigger wardrobe (latch click + push, hinge creak, silence, slam + low hit + dust)', group: 'wardrobe', seconds: 8, win: [0, SCARES.wardrobe.active], nominal: WARDROBE.slamAt + WARDROBE.slamTime, rmsRange: [-35, -23], events: [trig('wardrobe')], render: viaRouter([trig('wardrobe')]) },
+  // ── 衣柜（trigger wardrobe）：latch 锁舌 + 门板被推 → open 合页吱呀 → hold 空白 → 门从 slamAt 起关、slamTime 秒后撞上门框，砰（时刻都读 config/scares.ts 的 WARDROBE）──
+  // 测量窗和设计时长跟声音自己的时刻表走（wardrobeCues().hit = 撞上那一刻），不绑模拟的 SCARES.wardrobe.active：那个数要按机器人调，缩到撞击之前会把撞击截掉
+  { name: 'trigger wardrobe (latch click + push, hinge creak, silence, slam + low hit + dust)', group: 'wardrobe', seconds: 8, win: [0, wardrobeCues().hit + 0.5], nominal: wardrobeCues().hit, rmsRange: [-35, -23], events: [trig('wardrobe')], render: viaRouter([trig('wardrobe')]) },
   // 单发：听者站在卧室里、衣柜正前方 2.5 米（衣柜在 (4.25, 7.75)，声音从 1.1 米高的柜门出来）
-  { name: '3d: trigger wardrobe, listener 2.5 m in front of the doors', group: 'wardrobe', seconds: 8, win: [0, SCARES.wardrobe.active], nominal: 0, rmsRange: [-37, -26], shot: true, render: (bus, r, t) => {
+  { name: '3d: trigger wardrobe, listener 2.5 m in front of the doors', group: 'wardrobe', seconds: 8, win: [0, wardrobeCues().hit + 0.5], nominal: 0, rmsRange: [-37, -26], shot: true, render: (bus, r, t) => {
     listen(bus, v3(4.25, 1.8, 10.25), NORTH);
     r.play([trig('wardrobe')], state, t);
   } },
