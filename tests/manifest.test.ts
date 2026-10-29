@@ -9,7 +9,7 @@ import type { NpcCtx } from '../src/sim/npc';
 import { findPath } from '../src/sim/pathfind';
 import { createRng } from '../src/sim/rng';
 import { cellCenter, cellOf, FRONT_DOOR } from '../src/config/house';
-import { MANIFEST, PERSONALITIES, VISION } from '../src/config/visitors';
+import { BEHAVIOR, FEAR, MANIFEST, PERSONALITIES, TRAITS, VISION } from '../src/config/visitors';
 import { angleOf, wrapAngle } from '../src/lib/angle';
 import { GHOST_SOURCE } from '../src/sim/types';
 import type { NpcState, SimEvent, Vec2, World } from '../src/sim/types';
@@ -321,6 +321,99 @@ describe('主动现身（吓人、赶人）', () => {
     // 他这一刻的路线（刚开始逃，还没走多远）整条在圈外（留 5 厘米：格子路线擦圈边时，两格之间的弦会略微切进圈里）
     expect(a.path.length).toBeGreaterThan(1);
     expect(closest(a.pos, a.path)).toBeGreaterThanOrEqual(MANIFEST.avoidRadius - 0.05);
+  });
+
+  // ——— 后退完接着去原来的目标（最终审查 S M7a）———
+  /** 落下以后玩家把鬼魂开走了（远处的书房角落）：之后不再照到它、不发毛，只看后退和后退完做什么 */
+  const AWAY = { x: 1.25, z: 1.25 };
+  /** 一步一步推进到 pred 为真（含那一步），最多 seconds 秒；返回有没有等到 */
+  function stepTill(w: World, pred: () => boolean, seconds: number) {
+    for (let k = 0; k < Math.round(seconds / DT); k++) {
+      w.step(DT);
+      if (pred()) return true;
+    }
+    return false;
+  }
+
+  test('警觉中（去查看厨房门响）被现身吓到：僵住完后退、面朝那里照完，接着去查看那扇门，不是换个地方闲逛（最终审查 S M7a）', () => {
+    const w = createWorld({ seed: 109, autoSpawn: false });
+    const door = w.state.objects.find((o) => o.id === 'kitchen-door')!.pos;
+    // 浴室南边，和厨房门洞同一列：听得见门响，往北穿过浴室门、走廊走过去查看
+    const a = w.spawn({ pos: { x: 13.25, z: 10.75 }, personality: 'brave' });
+    w.trigger('kitchen-door');
+    expect(stepTill(w, () => a.mode === 'alert' && a.pos.z < 9.4, 5)).toBe(true);
+    // 现身在他前面 1.4 米（浴室门里）：被吓到、离得比 backOff 近，要后退。门离那里 3 米多，在绕开圈外
+    const spot = { x: 13.25, z: 8.0 };
+    expect(dist(door, spot)).toBeGreaterThan(MANIFEST.avoidRadius);
+    w.setGhost(spot);
+    expect(w.manifest()).toBe(true);
+    const drop = until(w, 'drop');
+    expect(ofType(drop.ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([a.id]);
+    w.setGhost(AWAY);
+    expect(a.mode).toBe('startled');
+    expect(dist(a.pos, spot)).toBeLessThan(MANIFEST.backOff);
+    // 僵住完先后退（闲逛着走开、手电照着那里）
+    expect(stepTill(w, () => a.mode !== 'startled', FEAR.startleTime + 0.1)).toBe(true);
+    expect(a.mode).toBe('wander');
+    // 退完、照完：接着去查看那扇门（警觉、声源还是它），走到看得见它的地方停下查看
+    expect(stepTill(w, () => a.mode === 'alert', 8)).toBe(true);
+    expect(dist(a.pos, spot)).toBeGreaterThanOrEqual(MANIFEST.backOff - 1e-6);
+    expect(stepTill(w, () => a.mode !== 'alert' || (a.path.length === 0 && a.speed < 1e-3), 10)).toBe(true);
+    expect(a.mode).toBe('alert');
+    expect(dist(a.pos, door)).toBeLessThanOrEqual(TRAITS.brave.investigateDist + BEHAVIOR.arrive + 1e-6);
+    expect(new Grid().lineOfSight(a.pos, door)).toBe(true);
+  });
+
+  test('原来要查看的声源就在现身的地方旁边（他要绕开的圈里）：退完、照完不回去查看，照常闲逛，挑的目标也不在圈里', () => {
+    const w = createWorld({ seed: 109, autoSpawn: false });
+    const door = w.state.objects.find((o) => o.id === 'kitchen-door')!.pos;
+    const a = w.spawn({ pos: { x: 13.25, z: 10.75 }, personality: 'brave' });
+    w.trigger('kitchen-door');
+    // 走到走廊里（出了浴室门）再现身：现身在他前面 1.2 米，门离那里 1.3 米，在圈里
+    expect(stepTill(w, () => a.mode === 'alert' && a.pos.z < 7.2, 6)).toBe(true);
+    const spot = { x: 13.25, z: 6.0 };
+    expect(dist(door, spot)).toBeLessThan(MANIFEST.avoidRadius);
+    w.setGhost(spot);
+    expect(w.manifest()).toBe(true);
+    expect(ofType(until(w, 'drop').ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([a.id]);
+    w.setGhost(AWAY);
+    expect(stepTill(w, () => a.mode !== 'startled', FEAR.startleTime + 0.1)).toBe(true);
+    // 后退（走到落脚点）、照完（站着，没有路径）以后一直在闲逛，没有转回警觉；照完新挑的目标在圈外
+    let looked = false;
+    let next: Vec2 | null = null;
+    for (let k = 0; k < Math.round(10 / DT) && !next; k++) {
+      w.step(DT);
+      expect(a.mode).toBe('wander');
+      if (a.path.length === 0) looked = true;
+      else if (looked) next = a.path[a.path.length - 1];
+    }
+    expect(next).not.toBeNull();
+    expect(dist(next!, spot)).toBeGreaterThanOrEqual(MANIFEST.avoidRadius);
+  });
+
+  test('进门途中被现身吓到：僵住完后退、照完，接着进门——走到门厅里进门后的位置，再开始闲逛（最终审查 S M7a）', () => {
+    const w = createWorld({ seed: 108, autoSpawn: false });
+    // 调试位：放在走廊里、状态 entering（进门路线寻路走到门厅里进门后的位置）。现身在他身后 1 米（走廊北边），
+    // 他察觉、回头，被吓到，往南退：进门后的位置离那里 5 米多，在绕开圈外
+    const n = w.spawn({ pos: { x: 8, z: 6.0 }, mode: 'entering', personality: 'brave' });
+    expect(n.path.at(-1)).toEqual(FRONT_DOOR.inside);
+    for (let k = 0; k < 20; k++) w.step(DT);
+    const spot = { x: n.pos.x, z: n.pos.z - 1.0 };
+    expect(dist(FRONT_DOOR.inside, spot)).toBeGreaterThan(MANIFEST.avoidRadius);
+    w.setGhost(spot);
+    expect(w.manifest()).toBe(true);
+    expect(ofType(until(w, 'drop').ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([n.id]);
+    w.setGhost(AWAY);
+    expect(stepTill(w, () => n.mode !== 'startled', FEAR.startleTime + 0.1)).toBe(true);
+    expect(n.mode).toBe('wander'); // 后退
+    expect(stepTill(w, () => n.mode !== 'wander', 8)).toBe(true);
+    expect(n.mode).toBe('entering');
+    expect(dist(n.pos, spot)).toBeGreaterThanOrEqual(MANIFEST.backOff - 1e-6);
+    expect(n.path.at(-1)).toEqual(FRONT_DOOR.inside);
+    // 走到进门后的位置，才开始闲逛（挑别的房间）
+    expect(stepTill(w, () => n.mode !== 'entering', 8)).toBe(true);
+    expect(n.mode).toBe('wander');
+    expect(dist(n.pos, FRONT_DOOR.inside)).toBeLessThanOrEqual(BEHAVIOR.arrive + 0.2);
   });
 });
 
