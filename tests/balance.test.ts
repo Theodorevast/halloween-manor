@@ -45,8 +45,12 @@ const totalExits = (runs: BotRun[]) => runs.reduce((a, r) => a + r.exits, 0);
 const exitedWithin = (v: VisitorLog, s: number) => v.exitedAt !== null && v.exitedAt - v.spawnedAt <= s;
 const fastLone = (runs: BotRun[]) => runs.filter((r) => r.lifetimes.length === 1 && r.lifetimes[0] <= FOCUS_LIMIT).length;
 /** 惊吓类物件的 id */
-// 衣柜（2026-10-29）数值还没按机器人调，机器人先不用它（见 bots.ts 的 UNTUNED），这里也先不算它
-const SIGHT_PROPS = PROPS.filter((p) => SCARES[p.type].kind === 'sight' && p.type !== 'wardrobe').map((p) => p.id);
+const SIGHT_PROPS = PROPS.filter((p) => SCARES[p.type].kind === 'sight').map((p) => p.id);
+/**
+ * beforeAll 把所有机器人局跑一遍，单独跑约 6 秒，和别的测试文件一起跑、机器忙的时候更久；
+ * vitest 默认的钩子超时是 10 秒，到了整个文件算失败、11 条全跳过。给足余量
+ */
+const RUN_ALL_TIMEOUT = 120_000;
 /** 把几局的「附身次数 / 吓到人的次数」按物件加起来 */
 function landingOf(runs: BotRun[]): Record<string, { fired: number; landed: number }> {
   const t: Record<string, { fired: number; landed: number }> = {};
@@ -85,7 +89,7 @@ beforeAll(() => {
   // tsconfig 里没有 node 的类型，经 globalThis 取环境变量
   const env = (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env;
   if (env?.BALANCE_REPORT) console.log(report());
-});
+}, RUN_ALL_TIMEOUT);
 
 function report(): string {
   const row = (r: BotRun) => {

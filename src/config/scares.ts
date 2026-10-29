@@ -53,8 +53,11 @@ export const SCARES: Record<ScareType, ScareSpec> = {
   portrait: { kind: 'sight', range: 6, fear: 32, cooldown: 16, active: 1.8, broken: 10, hitAt: 0.94 },
   mirror: { kind: 'sight', range: 2.5, fear: 48, cooldown: 20, active: 1.5, broken: 0, hitAt: 0.6 },
   bed: { kind: 'sight', range: 5, fear: 26, cooldown: 14, active: 3.2, broken: 0, hitAt: 2.6 },
-  // 衣柜（2026-10-29，设计文档 4.3、调研 3.3）：门自己开一条缝、停住，2.2 秒时被从里面猛地拉上。数值是占位，模拟那一路按机器人测
-  wardrobe: { kind: 'sight', range: 5, fear: 26, cooldown: 14, active: 2.8, broken: 0, hitAt: WARDROBE.slamAt },
+  // 衣柜（2026-10-29，设计文档 4.3、调研 3.3）：门自己开一条缝、停住，2.2 秒时被从里面猛地拉上。按机器人测（lane Q1）：
+  // 恐惧值 17（average 倒吸一口气不叫、timid 叫，比床轻：卧室里已经有床和台灯）、冷却 20。恐惧值 23 以上时单个 brave 吓得太快，
+  // 「单个 brave 加鬼魂中位 ≤ 0.8 × 不加」过不了；冷却 14–17 时正常对局被吓跑的人中位存活短 2–4 秒。range 4–6、active 2.5–3.2
+  // 机器人测出来的数字一样，先留原值。机器人还没把它当机关用，见 tests/bots.ts 的 TRAP_TYPES
+  wardrobe: { kind: 'sight', range: 5, fear: 17, cooldown: 20, active: 2.8, broken: 0, hitAt: WARDROBE.slamAt },
 };
 
 

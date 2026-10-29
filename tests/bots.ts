@@ -6,7 +6,7 @@
 //      （旧布局：厨房门 1/231、八音盒 10/86，几乎用不上；现布局见 tests/balance.test.ts 目标 5）
 //   3. 续恐惧：听得见的人已经在害怕、此刻没在警觉 / 受惊，也拉响引诱（恐惧值上涨、回落计时重来）
 //   4. 机关（2026-10-28）：每 TRAP_EVERY 步看一次，设下的不到 TRAP.max 个，就在没人看得见的背后型物件（摇椅、床）里
-//      挑离访客最近的那个设下（TRAP_NEAR 米以内有人才设：等人路过时在他背后发作）
+//      挑离访客最近的那个设下（TRAP_NEAR 米以内有人才设：等人路过时在他背后发作）。衣柜先不设，见 TRAP_TYPES
 // - random：每 3 秒随机点一个能附身的物件，不看时机
 // - idle：不附身（只用来看鬼魂单独有多大用）
 // 鬼魂（第三人称改版，opts.ghost = 'hover'）：和上面任何一种叠加。每步把鬼魂飘向最近的访客、贴在他身后 GHOST_BOT.behind 米
@@ -105,7 +105,12 @@ const TRAP_EVERY = 120;
 const TRAP_NEAR = 8;
 /**
  * 只设背后型（摇椅、床）：迎面型的机关就是「手电照到它就附身」，这个机器人本来每 0.25 秒就盯着眼睛图标附身了，
- * 设了也不多吓到谁，反倒让目标 6 统计的附身次数变少；背后型（在他背后发作、他回头）是它自己点不出来的
+ * 设了也不多吓到谁，反倒让目标 6 统计的附身次数变少；背后型（在他背后发作、他回头）是它自己点不出来的。
+ * 衣柜也是背后型，但机器人先不设它（2026-10-29 lane Q1，等用户定）：它在卧室门边，单独一个 brave 每进一次卧室它就发作一次。
+ * 每次受惊不管涨多少都让回落重新计时，等于白送一次「续恐惧」，顶替了引诱续恐惧和鬼魂贴身的用处，所以衣柜吓多少几乎不影响结果。
+ * 加进来以后，衣柜的数值怎么调都过不了两条（恐惧值 0–26、冷却 14–60、range 1.5–9、active 2.3–5 都试过）：
+ * 目标 5「单个 brave：会用引诱 ≥ 不用 + 4」（不用引诱 3 分钟内吓跑的 5 → 6–9 局）、
+ * 鬼魂 2「单个 brave 加鬼魂中位 ≤ 0.8 × 不加」（不加鬼魂的中位 87 → 80–84 秒，加鬼魂的一直是 68 秒）
  */
 const TRAP_TYPES: ReadonlySet<ScareType> = new Set<ScareType>(['rockingChair', 'bed']);
 /** 听见引诱声后多少秒内被吓到，算作引诱带来的惊吓 */
@@ -301,9 +306,7 @@ function manifestGhost(w: World, g: GhostBot) {
   placeGhost(w, g);
 }
 
-/** 衣柜（2026-10-29）：模拟那一路按机器人测好数值之前，机器人先不用它（平衡数字和加衣柜之前一样） */
-const UNTUNED: ReadonlySet<ScareType> = new Set<ScareType>(['wardrobe']);
-const ready = (o: ScareObjectState) => o.cooldown === 0 && !UNTUNED.has(o.type);
+const ready = (o: ScareObjectState) => o.cooldown === 0;
 const isSight = (o: ScareObjectState) => SCARES[o.type].kind === 'sight';
 
 /** 机器人附身用的函数（runBot 里包了一层，用来统计惊吓有没有落到人身上） */
