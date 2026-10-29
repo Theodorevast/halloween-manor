@@ -48,7 +48,9 @@ export interface GhostRig extends CameraRig {
   pin(on: boolean): void;
   /**
    * 不收输入（2026-10-30 试玩报告 P1-1）：点了开始、遮罩还挂着（还在编管线、等造型）的时候，指针已经锁上，
-   * 随手一动鼠标就把开场镜头转走了。hold(true) 期间鼠标转向、按键移动、右键 / F 都不算；hold(false) 时视角回到开场那一刻的朝向
+   * 随手一动鼠标就把开场镜头转走了；登记簿翻开着的时候也一样（main.ts 在 onToggle 里调）。
+   * hold(true) 期间鼠标转向、按键移动（hold 之前就按住的键也不算）、右键 / F、滚轮都不算；
+   * hold(false) 时视角回到 hold(true) 那一刻（开场时调就是开场的朝向），目标值和实际值一起就位，镜头不扫回来
    */
   hold(on: boolean): void;
 }

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { HOUSE_D, HOUSE_W, PROPS, propCenter } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
+import { MANIFEST } from '../src/config/visitors';
 import { STRINGS } from '../src/config/strings';
 import { createGhostRig, ghostRigDebug, ghostSees, setGhostUi, watchGhostUi } from '../src/engine/ghostRig';
 import { createPicker } from '../src/engine/picking';
@@ -13,7 +14,7 @@ import type { GhostRig } from '../src/engine/types';
 import { angleOf } from '../src/lib/angle';
 import { createWorld } from '../src/sim/world';
 import type { ManifestState, ScareObjectState, SimEvent, Vec2, World, WorldState } from '../src/sim/types';
-import { HINT, bottomLine, createHintCore, createMissWatch, type HintEnv } from '../src/ui/hints';
+import { HINT, bottomLine, createHintCore, createMissWatch, manifestRefusal, trapsFull, type HintEnv } from '../src/ui/hints';
 import { KEYS, beginLabel, hudLines } from '../src/ui/hud';
 
 const DT = 1 / 60;
@@ -270,6 +271,47 @@ describe('做不到时的回应（refused）：每次都有一句，同一种短
     expect(core.refused('trapsFull', 1.2)).toBe(STRINGS.onboarding.refused.trapsFull);
     expect(core.refused('manifestWall', 1.3)).toBe(STRINGS.onboarding.refused.manifestWall);
     expect(core.refused('tooFar', 1.4)).toBeNull();
+  });
+
+  // 集成（main.ts 的接线照真实实现对一遍）：被拒以后回应哪一句，判断放在这里（纯函数），main.ts 只调
+  it('现身被拒（manifestRefusal）：冷却中 → Not yet；就绪却被拒（鬼魂在墙格里）→ 墙里；正在现身（蓄力、停留）时再按 → 不回应', () => {
+    expect(manifestRefusal('cooldown')).toBe('manifestCooldown');
+    expect(manifestRefusal('idle')).toBe('manifestWall');
+    expect(manifestRefusal('windup')).toBeNull();
+    expect(manifestRefusal('hold')).toBeNull();
+    // 真的模拟走一遍：world.manifest() 返回 false 的每一种情形，按此刻的阶段回应
+    const w = createWorld({ seed: 3, autoSpawn: false });
+    w.setGhost({ x: 6.25, z: 4.75, inWall: true }); // 客厅和走廊之间的墙格
+    expect(w.manifest()).toBe(false);
+    expect(manifestRefusal(w.state.manifest.phase)).toBe('manifestWall');
+    w.setGhost({ x: 8, z: 6, inWall: false }); // 走廊中段
+    expect(w.manifest()).toBe(true);
+    w.step(1 / 60);
+    expect(w.manifest()).toBe(false); // 蓄力中
+    expect(manifestRefusal(w.state.manifest.phase)).toBeNull();
+    w.step(MANIFEST.windup + 0.1);
+    expect(w.state.manifest.phase).toBe('hold');
+    expect(w.manifest()).toBe(false); // 停留中
+    expect(manifestRefusal(w.state.manifest.phase)).toBeNull();
+    w.step(MANIFEST.hold + 0.1);
+    expect(w.manifest()).toBe(false); // 冷却中
+    expect(manifestRefusal(w.state.manifest.phase)).toBe('manifestCooldown');
+  });
+
+  it('设机关被拒（trapsFull）：同时设下的满了、而且这个物件自己没设着，才说 Two traps are already set（自己设着的再按一下不说）', () => {
+    const objs = (armed: Record<string, number>) => ['a', 'b', 'c'].map((id) => ({ id, armed: armed[id] ?? 0 }));
+    expect(trapsFull(objs({ a: 30, b: 12 }), 'c')).toBe(true);
+    expect(trapsFull(objs({ a: 30, b: 12 }), 'a')).toBe(false);
+    expect(trapsFull(objs({ a: 30 }), 'c')).toBe(false);
+    // 真的模拟：设满两个，再设第三个被拒（说）；对已经设着的那个再按（不说）
+    const w = createWorld({ seed: 3, autoSpawn: false });
+    const ids = w.state.objects.map((o) => o.id);
+    expect(w.arm(ids[0])).toBe(true);
+    expect(w.arm(ids[1])).toBe(true);
+    expect(w.arm(ids[2])).toBe(false);
+    expect(trapsFull(w.state.objects, ids[2])).toBe(true);
+    expect(w.arm(ids[0])).toBe(false);
+    expect(trapsFull(w.state.objects, ids[0])).toBe(false);
   });
 });
 

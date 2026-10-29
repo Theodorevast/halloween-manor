@@ -211,8 +211,19 @@ try {
   check('第三人称：开场遮罩等后台预编译编完就收起（最多等 15 秒）', heldGhost < 15000, `等了 ${heldGhost} ms`);
   check('第三人称：开场遮罩点击后消失', !(await gp.locator('[data-start]').isVisible().catch(() => false)));
   check('第三人称：旋转按钮藏起来', !(await gp.locator('[data-act="left"]').isVisible()));
+  // 操作说明开场 4.5 秒才淡入（hud.ts 的 KEYS.delay，2026-10-30 上手那一路），等它出来再读（最多 10 秒）
+  await gp.waitForFunction(() => document.querySelector('.hud-keys')?.classList.contains('is-on'), null, { timeout: 10000 }).catch(() => {});
   const hint = await gp.evaluate(() => ({ on: document.querySelector('.hud-keys').classList.contains('is-on'), text: document.querySelector('.hud-keys').textContent }));
   check('第三人称：开场后有操作提示', hint.on && hint.text.includes('WASD'), hint.text);
+  // 墙上多一个影子（2026-10-30）的接线：带了 model（和鬼魂共用同一个几何体，不多编管线），带了 rig（只放在玩家看得见的墙上）
+  const other = await gp.evaluate(() => {
+    const o = window.__otherShadow, g = window.__ghostView;
+    if (!o || !g) return { shared: false, hidden: 0, why: '没有调试口' };
+    let shared = false;
+    g.root.traverse((x) => { if (x.geometry && x.geometry === o.mesh.geometry) shared = true; });
+    return { shared, hidden: Object.values(o.inView()).filter((v) => !v).length };
+  });
+  check('第三人称：墙上多一个影子和鬼魂共用外形、只放在看得见的墙上（model、rig 都接上了）', other.shared && other.hidden > 0, JSON.stringify(other));
   const lockUi = await gp.evaluate(() => ({
     real: document.pointerLockElement !== null,
     aim: document.querySelector('.hud-aim').classList.contains('is-on'),
@@ -480,6 +491,28 @@ try {
     return h.events().filter((e) => e.type === 'spawn').length;
   });
   check('一夜：Keep haunting 以后登记簿合上、又有人进门', kept?.phase === 'night' && !kept.register && reopened > 0, `${JSON.stringify(kept)}，20 秒内进门 ${reopened} 人`);
+  // 中途翻开登记簿（右下角的本子）：鬼魂不收输入（main.ts 的 onToggle → rig.hold）——翻开之前就按住的 W 也不再推它；
+  // 合上（Back to the manor）以后视角回到翻开那一刻
+  const ngs = () => np.evaluate(() => window.__haunt.ghost.state());
+  await np.evaluate(() => window.__haunt.ghost.place(2, 6, 0)); // 走廊西段，朝东
+  await np.keyboard.down('KeyW');
+  await sleep(500);
+  const pushing = await ngs();
+  await np.evaluate(() => document.querySelector('.rg-book').click());
+  await sleep(1500);
+  const held1 = await ngs();
+  await sleep(800);
+  const held2 = await ngs();
+  const midOpen = await np.evaluate(() => window.__haunt.night().register);
+  const back = np.getByRole('button', { name: 'Back to the manor' });
+  const backOk = await back.waitFor({ state: 'visible', timeout: 3000 }).then(() => true, () => false);
+  if (backOk) await back.click();
+  await np.keyboard.up('KeyW');
+  await sleep(200);
+  const after = await ngs();
+  const drift = Math.hypot(held2.x - held1.x, held2.z - held1.z);
+  check('一夜：中途翻开登记簿时按住的 W 不再推鬼魂，合上后视角回到翻开那一刻', pushing.speed > 1 && midOpen && drift < 0.03 && held2.speed < 0.05 && backOk && Math.abs(after.yaw - pushing.yaw) < 1e-3,
+    `翻开前 ${pushing.speed.toFixed(2)} 米/秒，翻开着 0.8 秒挪了 ${drift.toFixed(3)} 米、${held2.speed.toFixed(3)} 米/秒，Back to the manor ${backOk ? '有' : '无'}，朝向差 ${(after.yaw - pushing.yaw).toFixed(4)}`);
   // 立刻收夜（调试口：不等屋里的人走光）：播报 lastCall，静、光收回以后翻开登记簿
   await np.evaluate(() => window.__haunt.endNight());
   const lastCall = (await tickerLines(np)).some((l) => l === 'No one else is coming tonight.');

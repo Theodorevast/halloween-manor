@@ -79,9 +79,11 @@ const TEMPLATE = `
   </div>
 </section>`;
 
-/** 钟点和后面的 am / pm 之间换成不断行的空格：窄屏折行时 "1:40" 和 "am" 不分到两行 */
+/** 钟点和后面的 am / pm（STRINGS.register.meridiem）之间换成不断行的空格：窄屏折行时 "1:40" 和 "am" 不分到两行 */
 const NBSP = String.fromCharCode(0xa0);
-const keepTimes = (s: string) => s.replace(/(\d) (am|pm)(?![a-z])/g, `$1${NBSP}$2`);
+const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const keepTimes = (s: string) =>
+  s.replace(new RegExp(`(\\d) (${escRe(R.meridiem.am)}|${escRe(R.meridiem.pm)})(?![a-z])`, 'g'), `$1${NBSP}$2`);
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text?: string): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);

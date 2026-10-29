@@ -96,6 +96,29 @@ describe('数字写成英文单词', () => {
     expect(inWords(21, true)).toBe('21');
     expect(inWords(134)).toBe('134');
   });
+
+  test('英文单词、am / pm 放在 STRINGS.register（numbers、meridiem），register.ts 读它、不自己抄一份', () => {
+    expect(R.numbers).toHaveLength(21);
+    expect(R.numbers.slice(0, 4)).toEqual(['', 'one', 'two', 'three']);
+    expect(R.numbers[20]).toBe('twenty');
+    expect(R.meridiem).toEqual({ am: 'am', pm: 'pm' });
+    // 改了 strings.ts 里的，登记簿跟着走（证明没有另抄一份）
+    const numbers = R.numbers as string[];
+    const saved = { three: numbers[3], am: R.meridiem.am, pm: R.meridiem.pm };
+    try {
+      numbers[3] = 'thrice';
+      R.meridiem.am = 'a.m.';
+      R.meridiem.pm = 'p.m.';
+      expect(inWords(3, true)).toBe('Thrice');
+      expect(clockAt(0)).toBe('9:00 p.m.');
+      expect(clockAt(NIGHT.dawn)).toBe('6:00 a.m.');
+    } finally {
+      numbers[3] = saved.three;
+      R.meridiem.am = saved.am;
+      R.meridiem.pm = saved.pm;
+    }
+    expect(inWords(3)).toBe('three');
+  });
 });
 
 describe('怎么走的：逃跑之前最后一个让他恐惧值上涨的事件', () => {
@@ -184,6 +207,8 @@ describe('怎么走的：逃跑之前最后一个让他恐惧值上涨的事件'
     const a = n.come(min(10), 'Sam');
     n.emit(min(64), { type: 'startle', npc: a, object: null, amount: 12, scream: false }, { type: 'flee', npc: a });
     expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.scream('10:04')}`);
+    // 整句读一遍（集成时改的措辞：原来 "ran when someone screamed, at 10:04" 的逗号读着断）
+    expect(n.story(a)).toBe('came in at 9:10 pm; ran at 10:04 when someone screamed');
   });
 
   test('只看最后一个：先被衣柜吓到、后来听见尖叫才跑 → scream；同一步里先现身、再后颈一凉 → coldBreath', () => {
@@ -224,7 +249,8 @@ describe('天亮自己走的（exit 带 calm）', () => {
     n.out(min(63), mia);
     n.out(NIGHT.dawn + min(4), ada, true);
     n.out(NIGHT.dawn + min(10), leo, true);
-    expect(n.story(ada)).toBe('came in at 9:04 pm; walked out at 6:04 am, unafraid');
+    // 不评价恐惧（原来写 "unafraid"：被吓过一下、只是没跑的人也这么写，不准），只写天色
+    expect(n.story(ada)).toBe('came in at 9:04 pm; walked out at 6:04 am, as the sky paled');
     expect(n.story(leo)).toBe(`${R.cameIn('2:00 am')}; ${R.leftAtDawn('6:10')}`);
     const p = n.page();
     expect(p.footer[0]).toBe(F.cameRan('Three', 'One'));

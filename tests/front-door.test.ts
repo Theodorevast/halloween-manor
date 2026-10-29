@@ -466,6 +466,24 @@ describe('前门：逃跑和 exit 事件', () => {
     expect(degAt(xs, TL.creak[1] + 0.1)).toBe(TL.openDeg);
   });
 
+  it('exit() 返回这一下门真的甩上了没有（声音按它决定响不响关门声）：甩的时候 true；后面还有人、门本来就关着、正有人敲门时 false', () => {
+    const m = FD.createDoorMotion();
+    drive(m, 0, 0.5, () => [npc(5, 'fleeing', DOOR.x, DOOR.z - 1.0)]);
+    expect(m.exit(5, [npc(5, 'gone', DOOR.x, FRONT_DOOR.outside.z)])).toBe(true);
+    for (const mode of ['fleeing', 'leaving', 'entering'] as const) {
+      const g = FD.createDoorMotion();
+      drive(g, 0, 0.5, () => [npc(5, 'fleeing', DOOR.x, DOOR.z - 1.0)]);
+      expect(g.exit(4, [npc(4, 'gone', DOOR.x, FRONT_DOOR.outside.z), npc(5, mode, DOOR.x, DOOR.z - 1.0)])).toBe(false);
+      // 最后那一个出去：甩
+      expect(g.exit(5, [npc(5, 'gone', DOOR.x, FRONT_DOOR.outside.z)])).toBe(true);
+    }
+    expect(FD.createDoorMotion().exit(1, [])).toBe(false);
+    const knocking = FD.createDoorMotion();
+    knocking.spawn();
+    drive(knocking, 0, 0.2, () => [npc(2, 'entering', FRONT_DOOR.outside.x, FRONT_DOOR.outside.z)]);
+    expect(knocking.exit(1, [npc(2, 'entering', FRONT_DOOR.outside.x, FRONT_DOOR.outside.z)])).toBe(false);
+  });
+
   it('甩上以后门洞里没人，门一直关着，不会自己弹开', () => {
     const m = FD.createDoorMotion();
     drive(m, 0, 0.5, () => [npc(5, 'fleeing', DOOR.x, DOOR.z - 1.0)]);
@@ -534,6 +552,62 @@ describe('前门：真模拟里吓跑一个人', () => {
     expect(at12!).toBeGreaterThanOrEqual(TL.clearDeg);
     expect(m.deg).toBe(0);
     expect(m.openness).toBe(0);
+  });
+});
+
+describe('前门：一群人出门时，关门声只跟着画面上真的甩门的那一下（集成，FD 审查 Minor 1）', () => {
+  /**
+   * 一串 openness 里「甩上」的那几下（返回开始动的那一帧）：从 ≥ 0.5 一路往下、exit.contact 秒（多两帧以内）合到 0。
+   * 慢慢自己合上要 0.6 秒以上，不算
+   */
+  const slamStarts = (o: number[]) => {
+    const out: number[] = [];
+    for (let k = 1; k < o.length; k++) {
+      if (!(o[k] === 0 && o[k - 1] > 0)) continue;
+      let s = k - 1;
+      while (s > 0 && o[s - 1] > o[s]) s--;
+      if (o[s] >= 0.5 && (k - s) * DT <= TL.exit.contact + 2 * DT) out.push(s + 1);
+    }
+    return out;
+  };
+
+  it('天亮时门厅里四个人一个接一个走出去（真模拟）：门等最后一个才甩；slammed 为 true 的那几个 exit 正好对上画面上甩门的那几下', () => {
+    const w = createWorld({ seed: 7, autoSpawn: false });
+    const spots = [{ x: 7.2, z: 9.6 }, { x: 8.8, z: 9.4 }, { x: 7.6, z: 8.4 }, { x: 8.6, z: 8.2 }];
+    spots.forEach((pos, i) => w.spawn({ pos, name: `V${i + 1}`, personality: 'brave' }));
+    w.step(DT); // 测试摆进来的人也有 spawn 事件：不是有人在门外敲门，不转给门
+    const door = createFrontDoorFor(fakeCore());
+    w.dawn();
+    const open: number[] = [];
+    const exits: { id: number; at: number; slammed: boolean; calm: boolean }[] = [];
+    for (let k = 0; k < 60 * 60 && (w.state.npcs.length > 0 || open.length < (exits.at(-1)?.at ?? 0) + 4 * 60); k++) {
+      for (const e of w.step(DT)) {
+        if (e.type !== 'exit') continue;
+        door.onEvent?.(e, w.state);
+        exits.push({ id: e.npc, at: open.length, slammed: door.slammed(e.npc), calm: e.calm === true });
+      }
+      door.update?.(ctxOf(DT, w.state));
+      open.push(door.openness);
+    }
+    expect(w.state.npcs).toEqual([]);
+    expect(exits).toHaveLength(spots.length);
+    expect(exits.every((x) => x.calm)).toBe(true);
+    const slams = slamStarts(open);
+    const slammed = exits.filter((x) => x.slammed);
+    // 有人挨着出门：门没有每个人都甩（声音也就不是每个人都响）
+    expect(slammed.length).toBeGreaterThanOrEqual(1);
+    expect(slammed.length).toBeLessThan(exits.length);
+    // 每一下甩门都有一个 slammed 的 exit 在同一帧起头；反过来也一样（一一对上，不多不少）
+    expect(slams).toEqual(slammed.map((x) => x.at));
+    expect(exits.at(-1)!.slammed).toBe(true);
+    expect(door.openness).toBe(0);
+  });
+
+  it('没见过的编号、没甩门的 exit：slammed 是 false', () => {
+    const door = createFrontDoorFor(fakeCore());
+    expect(door.slammed(42)).toBe(false);
+    door.onEvent?.({ type: 'exit', npc: 3, name: 'X', total: 1 }, emptyState());
+    expect(door.slammed(3)).toBe(false); // 门本来就关着
   });
 });
 

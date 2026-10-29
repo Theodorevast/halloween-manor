@@ -15,6 +15,7 @@ import type { RenderCore } from '../src/engine/types';
 import { idleManifest } from '../src/sim/manifest';
 import type { ManifestState, NpcState, Vec2, WorldState } from '../src/sim/types';
 import { TORCH } from '../src/view/flashlight';
+import { countDips } from '../src/view/lightfx';
 import {
   OTHER_LOOK, OTHER_SPOTS, createOtherDirector, createOtherShadow, lightOnSpot, torchOnFigure,
   type OtherEvent, type OtherFrame, type OtherSpot,
@@ -305,6 +306,86 @@ describe('出现的规则（createOtherDirector）', () => {
     const again = run(d, OTHER_LOOK.retry + 1, () => ({ torches: [facingAway()], visitors: [HALL] }), LATE + OTHER_LOOK.wait + 1);
     expect(types(again)).toEqual(['place']);
   });
+
+  // ── 一次出现的时长上限（集成时加：访客一直照着它时它原来会一直在，实测一次 16 秒，访客盯着却没反应，显得怪） ──
+
+  /** 一帧一帧推，记下每帧的 level（1 = 全在，往 0 化掉）和事件；撤掉以后再推 tail 秒就停 */
+  function trace(d: Director, seconds: number, f: (t: number) => Partial<OtherFrame>, t0 = LATE) {
+    const out: { t: number; level: number; evs: OtherEvent[] }[] = [];
+    for (let k = 1; k <= Math.round(seconds / DT); k++) {
+      const t = k * DT;
+      const evs = d.step(frame({ time: t0 + t, ...f(t) }));
+      out.push({ t, level: d.level, evs });
+    }
+    return out;
+  }
+
+  it(`一次出现最长 OTHER_SHADOW.maxShown（${OTHER_SHADOW.maxShown}）秒：访客一直照着也不一直挂着，接下来 OTHER_LOOK.fade 秒里慢慢化掉，化完撤掉（faded）`, () => {
+    const d = placed();
+    expect(d.level).toBe(1);
+    const xs = trace(d, OTHER_SHADOW.maxShown + OTHER_LOOK.fade + 1, () => ({ torches: [facing()], visitors: [HALL] }), LATE + 0.5);
+    const evs = xs.flatMap((x) => x.evs.map((e) => ({ at: x.t, e })));
+    expect(types(evs)).toEqual(['appear', 'withdraw']);
+    const appearAt = evs[0].at;
+    expect(appearAt).toBeLessThan(0.05);
+    // 照着的这 maxShown 秒里一直全在（照满 litFor 以后照着也不撤，和原来一样）
+    for (const x of xs.filter((y) => y.t < appearAt + OTHER_SHADOW.maxShown - DT)) expect(x.level).toBe(1);
+    // 撤掉：在出现以后 maxShown + fade 秒（差一两帧以内），出现过，理由是化掉了
+    const out = evs[1];
+    expect(out.e).toEqual({ type: 'withdraw', spot: WEST, why: 'faded', seen: true });
+    expect(Math.abs(out.at - appearAt - OTHER_SHADOW.maxShown - OTHER_LOOK.fade)).toBeLessThanOrEqual(2 * DT + 1e-9);
+    expect(d.spot).toBeNull();
+    expect(d.level).toBe(0);
+    expect(d.appeared).toBe(1);
+  });
+
+  it('化掉的过程慢、单调、不抖：每帧最多少 DT / fade，不回头；墙上那块的亮度只升不降（按 countDips 数不出「暗一下」）', () => {
+    const d = placed();
+    // 照着它的那支手电来回晃（每 0.4 秒在正对和偏开 30° 之间换：偏开时照得不清楚，但光锥还碰着它，所以不撤）：
+    // 化掉照样一路往下，不跟着手电一会儿照清楚、一会儿照不清楚跳
+    const sway = (t: number) => ({ torches: [Math.floor(t / 0.4) % 2 === 0 ? facing() : turned(HALL.x, HALL.z, WEST.x, WEST.z, 30)], visitors: [HALL] });
+    expect(lightOnSpot(WEST, [turned(HALL.x, HALL.z, WEST.x, WEST.z, 30)])).toMatchObject({ touch: true });
+    expect(lightOnSpot(WEST, [turned(HALL.x, HALL.z, WEST.x, WEST.z, 30)]).lit).toBeLessThan(OTHER_LOOK.litMin);
+    const lit = trace(d, OTHER_SHADOW.litFor * 0.5, () => ({ torches: [facing()], visitors: [HALL] }), LATE + 0.5);
+    expect(lit.flatMap((x) => x.evs).map((e) => e.type)).toEqual(['appear']);
+    const xs = trace(d, OTHER_SHADOW.maxShown + OTHER_LOOK.fade + 1, sway, LATE + 0.5 + OTHER_SHADOW.litFor * 0.5);
+    const levels = [1, ...xs.map((x) => x.level)];
+    for (let k = 1; k < levels.length; k++) {
+      expect(levels[k]).toBeLessThanOrEqual(levels[k - 1] + 1e-12);
+      expect(levels[k - 1] - levels[k]).toBeLessThanOrEqual(DT / OTHER_LOOK.fade + 1e-9);
+    }
+    // 真的化了一段（不是一下子没了）：中间有一串 0 < level < 1 的帧，至少 fade 秒减两帧
+    const mid = levels.filter((v) => v > 0 && v < 1).length;
+    expect(mid * DT).toBeGreaterThanOrEqual(OTHER_LOOK.fade - 2 * DT);
+    // 墙上影子落着的那一块的亮度（影子深 D，只挡外圈那盏灯；以开始化的那一刻为 1）：影子化掉就是这一块慢慢变亮，
+    // 只升不降，countDips（按 60 Hz，掉 10% 以上才算）数不出「暗一下」
+    const D = 0.9;
+    expect(countDips(levels.map((v) => (1 - D * v) / (1 - D)))).toBe(0);
+    const out = xs.flatMap((x) => x.evs).filter((e) => e.type === 'withdraw');
+    expect(out).toEqual([{ type: 'withdraw', spot: WEST, why: 'faded', seen: true }]);
+  });
+
+  it('照到一下就转开、之后再没人照：原来会一直挂在那里；现在满 maxShown 秒照样化掉、撤掉，隔 gap 秒才放下一次', () => {
+    const d = createOtherDirector([WEST, EAST]);
+    expect(types(run(d, 0.5, () => ({ torches: [facingAway()], visitors: [HALL] })))).toEqual(['place']);
+    expect(types(run(d, OTHER_SHADOW.litFor * 0.3, () => ({ torches: [facing()], visitors: [HALL] }), LATE + 0.5))).toEqual(['appear']);
+    const t0 = LATE + 0.5 + OTHER_SHADOW.litFor * 0.3;
+    const rest = run(d, OTHER_SHADOW.maxShown + OTHER_LOOK.fade, () => ({ torches: [facingAway()], visitors: [HALL] }), t0);
+    expect(rest.map((x) => x.e)).toEqual([{ type: 'withdraw', spot: WEST, why: 'faded', seen: true }]);
+    // 撤掉以后隔够 gap 才放下一次（下一次在另一头）
+    const east = { x: 11, z: 6 };
+    const next = until(d, OTHER_LOOK.gap + 5, () => ({ torches: [away(east.x, east.z, EAST.x, EAST.z)], visitors: [east] }), t0 + rest[0].at, 'place');
+    expect(types(next.evs)).toEqual(['place']);
+    expect(next.t).toBeGreaterThanOrEqual(OTHER_LOOK.gap - 1e-6);
+  });
+
+  it('不到 maxShown 秒照够了、转开：照旧马上撤（done），不等化掉', () => {
+    const d = placed();
+    expect(types(run(d, OTHER_SHADOW.litFor + 0.2, () => ({ torches: [facing()], visitors: [HALL] }), LATE + 0.5))).toEqual(['appear']);
+    expect(d.level).toBe(1);
+    const off = run(d, 0.1, () => ({ torches: [facingAway()], visitors: [HALL] }), LATE + 0.7 + OTHER_SHADOW.litFor);
+    expect(off.map((x) => x.e)).toEqual([{ type: 'withdraw', spot: WEST, why: 'done', seen: true }]);
+  });
 });
 
 describe('站位（OTHER_SPOTS）', () => {
@@ -463,6 +544,41 @@ describe('画面上那份网格（createOtherShadow）', () => {
     tick(0.1, facingAway());
     expect(shadowOf(m)).toBe(0);
     expect(other.appeared).toBe(1);
+  });
+
+  it('一直照着：uShadow 停在 1 到 maxShown，再在 fade 秒里一路降到 fadeFloor（影子一点不剩），然后撤掉（0）；onAppear 只回调一次', () => {
+    const core = fakeCore();
+    const other = createOtherShadow(core);
+    const m = core.houseRoot.getObjectByName('other-shadow') as THREE.Mesh;
+    let calls = 0;
+    other.onAppear(() => calls++);
+    let t = LATE;
+    const us: number[] = [];
+    const tick = (seconds: number, tt: TorchSample) => {
+      setTorch(tt);
+      for (let k = 0; k < Math.round(seconds / DT); k++) {
+        t += DT;
+        other.update!({ dt: DT, time: t, state: state(t, [npc(HALL)]) });
+        us.push(shadowOf(m));
+      }
+    };
+    tick(0.5, facingAway());
+    expect(shadowOf(m)).toBe(1);
+    us.length = 0;
+    tick(OTHER_SHADOW.maxShown + OTHER_LOOK.fade + 0.5, facing());
+    expect(calls).toBe(1);
+    expect(other.appeared).toBe(1);
+    // 前 maxShown 秒一直是 1；之后一路往下（不回头），降到 fadeFloor 以下一点不剩，再撤掉成 0
+    const head = us.slice(0, Math.round(OTHER_SHADOW.maxShown / DT) - 2);
+    expect(head.every((v) => v === 1)).toBe(true);
+    for (let k = 1; k < us.length; k++) expect(us[k]).toBeLessThanOrEqual(us[k - 1] + 1e-12);
+    const fading = us.filter((v) => v < 1 && v > 0);
+    expect(fading.length * DT).toBeGreaterThanOrEqual(OTHER_LOOK.fade - 2 * DT);
+    // 化到最后一帧时离 fadeFloor 不到一帧的量（那时已经一点不剩），下一帧撤掉成 0
+    expect(Math.min(...fading)).toBeLessThanOrEqual(OTHER_LOOK.fadeFloor + ((1 - OTHER_LOOK.fadeFloor) * DT) / OTHER_LOOK.fade + 1e-9);
+    // 每帧降得慢：最多 (1 − fadeFloor) × DT / fade
+    for (let k = 1; k < us.length; k++) if (us[k] > 0) expect(us[k - 1] - us[k]).toBeLessThanOrEqual(((1 - OTHER_LOOK.fadeFloor) * DT) / OTHER_LOOK.fade + 1e-9);
+    expect(us.at(-1)).toBe(0);
   });
 
   it('不到时间（OTHER_SHADOW.after）不放', () => {
