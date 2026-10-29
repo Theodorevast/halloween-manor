@@ -119,7 +119,7 @@
       "args": []
     },
     "retint": {
-      "$comment": "2026-10-29 加：精修之后的贴图后处理（scripts/blender/retint.py，由 scripts/blender/retint.mjs 调用），重新导出时照样做。只换贴图的字节，网格、权重、动作不动。这里只有说明、没有规则：访客自己在 overrides.retint 里写才会做。gloves = {color：手套底色 [r, g, b]（0–1，和贴图里存的值一样；不写就不改颜色），roughness / metallic：ORM 里手套的粗糙度 / 金属度（0–1；不写就不改），bones：手骨（默认 LeftHand、RightHand），maxDist：离手骨多远以内的面才算手套（默认 0.15 米；再远的是被自动绑骨误分给手的别处网格），dilate：往 UV 岛外的填充扩几像素（默认 6），reference：旧写法，从另一个访客的 GLB 取没写的值，会让导出顺序有依赖，别用（2026-10-29 审查 M4 起改成直接写数值）}。出错就停（审查 M3）：手套范围是空的、reference 找不到、数值不在 0–1、提亮规则一个像素都没选中、什么都没改，都会打「[retint] ✗ 原因」、导出停下，不往 public/ 放半成品；lift = [{hue：色相范围（度），sat：饱和度从这里平滑变成全量，value：明度从这里平滑减到 0（亮的不动），gain：明度最多乘多少，exclude：不碰的部位 gloves / legs / hands}]。结果 assets-src/visitors/<id>/retinted.glb、retint.json、retint-preview/<id>-before / after / mask.png"
+      "$comment": "2026-10-29 加：精修之后的贴图后处理（scripts/blender/retint.py，由 scripts/blender/retint.mjs 调用），重新导出时照样做。只换贴图的字节，网格、权重、动作不动。这里只有说明、没有规则：访客自己在 overrides.retint 里写才会做。gloves = {color：手套底色 [r, g, b]（0–1，和贴图里存的值一样；不写就不改颜色），roughness / metallic：ORM 里手套的粗糙度 / 金属度（0–1；不写就不改），bones：手骨（默认 LeftHand、RightHand），maxDist：离手骨多远以内的面才算手套（默认 0.15 米；再远的是被自动绑骨误分给手的别处网格），dilate：往 UV 岛外的填充扩几像素（默认 6），reference：旧写法，从另一个访客的 GLB 取没写的值，会让导出顺序有依赖，别用（2026-10-29 审查 M4 起改成直接写数值）}。出错就停（审查 M3）：手套范围是空的、reference 找不到、数值不在 0–1、提亮规则一个像素都没选中、什么都没改，都会打「[retint] ✗ 原因」、导出停下，不往 public/ 放半成品；lift = [{hue：色相范围（度），sat：饱和度从这里平滑变成全量，value：明度从这里平滑减到 0（亮的不动），gain：明度最多乘多少，exclude：不碰的部位 gloves / legs / feet / hands（feet = 主导骨头是脚、脚尖的面，就是鞋；legs 跟着精修的腿权重变，加了 --trust legs 以后会把靠腿的大衣下摆也算进去，只想护住鞋用 feet）}]。结果 assets-src/visitors/<id>/retinted.glb、retint.json、retint-preview/<id>-before / after / mask.png"
     }
   },
   "variants": [
@@ -169,7 +169,18 @@
       "status": "approved",
       "label": "女巫（尖帽和毛线披肩）",
       "costume": "a Victorian witch: a tall black felt witch hat with a slightly bent tip and a modest brim on top of the ball, a hand-knitted charcoal wool shawl with a fringe draped around the shoulders below the logo, a sprig of dried lavender in the hat band, dark striped socks above the sneakers",
-      "notes": "帽檐不宽：宽帽檐容易和球身粘成一块。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。"
+      "notes": "帽檐不宽：宽帽檐容易和球身粘成一块。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。",
+      "overrides": {
+        "refine": {
+          "$comment": "2026-10-29（用户批准）：腿照自动绑骨的权重跟着腿走，但只信离骨段 0.10 米以内的点（0.10–0.20 米过渡，再远的算身体），和吸血鬼一样。原来（默认参数）腿后侧、袜口被判成身体，迈步时拉出细长的面。量的拉伸（每个动作最坏一帧拉长超过 2 倍的边数）：walk 613 → 511、run 779 → 566、flee 857 → 560、scared_02 954 → 676、afraid 974 → 655，其余也少；最坏一帧的 p99.9 拉伸只有 afraid 13.44 → 13.74 略高，其余不变。手套不用改：金属度 0.31，只有环境光时看着也是浅灰（不像吸血鬼、探险家原来那样发黑）",
+          "args": [
+            "--trust",
+            "legs",
+            "--trust-dist",
+            "0.10"
+          ]
+        }
+      }
     },
     {
       "id": "skeleton",
@@ -180,9 +191,12 @@
       "notes": "轮廓完全不变、只加花纹：绑骨和动作最不容易出问题。2026-10-28：换装图自己加了礼帽、玫瑰和破蕾丝披风（没要），touchup 里去掉。 2026-10-28：吸血鬼试做通过后批准做 3D（用户：「Either is fine」，按「试做没问题再做剩下的」）。 2026-10-28：自动绑骨把肩关节放在球的上部，手臂网格离骨头远，精修时手臂照原权重（refine --trust arms），否则上臂被拉成「翅膀」。",
       "overrides": {
         "refine": {
+          "$comment": "2026-10-28：手臂照原权重（--trust arms），否则上臂被拉成「翅膀」（见 notes）。2026-10-29（用户批准）：加上腿、只信离骨段 0.10 米以内的点（--trust arms,legs --trust-dist 0.10，0.10–0.20 米过渡）。原来腿和鞋在走、跑、afraid 时被拉得很长；加了以后正常，手臂没出「翅膀」。量的拉伸（每个动作最坏一帧：p99.9 拉伸倍数 / 拉长超过 2 倍的边数）：walk 24.89 / 669 → 7.53 / 345、run 39.96 / 757 → 12.19 / 391、afraid 44.08 / 831 → 15.02 / 438，八个动作都少一半左右。手套不用改：金属度 0.008，本来就不是金属",
           "args": [
             "--trust",
-            "arms"
+            "arms,legs",
+            "--trust-dist",
+            "0.10"
           ]
         }
       }
@@ -254,10 +268,12 @@
           "promptTemplate": "Dress this character in a Halloween costume: {costume}. It must stay clearly the same mascot: a round matte-black ball body with its gold-and-white logo on the front still visible, short black legs, translucent grey arms and yellow sneakers; do not give it a face or a human torso. Colours faithful to the source costume, not muted; every piece fits the ball like a vinyl toy accessory; no glow, no added text, nothing held in the hands. Keep exactly the same T-pose, camera angle and framing, full body visible from top to sneakers, facing the viewer. Both legs stay visible and separate. Plain light grey seamless background, soft even lighting."
         },
         "refine": {
-          "$comment": "2026-10-29：默认参数下外套的短袖比手臂的「管子」粗，被分给身体，手一垂下来两只袖子还横在肩膀上像翅膀（afraid、scared_02、walk 都看得见）。--trust arms 让手臂名下的点照自动绑骨的权重跟着手臂：袖子跟着手垂下来，头发整块还是蓝的（跟着身体，没被分给手臂）。Blender 量的拉伸（每个动作最坏一帧拉长超过 2 倍的边数）：idle 598 → 420、walk 815 → 615、run 1097 → 910，其余动作也少 15%–25%。jotaro 试过 --trust arms（大衣后背被手臂扯成一大片斜三角，run、scared_02 更糟）和 --limb-scale 2.0 / 2.5（各有得失），都不比默认好，留默认。",
+          "$comment": "2026-10-29：默认参数下外套的短袖比手臂的「管子」粗，被分给身体，手一垂下来两只袖子还横在肩膀上像翅膀（afraid、scared_02、walk 都看得见）。--trust arms 让手臂名下的点照自动绑骨的权重跟着手臂：袖子跟着手垂下来，头发整块还是蓝的（跟着身体，没被分给手臂）。Blender 量的拉伸（每个动作最坏一帧拉长超过 2 倍的边数）：idle 598 → 420、walk 815 → 615、run 1097 → 910，其余动作也少 15%–25%。jotaro 试过 --trust arms（大衣后背被手臂扯成一大片斜三角，run、scared_02 更糟）和 --limb-scale 2.0 / 2.5（各有得失），都不比默认好，当时留默认（2026-10-29 第 4 轮起 jotaro 用 --trust arms,legs --trust-dist 0.10）。2026-10-29（用户批准）：加上腿、只信离骨段 0.10 米以内的点（--trust arms,legs --trust-dist 0.10）：头发离手臂骨远，照旧跟着身体；腿后侧、绑带不再被拉长。量的拉伸（拉长超过 2 倍的边数）：idle 420 → 262、walk 615 → 383、run 910 → 507、flee 968 → 524、afraid 1041 → 562，八个动作都少 40%–50%；最坏一帧的 p99.9 拉伸 walk、flee 小了，run 13.58 → 14.31、scared_02 15.23 → 15.49 略高",
           "args": [
             "--trust",
-            "arms"
+            "arms,legs",
+            "--trust-dist",
+            "0.10"
           ]
         }
       }

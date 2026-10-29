@@ -70,7 +70,7 @@ export const CHARACTER: CharacterSpec = {
 };
 
 /**
- * 换装吉祥物访客的片段名（四套是同一批 Tripo 预设动作，名字一样，见 public/assets/visitors/manifest.json 的 clips）。
+ * 换装吉祥物访客的片段名（六套（含地址带 ?collab 时的两套联名）是同一批 Tripo 预设动作，名字一样，见 public/assets/visitors/manifest.json 的 clips）。
  * 2026-10-28：流水线分两批 retarget（scripts/tripo/visitors.json 的 animate），Blender 精修把第二批并进同一个 GLB，一共 8 段
  */
 const VISITOR_CLIPS: CharacterClips = {
@@ -85,7 +85,7 @@ const VISITOR_CLIPS: CharacterClips = {
 };
 
 /**
- * flee_01 的循环区间（四套一样：同一个预设，帧数相同；__chars.loopWindow('flee_01') 在四套里都挑出了这一段）：
+ * flee_01 的循环区间（六套一样：同一个预设，帧数相同、flee_01 都是 2.7 秒；__chars.loopWindow('flee_01') 在最早的四套里都挑出了这一段，联名两套用同一个区间）：
  * 第 31 帧到第 52 帧（30 帧/秒）一步完整的跑，止点和起点的姿势只差 0.02 弧度（相邻两帧差 0.07），前后 0.1 秒的变化也对得上
  */
 const FLEE_LOOP = [31 / 30, 52 / 30] as const;
@@ -97,7 +97,7 @@ const FLEE_LOOP = [31 / 30, 52 / 30] as const;
  */
 export const VISITOR_SPECS: CharacterSpec[] = [
   {
-    // 维多利亚吸血鬼（2026-10-28：P2 + 四视图 + Blender 精修，12247 三角面）
+    // 维多利亚吸血鬼（2026-10-28：P2 + 四视图 + Blender 精修，12247 三角面；2026-10-29 精修加 --trust legs --trust-dist 0.10，鞋不再被拉长，手套换成不发黑的材质）
     url: `${import.meta.env.BASE_URL}assets/visitors/vampire.glb`,
     targetHeight: 1.1,
     maxLength: 1.4,
@@ -113,7 +113,7 @@ export const VISITOR_SPECS: CharacterSpec[] = [
     flashlightHeight: 0.6,
   },
   {
-    // 提灯夜行的探险家（同上，12952 三角面）。calibrate()：正面 1.567 / 1.642
+    // 提灯夜行的探险家（同上，12952 三角面；2026-10-29 手套换成不发黑的材质，精修参数没动）。calibrate()：正面 1.567 / 1.642
     url: `${import.meta.env.BASE_URL}assets/visitors/lantern-explorer.glb`,
     targetHeight: 1.1,
     maxLength: 1.4,
@@ -127,7 +127,7 @@ export const VISITOR_SPECS: CharacterSpec[] = [
     flashlightHeight: 0.6,
   },
   {
-    // 女巫（同上，11417 三角面）。calibrate()：正面 1.555 / 1.578
+    // 女巫（同上，11417 三角面；2026-10-29 精修加 --trust legs --trust-dist 0.10）。calibrate()：正面 1.555 / 1.578
     url: `${import.meta.env.BASE_URL}assets/visitors/witch.glb`,
     targetHeight: 1.1,
     maxLength: 1.4,
@@ -141,7 +141,7 @@ export const VISITOR_SPECS: CharacterSpec[] = [
     flashlightHeight: 0.6,
   },
   {
-    // 手绘骷髅（同上，13577 三角面）。calibrate()：正面 1.588。腿最短，步子小、步频快（脚踝骨被放在鞋子中间，
+    // 手绘骷髅（同上，13577 三角面；2026-10-29 精修改成 --trust arms,legs --trust-dist 0.10）。calibrate()：正面 1.588。腿最短，步子小、步频快（脚踝骨被放在鞋子中间，
     // calibrate 要放宽「贴地」的高度才认得出脚）
     url: `${import.meta.env.BASE_URL}assets/visitors/skeleton.glb`,
     targetHeight: 1.1,
@@ -158,7 +158,7 @@ export const VISITOR_SPECS: CharacterSpec[] = [
 ];
 
 /**
- * 联名皮肤（JOJO：翠宝穿承太郎、DIO 的衣服）。流水线和精修参数同上面四套（scripts/tripo/visitors.json 的 jotaro、dio）。
+ * 联名皮肤（JOJO：翠宝穿承太郎、DIO 的衣服）。流水线同上面四套，精修参数各自不同（见 scripts/tripo/visitors.json 的 jotaro、dio）。
  * 授权确认之前不进公开的访客轮换：只在地址带 ?collab 时并进 VISITOR_SPECS（dev/characters.html 也要带：?visitor=jotaro&collab）。
  * 两套的腿短、膝盖低：calibrate() 量 run、flee 时把小腿骨（LeftLeg，骨头位置在膝盖）也当成贴地的脚，膝盖不像脚那样贴地后滑，量出来偏了
  * （jotaro 1.094 / 0.684，dio 0.949 / 0.752）。run、flee 改用只算脚、脚尖四根骨头的量法（同样的贴地判断和中位数，Blender 里量；
@@ -166,7 +166,7 @@ export const VISITOR_SPECS: CharacterSpec[] = [
  */
 export const COLLAB_SPECS: CharacterSpec[] = [
   {
-    // 承太郎装（P2 + 四视图 + Blender 精修，默认参数，12863 三角面）。calibrate()：正面 1.596 / 1.633 / 1.518
+    // 承太郎装（P2 + 四视图 + Blender 精修 --trust arms,legs --trust-dist 0.10，再做贴图后处理：手套、大衣；12863 三角面）。calibrate()：正面 1.596 / 1.633 / 1.518
     url: `${import.meta.env.BASE_URL}assets/visitors/jotaro.glb`,
     targetHeight: 1.1,
     maxLength: 1.4,
@@ -180,7 +180,7 @@ export const COLLAB_SPECS: CharacterSpec[] = [
     flashlightHeight: 0.6,
   },
   {
-    // DIO 装（同上，精修加 --trust arms：短袖跟着手臂，不然手垂下来袖子横着像翅膀；13356 三角面）。calibrate()：正面 1.595 / 1.599 / 1.547
+    // DIO 装（同上，精修 --trust arms,legs --trust-dist 0.10：短袖跟着手臂（不然手垂下来袖子横着像翅膀）、腿后侧不再被拉长；13356 三角面）。calibrate()：正面 1.595 / 1.599 / 1.547
     url: `${import.meta.env.BASE_URL}assets/visitors/dio.glb`,
     targetHeight: 1.1,
     maxLength: 1.4,
