@@ -16,7 +16,7 @@
 //   中间有墙的那支由 CPU 用格子视线判掉）。光锥里的部分变浓、轮廓收紧、带一点手电的暖色；光锥外还是原来的冷雾。
 //   只显形、不发光、不描边
 // - 主动现身（2026-10-28，调研 G2 / G3 / G4，参数见 GHOST.manifest / GHOST.solid）：听 manifest 事件。蓄力时借 lightfx.ts 让附近的灯
-//   暗两下、借 frost.ts 让脚下结霜；落下时灯暗一下，暗到最深的那一帧换上「实」的那份材质（普通混合、暗、挡光，被手电照着的那面亮一点），
+//   暗两下、借 frost.ts 让脚下结霜；落下时灯暗一下，暗到最深的那一帧换上「实」的那份材质（普通混合、暗、挡光、写深度，被手电照着的那面亮一点），
 //   停留时不飘、头慢慢抬起、只每秒更新 10 次，冷雾从下摆往下淌；收的时候再暗一下换回来。没有淡入淡出。
 //   「实」的那份标了 deferCompile，开场按钮可用之后由 main.ts 预编译
 // ?noghostfx：不画鬼魂（量开销的对照，和 house.ts 一致）
@@ -25,8 +25,8 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
-  abs, acos, clamp, cos, dot, exp, float, floor, instancedDynamicBufferAttribute, length, max, min, mix, modelViewMatrix,
-  mx_noise_float, mx_noise_vec3, normalLocal, normalView, normalWorld, positionLocal, positionViewDirection, positionWorld,
+  abs, acos, attribute, clamp, cos, dot, exp, float, floor, instancedDynamicBufferAttribute, length, max, min, mix, modelViewMatrix,
+  mx_noise_float, mx_noise_vec3, normalView, normalWorld, positionLocal, positionViewDirection, positionWorld,
   pow, sin, smoothstep, uniform, uv, varying, vec2, vec3, vec4,
 } from 'three/tsl';
 import { GHOST_MODEL } from '../config/ghost';
@@ -170,6 +170,12 @@ export const GHOST = {
    * soft：朝向镜头的程度在这之间淡入（轮廓不是一刀切）；hemFade 下摆淡出。
    * 头：身高 neck 以上的顶点（neckBlend 内渐变，脖子不折）绕 x 轴转，停留的 MANIFEST.hold 秒里从低着头 headPitch[0] 抬到 headPitch[1]
    * （弧度，正 = 低头）：在灯暗下去的那一下换成低着头的样子，再慢慢抬起来看人
+   * - depthCut：写深度（2026-10-29，最终审查 V-M1）。它画在冷雾前面，不写深度时身后的冷雾整团加在它上面，看着发虚；
+   *   换成网格模型以后，前后叠着的几层（袖子、兜帽里面）也要靠深度挡住。形状（soft × 侵蚀 × 下摆淡出，不算 opacity 和
+   *   镜头太近时的淡出）不到 depthCut 的片元整个丢掉、不写深度：侵蚀掉的缝、轮廓最外面几乎看不见的一圈不挡雾，丢掉的颜色本来就看不见。
+   *   0.05 是对比过的（dev/ghost.html?manifest&depthcut=…）：门槛越高，雾被挡住的那条硬边越往身体里走，看着像身上挖出的暗块；
+   *   0.05 时这条边就在轮廓上（地上的雾在下摆处齐齐断开，像长袍下沿挡在雾前面）。写了深度，停留时 AO（engine/postfx.ts）
+   *   也把它当实物算：贴墙站、镜头放低看地板，都看不出黑晕
    */
   solid: {
     opacity: 0.85,
@@ -178,6 +184,7 @@ export const GHOST = {
     soft: [0.0, 0.3] as [number, number],
     erode: [0.04, 0.6] as [number, number],
     hemFade: 0.3,
+    depthCut: 0.05,
     neck: 0.75,
     neckBlend: 0.07,
     headPitch: [(8 * Math.PI) / 180, 0] as [number, number],
@@ -190,6 +197,12 @@ export const GHOST = {
    * 不做半透明的灰影：shadowMap.transmitted 要开场就开、所有材质跟着变；逐像素抖动丢片元的办法试过，PCF 糊不匀，近看是一格一格的点
    */
   shadow: { on: [0.15, 0.3] as [number, number], hemCut: 0.12 },
+  /**
+   * 遮蔽（2026-10-29，换成网格模型）：几何体每个顶点带一个 occl（0..1，1 = 敞开；scripts/blender/ghost_cleanup.py 打射线烘的，
+   * GLB 里叫 _OCCL）。平时的鬼魂不透明度 × mix(1, occl, body)，「实」的那份颜色（含手电照的那一面）× mix(1, occl, solid)：
+   * 兜帽里那个洞、褶子深处暗下去，洞读成一团黑，不是一张脸。程序化的人形和没带 occl 的模型全是 1，和原来一样
+   */
+  occlusion: { body: 1, solid: 1 },
 };
 
 /**
@@ -431,6 +444,32 @@ function smokeNoise(u: GhostUniforms, P: V3n, layer: GhostLayer, stepped: boolea
 }
 export type GhostUniforms = ReturnType<typeof makeGhostUniforms>;
 
+/** 顶点的遮蔽（GHOST.occlusion）：鬼魂的几何体都由 ensureGhostAttributes 补上了 occl 属性 */
+const occlusion = (): F => attribute('occl', 'float') as unknown as F;
+/** 雾晕外扩的方向（ensureGhostAttributes）：模型带的平滑过的方向，没有就是法线 */
+const inflateDir = (): V3n => attribute('inflate', 'vec3') as unknown as V3n;
+
+/**
+ * 保证几何体有鬼魂材质要读的两个属性（程序化的人形、换上的模型、蒙皮网格都要先过一遍，createGhostView 里做）：
+ * - occl（GHOST.occlusion）：GLB 里的 _OCCL（three 读成 _occl），没有就用顶点色的 r，再没有就全是 1（和原来一样）
+ * - inflate：雾晕沿它外扩。GLB 里的 _INFLATE（scripts/blender/ghost_cleanup.py 把法线反复平均过：模型的褶子、帽檐折角多，
+ *   沿法线外扩的雾晕会自己折叠出一道道亮条），没有就是法线（和原来一样）
+ */
+export function ensureGhostAttributes(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  const n = g.getAttribute('position').count;
+  if (!g.getAttribute('occl')) {
+    const src = (g.getAttribute('_occl') ?? g.getAttribute('color')) as THREE.BufferAttribute | undefined;
+    const a = new Float32Array(n);
+    for (let i = 0; i < n; i++) a[i] = src ? src.getX(i) : 1;
+    g.setAttribute('occl', new THREE.BufferAttribute(a, 1));
+  }
+  if (!g.getAttribute('inflate')) {
+    if (!g.getAttribute('normal')) g.computeVertexNormals();
+    g.setAttribute('inflate', (g.getAttribute('_inflate') ?? g.getAttribute('normal')).clone());
+  }
+  return g;
+}
+
 /**
  * 照出鬼魂用的光锥半角和照程：用访客看得见的范围（模拟的 VISION，30°、7 米），不用灯本身的（外圈半角 ×1.1、照程 ×1.3）。
  * 这样画面上照得出鬼魂的地方，就是访客察觉得到的地方（2026-10-29 整合：原来 7–9 米处照得很清楚，访客却没反应）
@@ -525,7 +564,7 @@ export function createGhostMaterial(
   const low2 = low.mul(low);
 
   // —— 顶点：很慢的飘动（下摆飘得多）+ 走动时下摆往后拖 + 这一层的外扩 ——
-  m.positionNode = P0.add(normalLocal.mul(layer.inflate)).add(swayAndLean(u, P0, low2));
+  m.positionNode = P0.add(inflateDir().mul(layer.inflate)).add(swayAndLean(u, P0, low2));
 
   // —— 片元 ——
   // 被手电照着的程度（G1）：变浓、轮廓收紧、偏暖
@@ -544,7 +583,9 @@ export function createGhostMaterial(
   // 浓淡不匀：同一个噪声再调一次身体里的密度
   const cloud = mix(float(GHOST.cloud), float(1), smoothstep(0.25, 0.75, n));
   const dense = role === 'body' ? mix(float(1), float(R.density), reveal) : float(1);
-  const alpha = soft.mul(wisp).mul(cloud).mul(hem).mul(head).mul(layer.density).mul(dense).mul(u.fade);
+  // 遮蔽（GHOST.occlusion）：兜帽里、褶子深处淡下去（加法混合，淡 = 暗）
+  const shade = mix(float(1), occlusion(), GHOST.occlusion.body);
+  const alpha = soft.mul(wisp).mul(cloud).mul(hem).mul(head).mul(layer.density).mul(dense).mul(u.fade).mul(shade);
   const c0 = GHOST.edge, c1 = GHOST.core, cw = R.warmColor;
   m.colorNode = mix(mix(vec3(c0.r, c0.g, c0.b), vec3(c1.r, c1.g, c1.b), soft), vec3(cw.r, cw.g, cw.b), reveal.mul(R.warm));
   m.opacityNode = alpha;
@@ -554,14 +595,14 @@ export function createGhostMaterial(
 }
 
 /**
- * 现身停留时「实」的那份（G2，参数见 GHOST.solid）：普通混合、暗、挡光，只画正面；不飘、不拖，头绕脖子转 u.head；
+ * 现身停留时「实」的那份（G2，参数见 GHOST.solid）：普通混合、暗、挡光、写深度，只画正面；不飘、不拖，头绕脖子转 u.head；
  * 侵蚀噪声的时间降到每秒 stepRate 次（u.step = 1 时，G3）。和身体同一个网格、同一套 uniform，任何网格都能用。
  * 不受光照：被手电照到的那一面是按登记表和手电的参数自己算的漫反射（torchIrradiance；灯的数量变了也不重编）
  */
 export function createGhostSolidMaterial(u: GhostUniforms, look: GhostLook): THREE.MeshBasicNodeMaterial {
   const S = GHOST.solid, L = GHOST.body;
   const m = new THREE.MeshBasicNodeMaterial({
-    transparent: true, depthWrite: false, depthTest: true, blending: THREE.NormalBlending, side: THREE.FrontSide, fog: false,
+    transparent: true, depthWrite: true, depthTest: true, blending: THREE.NormalBlending, side: THREE.FrontSide, fog: false,
   });
   m.lights = false;
   const span = look.top - look.bottom;
@@ -580,10 +621,16 @@ export function createGhostSolidMaterial(u: GhostUniforms, look: GhostLook): THR
   const wisp = smoothstep(erode.sub(0.1), erode.add(0.24), n);
   const hem = smoothstep(0, S.hemFade, h);
   m.opacityNode = soft.mul(wisp).mul(hem).mul(S.opacity).mul(u.fade).mul(u.solid);
+  // 写深度（V-M1，见 GHOST.solid.depthCut）：不透明度不到门槛的片元丢掉（alpha ≤ 门槛就丢），不写深度。门槛和不透明度乘同样的
+  // opacity × fade × solid，丢不丢只看形状；uSolid = 0（平时藏着，main.ts 暖机那几帧显示出来编管线）时门槛、不透明度都是 0，
+  // 整个丢掉，什么深度都不留，不挡身体、雾晕和冷雾
+  m.alphaTestNode = u.solid.mul(u.fade).mul(S.opacity * S.depthCut);
   // 颜色：原来的冷白压暗（没被照着时是暗色剪影）；被手电照到的那一面按真的手电算漫反射（一件 albedo 这么暗的长袍）
   const c0 = GHOST.edge, c1 = GHOST.core;
   const base = mix(vec3(c0.r, c0.g, c0.b), vec3(c1.r, c1.g, c1.b), soft).mul(u.solidDark);
-  m.colorNode = base.add(torchIrradiance(u, positionWorld, normalWorld).mul(S.albedo / Math.PI));
+  // 遮蔽（GHOST.occlusion）连手电照的那一面一起压：兜帽洞里照不进去（没有自阴影，靠它近似）
+  const shade = mix(float(1), occlusion(), GHOST.occlusion.solid);
+  m.colorNode = base.add(torchIrradiance(u, positionWorld, normalWorld).mul(S.albedo / Math.PI)).mul(shade);
   return m;
 }
 
@@ -694,13 +741,15 @@ function createMist(time: THREE.UniformNode<'float', number>) {
  * （y 向上、正面 +z、米，头顶 GHOST_BODY.top、下摆 GHOST_BODY.bottom），所以材质、GhostLook 和程序化的那个一样
  */
 export interface GhostModel {
-  /** 不动的网格合成的一个几何体（只留 position、normal）；没有就是 null */
+  /** 不动的网格合成的一个几何体（只留 position、normal、occl、inflate）；没有就是 null */
   geometry: THREE.BufferGeometry | null;
   /** 带骨骼的（GHOST_MODEL.animated）：摆好的模型（骨骼在里面，挂到鬼魂身上跟着走）、要换材质的蒙皮网格、现身时播的片段 */
   root: THREE.Object3D | null;
   skinned: THREE.SkinnedMesh[];
   clip: THREE.AnimationClip | null;
   look: GhostLook;
+  /** 现身停留时头从哪抬到哪（GHOST_MODEL.headPitch；null = 用 GHOST.solid.headPitch） */
+  headPitch: [number, number] | null;
 }
 
 /**
@@ -758,6 +807,14 @@ export async function loadGhostModel(spec: typeof GHOST_MODEL = GHOST_MODEL): Pr
       g.setIndex(src.index ? src.index.clone() : Array.from({ length: src.getAttribute('position').count }, (_, i) => i));
       g.applyMatrix4(m.matrixWorld);
       if (!g.getAttribute('normal')) g.computeVertexNormals();
+      // 遮蔽、雾晕外扩方向（ensureGhostAttributes）：几个网格合并时属性要一样，没带的补上；外扩方向和法线一样跟着转
+      const inflate = src.getAttribute('_inflate') as THREE.BufferAttribute | undefined;
+      if (inflate) g.setAttribute('_inflate', inflate.clone().applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(m.matrixWorld)));
+      const occl = src.getAttribute('_occl') ?? src.getAttribute('color');
+      if (occl) g.setAttribute('_occl', occl.clone());
+      ensureGhostAttributes(g);
+      g.deleteAttribute('_inflate');
+      g.deleteAttribute('_occl');
       return g;
     });
     geometry = parts.length === 1 ? parts[0] : mergeGeometries(parts, false);
@@ -768,6 +825,7 @@ export async function loadGhostModel(spec: typeof GHOST_MODEL = GHOST_MODEL): Pr
   return {
     geometry, root: skinned.length ? root : null, skinned, clip: skinned.length ? clip : null,
     look: { bottom: GHOST_BODY.bottom, top: GHOST_BODY.top },
+    headPitch: spec.headPitch ?? null,
   };
 }
 
@@ -843,6 +901,8 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
     ...(model?.geometry ? [{ geometry: model.geometry, skin: null }] : []),
     ...(model?.skinned ?? []).map((s) => ({ geometry: s.geometry, skin: s })),
   ];
+  // 材质都读 occl、inflate（ensureGhostAttributes）：程序化的人形、蒙皮网格没有就补上
+  for (const p of parts) ensureGhostAttributes(p.geometry);
   // 身体双面（背面叠在正面后面：中间厚、边上薄）；雾晕只画正面
   const bodyMat = createGhostMaterial(u, look, GHOST.body, THREE.DoubleSide);
   const hazeMats = GHOST.haze.map((l) => createGhostMaterial(u, look, l, THREE.FrontSide, 'haze'));
@@ -886,8 +946,8 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       hazes.push(h);
     });
     // 现身停留时换上的「实」的那份（G2）：同一个网格。平时藏着；不进开场那次阻塞的预编译，
-    // main.ts 在开场按钮可用之后再编（那几帧里 uSolid = 0，完全透明），第一次现身时不卡。
-    // 普通混合：画在冷雾（renderOrder − 0.05）之前，往下淌的雾落在它前面时盖得住
+    // main.ts 在开场按钮可用之后再编（那几帧里 uSolid = 0，片元全丢，不画也不写深度），第一次现身时不卡。
+    // 普通混合、写深度，画在冷雾（renderOrder − 0.05）之前：往下淌的雾落在它前面时盖得住，身后的雾被深度挡住（V-M1）
     const sm = make(p, solidMat, `ghost-solid${sfx}`);
     sm.visible = false;
     sm.userData.deferCompile = true;
@@ -1119,7 +1179,8 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       // 头：停留了多久（按 1 / stepRate 秒取整）→ 从低着头慢慢抬起来
       const held = holding && man ? man.t : t - solidSince;
       const heldQ = Math.floor(held * M.stepRate) / M.stepRate;
-      const HP = GHOST.solid.headPitch;
+      // 模型自己低着头时（GHOST_MODEL.headPitch）抬到它自己的姿势之上，才看得出在抬头看人
+      const HP = model?.headPitch ?? GHOST.solid.headPitch;
       // 带动画的模型：抬头交给它自己的片段（同样按取整后的时间播），着色器里不再转头
       u.head.value = solid && !clipPose ? lerp(HP[0], HP[1], smooth01(0, MANIFEST.hold, heldQ)) : 0;
       clipPose?.pose(solid ? heldQ : 0);
