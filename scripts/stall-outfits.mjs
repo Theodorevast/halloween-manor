@@ -8,6 +8,8 @@
 // Renderer._getShadowNodes）和 renderObject 给阴影材质赋值的顺序，换了版本可能悄悄对不上：不报错，只是开局以后加进来的造型，
 // 第一个穿它的访客进门时同步现编管线、卡一下。最后一行是结论：
 //   通过 = 加入轮换前后、访客进门前后 1 秒内都没有超过 50 ms 的帧；加入轮换前后 1 秒内没有同步新建的管线；
+//          （WebGPU）开始以后同步新建的管线不比访客进门的次数多：每次进门是一条手电的阴影管线（第一次照到这个人），
+//          多出来的就是后加的造型没编到、进门时现编的（机器快的时候不一定卡过 50 ms，所以单独数）；
 //          页面没有打出「预编译可能对不上」「没有底色贴图」「预编译失败」这几条警告。不通过时退出码是 1。
 //   别的时刻零星的长帧（这台机器同时开着很多浏览器时常有）照样列出来，不算不通过。零星的长帧偶尔也会正好撞上访客进门：
 //   「要看」时先多跑一两次；还拿不准，就用改动之前的构建（git worktree / git stash 出来另起一个预览）照同样的参数跑一遍比一比
@@ -19,6 +21,8 @@
 //   node scripts/stall-outfits.mjs --wait 12 --net 0     不限速、标题页停 12 秒：其余几套在标题页上就加完了
 //   node scripts/stall-outfits.mjs --webgl               WebGL2 后端（地址加 ?webgl）：开局以后不再加新造型，剩下的不下载
 //   --no-parallel-compile   （WebGL2）假装浏览器没有 KHR_parallel_shader_compile：着色器链接变成同步的，看编到一半开局会不会卡
+//   --hang witch            这一套访客 GLB 的请求一直不回（下载卡死）：WebGL2 上点了开始以后遮罩最多等 main.ts 的 OUTFIT_WAIT 秒
+//   --fail witch            这一套访客 GLB 回 404：落空、跳过，不该拖住遮罩
 //   --net 50 / 10 / 4 / 0   限速档（同 scripts/loadtime.mjs：50 Mbps / 20 ms、10 Mbps / 40 ms、4 Mbps / 80 ms；0 = 不限速），默认 4
 //   --port 4173  --play 30  --query nobgcompile（地址后面再加的参数，不带 ?）
 import { chromium } from 'playwright-core';
@@ -32,8 +36,15 @@ const PLAY = Number(opt('--play', '30'));
 const NET = opt('--net', '4');
 const WEBGL = argv.includes('--webgl');
 const NO_PARALLEL = argv.includes('--no-parallel-compile');
+const HANG = opt('--hang', '');
+const FAIL = opt('--fail', '');
 const QUERY = [WEBGL ? 'webgl' : '', opt('--query', '')].filter(Boolean).map((q) => `&${q}`).join('');
 const NETS = { 50: [50, 20], 10: [10, 40], 4: [4, 80] };
+if (!(NET in NETS) && NET !== '0') {
+  // 不认识的档位不能悄悄地不限速（输出第一行只会写「不限」，很容易看漏）
+  console.error(`--net 只认 ${Object.keys(NETS).join(' / ')} / 0（不限速），给的是 ${NET}`);
+  process.exit(2);
+}
 /** 加入轮换、访客进门前后多少毫秒内的长帧算到它们头上 */
 const NEAR = 1000;
 /** 这几条警告说明预编译对不上，进门会卡 */
@@ -47,13 +58,24 @@ const boot = [];
 page.on('pageerror', (e) => errs.push(e.message));
 page.on('console', (m) => {
   const t = m.text();
-  if (m.type() === 'error') errs.push(t.slice(0, 200));
+  // --fail 故意回 404 的那一套，浏览器会打一条「Failed to load resource」，不算页面报错
+  if (m.type() === 'error' && !(FAIL && t.startsWith('Failed to load resource') && m.location()?.url?.includes(`/visitors/${FAIL}.glb`))) errs.push(t.slice(0, 200));
   if (m.type() === 'warning' && t.startsWith('[characters]')) warns.push(t.slice(0, 200));
   if (t.startsWith('[boot]')) boot.push(t.replace('[boot] ', ''));
 });
+const cdp = await page.context().newCDPSession(page);
+if (HANG || FAIL) {
+  // 拦下访客 GLB 的请求：--hang 的那一套一直不回，--fail 的那一套回 404，别的照常放行
+  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/visitors/*.glb*', requestStage: 'Request' }] });
+  cdp.on('Fetch.requestPaused', (e) => {
+    const name = e.request.url.split('/').pop().replace(/\.glb.*$/, '');
+    if (name === HANG) return;
+    if (name === FAIL) void cdp.send('Fetch.fulfillRequest', { requestId: e.requestId, responseCode: 404, body: '' }).catch(() => {});
+    else void cdp.send('Fetch.continueRequest', { requestId: e.requestId }).catch(() => {});
+  });
+}
 if (NETS[NET]) {
   const [mbps, latency] = NETS[NET];
-  const cdp = await page.context().newCDPSession(page);
   await cdp.send('Network.enable');
   await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
   await cdp.send('Network.emulateNetworkConditions', { offline: false, latency, downloadThroughput: (mbps * 1e6) / 8, uploadThroughput: (mbps * 1e6) / 8 });
@@ -137,7 +159,7 @@ const syncPlay = r.pipes.filter((p) => p.sync && p.t >= leftAt);
 const syncNearJoin = syncPlay.filter((p) => near(p.t, joinT) && !enterT.some((m) => p.t >= m && p.t - m <= NEAR));
 const badWarns = warns.filter((w) => BAD_WARN.test(w));
 
-console.log(`${WEBGL ? 'WebGL2' : 'WebGPU'}${NO_PARALLEL ? '（没有并行编译扩展）' : ''}，网速 ${NETS[NET] ? `${NET} Mbps / ${NETS[NET][1]} ms` : '不限'}；开场按钮可用 ${readyAt} ms，标题页停 ${WAIT} 秒，点开始 ${startAt} ms，遮罩收起 ${leftAt} ms（下面的时刻都从遮罩收起算）`);
+console.log(`${WEBGL ? 'WebGL2' : 'WebGPU'}${NO_PARALLEL ? '（没有并行编译扩展）' : ''}${HANG ? `（${HANG} 下载卡死）` : ''}${FAIL ? `（${FAIL} 404）` : ''}，网速 ${NETS[NET] ? `${NET} Mbps / ${NETS[NET][1]} ms` : '不限'}；开场按钮可用 ${readyAt} ms，标题页停 ${WAIT} 秒，点开始 ${startAt} ms，遮罩收起 ${leftAt} ms（下面的时刻都从遮罩收起算）`);
 console.log('启动：', boot.join('；'));
 console.log('其余造型加入轮换 [离开始的毫秒, 造型]：', JSON.stringify(r.joins.map(([t, u]) => [rel(t), u])));
 console.log('访客进门 [离开始的毫秒, 编号:名字]：', JSON.stringify(r.entered.map(([t, n]) => [rel(t), n])));
@@ -154,6 +176,7 @@ const problems = [
   longNearJoin.length ? `加入轮换前后 ${NEAR} ms 内有 ${longNearJoin.length} 个长帧` : '',
   longNearEnter.length ? `访客进门前后 ${NEAR} ms 内有 ${longNearEnter.length} 个长帧` : '',
   syncNearJoin.length ? `加入轮换前后 ${NEAR} ms 内同步新建了 ${syncNearJoin.length} 条管线` : '',
+  !WEBGL && syncPlay.length > r.entered.length ? `开始以后同步新建了 ${syncPlay.length} 条管线，比访客进门的 ${r.entered.length} 次多` : '',
   badWarns.length ? `${badWarns.length} 条「预编译对不上」类的警告` : '',
   errs.length ? `${errs.length} 条页面报错` : '',
 ].filter(Boolean);

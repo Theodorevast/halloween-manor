@@ -42,6 +42,15 @@ let wantBegin = false;
 let started = false;
 /** 开场按钮可用之后的后台预编译编完了没有（没编完时点开始，要等它，见 begin） */
 let bgDone = false;
+/**
+ * 其余几套访客造型都有了着落（加入轮换、加载失败、放弃）没有。WebGL2 上点了开始要等它（见 begin）：那里加新造型要在主线程上
+ * 同步传贴图，开局以后加会卡，所以趁开场遮罩还挡着加完（2026-10-29 用户定的「点了开始等它们加完」）。WebGPU 开局以后照样能加，一开始就算好了
+ */
+let outfitsSettled = false;
+/** WebGL2：点了开始以后最多再等其余几套造型这么多秒，到时候还没加完就带着已经加好的几套开场（某一套下载卡住时遮罩不会一直挂着） */
+const OUTFIT_WAIT = 30;
+/** 不等其余几套了（boot 里设）：没下载完的停掉、还没开始加的不加了；正在编的那一套编完照样加，所有造型都有了着落才开场 */
+let stopOutfits: (() => void) | null = null;
 /** 收走后台预编译用的临时访客（boot 里设） */
 let releaseStaged: (() => void) | null = null;
 const modules: Module[] = [];
@@ -98,13 +107,16 @@ function begin(): boolean {
   void audio.unlock();
   // 指针锁定也必须在这次点击的调用栈里
   if (rig && isGhostRig(rig)) rig.lockPointer();
-  if (ready && bgDone) {
+  if (ready && bgDone && outfitsSettled) {
     start();
     return true;
   }
   // 后台还在编整栋房子：这时开场，镜头一动就要画还没编的东西，会卡死好几秒（2026-10-28 实测 2.5 秒）。
-  // 开场遮罩先留着、按钮写回「Lighting the candles…」，编完（再整栋真画一帧）就收起遮罩开场，见动画循环
+  // WebGL2 上其余几套访客造型还没加完：开局以后再加会卡（见 outfitsSettled）。
+  // 两种都是开场遮罩先留着、按钮写回「Lighting the candles…」，都好了（再整栋真画一帧）就收起遮罩开场，见动画循环。
+  // 造型最多等 OUTFIT_WAIT 秒，从这次点击算起
   hud.setReady(false);
+  if (!outfitsSettled) setTimeout(() => { if (!outfitsSettled) stopOutfits?.(); }, OUTFIT_WAIT * 1000);
   return false;
 }
 
@@ -273,8 +285,8 @@ async function boot() {
       warmAll = false;
       releaseStaged?.();
     }
-    // 点了开始、在等后台预编译：编完、整栋真画过一帧了，收起开场遮罩开场
-    if (wantBegin && !started && bgDone && !warmAll) {
+    // 点了开始、在等后台预编译（WebGL2 上还在等其余几套造型）：都好了、整栋真画过一帧了，收起开场遮罩开场
+    if (wantBegin && !started && bgDone && !warmAll && outfitsSettled) {
       hud.hideStart();
       start();
     }
@@ -286,7 +298,7 @@ async function boot() {
 
   ready = true;
   hud.setReady(true);
-  if (wantBegin && bgDone) start();
+  if (wantBegin && bgDone && outfitsSettled) start();
 
   // 开场按钮已经可用：趁玩家读标题，把延后的物件编好。compileAsync 编的是渲染器默认的渲染目标，
   // 而场景是后处理管线自己的 pass 画的（格式、多重采样都不一样），编出来的管线用不上，所以和预热一样真画一帧。
@@ -309,8 +321,18 @@ async function boot() {
   const outfitsDone = characters.stageOutfits();
   releaseStaged = outfitsDone;
   // 其余几套访客造型现在才开始下载（开场按钮只等第一套）：一套一套下载，下载好一套、异步编好管线，才放进轮换，
-  // 在那之前进门的人只穿已经能用的（见 characters.ts 的 streamOutfits）。编要等上面整栋房子的后台预编译编完：点了开始要等它，别跟它抢
-  void characters.streamOutfits({ camera: r.camera, sceneTarget: () => engine.post?.sceneTarget(r.camera) ?? null, hidden: () => !started }, precompiled);
+  // 在那之前进门的人只穿已经能用的（见 characters.ts 的 streamOutfits）。编要等上面整栋房子的后台预编译编完：点了开始要等它，别跟它抢。
+  // WebGL2 上（outfitsBeforeStart）要在开局之前加完：点了开始以后遮罩留着，等这里都有了着落（最多 OUTFIT_WAIT 秒）再开场
+  const outfitsStream = characters.streamOutfits({ camera: r.camera, sceneTarget: () => engine.post?.sceneTarget(r.camera) ?? null, hidden: () => !started }, precompiled);
+  if (characters.outfitsBeforeStart) {
+    stopOutfits = () => void characters.stopStreaming();
+    void outfitsStream.finally(() => {
+      outfitsSettled = true;
+      if (new URLSearchParams(location.search).has('debug')) console.info(`[boot] 其余造型都有了着落 ${Math.round(performance.now())} ms`);
+    });
+  } else {
+    outfitsSettled = true;
+  }
   precompiled.then(
     () => {
       bgDone = true;

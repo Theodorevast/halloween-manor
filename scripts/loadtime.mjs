@@ -69,21 +69,31 @@ async function measure(target, profile) {
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text().slice(0, 200)); });
-    // 开场按钮从禁用变成可用的那一刻（页面自己的时钟：离导航开始多少毫秒）；其余造型加入轮换的消息（characters.ts 打的），
-    // 还有一套造型落空的警告（加载失败跳过、WebGL2 开局以后不再加）：这些造型等不到「加入轮换」，不能干等
+    // 开场按钮从禁用变成可用的那一刻（页面自己的时钟：离导航开始多少毫秒）；characters.ts 打的「加入轮换」，
+    // 还有一套造型落空的警告（加载失败跳过、不加进轮换）。都按消息里的 GLB 地址记（解析成路径），和网络请求逐个对账：
+    // 只数条数的话，开场前第一套加载失败的那条警告、网络层失败的那一套都会被多算，「全部加入轮换」就早报了
     await page.addInitScript(() => {
       window.__joins = [];
-      window.__skips = 0;
+      window.__settled = {};
+      const glbPath = (t) => {
+        const m = t.match(/\S+\.glb/);
+        return m ? new URL(m[0], location.href).pathname : null;
+      };
       const log = console.log;
       console.log = (...a) => {
         const t = typeof a[0] === 'string' ? a[0] : '';
-        if (t.includes('加入轮换')) window.__joins.push(Math.round(performance.now()));
+        const path = glbPath(t);
+        if (t.includes('加入轮换') && path) {
+          window.__joins.push(Math.round(performance.now()));
+          window.__settled[path] = '加入轮换';
+        }
         return log.apply(console, a);
       };
       const warn = console.warn;
       console.warn = (...a) => {
         const t = typeof a[0] === 'string' ? a[0] : '';
-        if (t.startsWith('[characters]') && /加载失败|不再加进轮换/.test(t)) window.__skips++;
+        const path = glbPath(t);
+        if (t.startsWith('[characters]') && path && /加载失败|不加进轮换/.test(t)) window.__settled[path] ??= '落空';
         return warn.apply(console, a);
       };
       const check = () => {
@@ -116,23 +126,25 @@ async function measure(target, profile) {
     await page.goto(target.url + (QUERY ? (target.url.includes('?') ? '&' : '?') + QUERY : ''), { waitUntil: 'commit' });
     await page.waitForFunction(() => window.__readyAt !== undefined, null, { timeout: TIMEOUT.ready, polling: 100 });
     const readyAt = await page.evaluate(() => window.__readyAt);
-    // 按钮可用以后：等网络空下来，而且按钮可用之后才下载完的访客造型，每一套都有了着落（加入轮换，或者打了落空的警告）。
-    // 网络层就失败、被 abort 的请求不算（它们不会走到加入轮换那一步）
+    // 按钮可用以后：等网络空下来，而且按钮可用之后才下载完的访客造型，按地址逐个对账，每一套都有了着落（加入轮换，或者打了落空的警告）。
+    // 网络层就失败、被 abort 的请求不算（它们不会走到加入轮换那一步，有没有警告都不等）
     const t0 = Date.now();
     for (;;) {
-      const late = [...reqs.values()].filter((r) => isVisitorGlb(r.url) && r.end !== null && !r.failed && (r.end - navTs) * 1000 > readyAt).length;
+      const late = [...reqs.values()].filter((r) => isVisitorGlb(r.url) && r.end !== null && !r.failed && (r.end - navTs) * 1000 > readyAt).map((r) => new URL(r.url).pathname);
       const pending = [...reqs.values()].filter((r) => r.end === null).length;
-      const settled = await page.evaluate(() => window.__joins.length + window.__skips);
-      if (!pending && settled >= late) break;
+      const settled = await page.evaluate(() => window.__settled);
+      const waiting = late.filter((path) => !settled[path]);
+      if (!pending && !waiting.length) break;
       if (Date.now() - t0 > TIMEOUT.rest) {
-        errors.push(`等其余造型超时（还有 ${pending} 个请求没完，有着落的 ${settled}/${late}）`);
+        errors.push(`等其余造型超时（还有 ${pending} 个请求没完，没有着落的：${waiting.join('、') || '无'}）`);
         break;
       }
       await new Promise((r) => setTimeout(r, 250));
     }
     const joins = await page.evaluate(() => window.__joins);
     const all = [...reqs.values()].filter((r) => r.end !== null && !r.failed);
-    const firstVisitor = [...reqs.values()].filter((r) => isVisitorGlb(r.url)).sort((a, b) => a.start - b.start)[0]?.url;
+    // 第一套 = 最先请求、而且下载成功的那一套（排在前面、加载失败的那几套 loadFirstOutfit 会跳过）
+    const firstVisitor = all.filter((r) => isVisitorGlb(r.url)).sort((a, b) => a.start - b.start)[0]?.url;
     const bytes = { 开场前: {}, 开场后: {} };
     for (const r of all) {
       const when = (r.end - navTs) * 1000 <= readyAt ? '开场前' : '开场后';
