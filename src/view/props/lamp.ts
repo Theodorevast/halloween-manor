@@ -68,6 +68,11 @@ export const LAMP_RELIGHT: [number, number][] = [
 ];
 /** 附身、复原以后，平时的轻闪至少隔这么多秒（从复原亮回、回到平时那一刻起算）再来，见 createLamp 里的 quietBlips */
 export const BLIP_QUIET = 1.3;
+/**
+ * 平时轻闪的深度范围（亮度掉多少）。上限要小于 lightfx 的 countDips 门槛 0.1：原来 0.05–0.2，深的那几下数得出来，
+ * 刚好落在附身前 0.13–0.2 秒时加上附身自己的 3 下就是 4 下。现在一下都数不出来，看起来是更轻的一闪（2026-10-29）
+ */
+export const BLIP_DEPTH = [0.035, 0.095] as const;
 
 /** 查表：t 秒时所在那一段的亮度（每一段持续到下一段开始；t 比第一项还早就取第一项） */
 export const sampleTable = (tab: [number, number][], t: number) => {
@@ -128,7 +133,7 @@ export function createLamp(seed: number): PropRig {
   let t = -1; // 被附身的表演
   let r = -1; // 复原
   let off = false;
-  // 平时的轻微闪：每隔几秒随机来一下，0.1–0.3 秒，亮度掉到 0.8–0.95
+  // 平时的轻微闪：每隔几秒随机来一下，0.1–0.3 秒，亮度最多掉 BLIP_DEPTH（峰谷差不到 0.1，countDips 数不成一下）
   let rnd = seed * 9301 + 49297;
   const rand = () => ((rnd = (rnd * 9301 + 49297) % 233280) / 233280);
   let nextBlip = 2 + rand() * 6;
@@ -138,8 +143,8 @@ export function createLamp(seed: number): PropRig {
    * 附身、复原一开始：正在进行的轻闪作废，下一次轻闪至少隔 BLIP_QUIET 秒（只在平时那一段里倒数，也就是复原亮回以后）。
    * 不然附身那一刻轻闪快来了（或者正闪到一半），它会留到复原亮回的那一刻接着闪：复原自己暗 2 下，紧接着一下轻闪，
    * 附近再有现身落下就是任意 1 秒 4 下（2026-10-29 最终审查 I1 / 路 F Minor 3）。1.3 秒：离复原的第二下（0.36 秒）超过 1 秒还有余量。
-   * 管不到的：附身之前 0.13–0.2 秒刚闪完、深到数得出来的一下，加上附身自己的 3 下还是 4 下（只看台灯，约万分之七的附身时刻，
-   * 和现身无关）。要根治得把轻闪压到数不出来（峰谷差 < 0.1，像门廊灯那样），会改平时的样子，等看样定
+   * 附身之前 0.13–0.2 秒刚闪完的一下原来也会凑成 4 下（约万分之七的附身时刻）：2026-10-29 用户说「要考虑用户体验」，
+   * 防光敏优先，轻闪本来就是「极轻微」，所以把它压到数不出来（BLIP_DEPTH），这种情况也就没有了
    */
   const quietBlips = () => {
     blip = -1;
@@ -197,7 +202,7 @@ export function createLamp(seed: number): PropRig {
         if (nextBlip <= 0) {
           blip = 0;
           blipLen = 0.1 + rand() * 0.2;
-          blipDepth = 0.05 + rand() * 0.15;
+          blipDepth = BLIP_DEPTH[0] + rand() * (BLIP_DEPTH[1] - BLIP_DEPTH[0]);
           nextBlip = 3 + rand() * 7;
         }
         let v = 1;

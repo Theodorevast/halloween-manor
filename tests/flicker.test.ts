@@ -17,6 +17,7 @@ import { porchFlicker } from '../src/view/house';
 import { LIGHTFX, countDips, createLightFx, dipStarts, letterLevel, thermal } from '../src/view/lightfx';
 import { PALETTE } from '../src/view/palette';
 import {
+  BLIP_DEPTH,
   BLIP_QUIET, FLICKER_END, LAMP_FLICKER, LAMP_FLICKER_OLD, LAMP_PATTERN, LAMP_RELIGHT, createLamp, sampleTable,
 } from '../src/view/props/lamp';
 import { TORCH_COUNT, torchDim, torches } from '../src/view/torches';
@@ -487,8 +488,11 @@ describe('台灯的附身、复原和附近的现身前后接上（最终审查 
 });
 
 describe('台灯平时的轻闪不留到复原以后（路 F Minor 3，随最终审查 I1 一起修）', () => {
-  /** 种子 1 的台灯平时第一次数得出来的轻闪（单独跑它量，约 5.3 秒）暗下去的那一帧 */
-  const firstBlip = () => frames(HZ, dipStarts(lampNearManifest(1, 8 * HZ, {}), HZ)[0]);
+  /**
+   * 种子 1 的台灯平时第一次轻闪开始的那一帧（单独跑它量：亮度第一次掉到 0.995 以下）。
+   * 2026-10-29 起轻闪压到 countDips 数不出来（lamp.ts 的 BLIP_DEPTH），不能再用 dipStarts 找它
+   */
+  const firstBlip = () => lampNearManifest(1, 8 * HZ, {}).findIndex((v) => v < 0.995);
   /**
    * 复原收尾的那一帧（复原开始后第几帧；LAMP_RELIGHT 最后一段从 0.5 秒起 0.15 秒爬满，lamp.ts 到 0.65 秒收尾），下一帧起就是平时。
    * 平时的轻闪倒数 BLIP_QUIET 秒，最早在平时的第 frames(BLIP_QUIET) 帧开始：从收尾那一帧起往后 frames(BLIP_QUIET) 帧都不该有
@@ -660,5 +664,29 @@ describe('?oldflicker（看样时对比新旧；node 里没有 location 也不�
     const none = await fresh();
     expect(none.flash.TORCH.nervous.flicker).toBe(none.flash.NERVOUS_FLICKER.safe);
     expect(none.lamp.LAMP_FLICKER).not.toEqual(none.lamp.LAMP_FLICKER_OLD);
+  });
+});
+
+describe('台灯平时的轻闪数不成一下（2026-10-29：附身前刚轻闪完会凑成 4 下，按体验定成把轻闪压到门槛以下）', () => {
+  it('深度上限小于 countDips 的门槛 0.1', () => {
+    expect(BLIP_DEPTH[1]).toBeLessThan(0.1);
+  });
+  it('真的台灯不附身放 600 秒（4 个种子、60 帧）：一下都数不出来，但确实在轻闪（亮度会掉下来）', () => {
+    for (const seed of [1, 2, 3, 7]) {
+      const rig = createLamp(seed);
+      let light: THREE.PointLight | undefined;
+      rig.model.traverse((o) => { if ((o as THREE.PointLight).isPointLight) light = o as THREE.PointLight; });
+      const glow = (light!.userData.lightfx as { glow: { value: number } }).glow;
+      const obj: ScareObjectState = { id: 'lamp', type: 'lamp', pos: { x: 0, z: 0 }, facing: 0, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0 };
+      const levels: number[] = [];
+      let time = 0;
+      for (let k = 0; k < 600 * 60; k++) {
+        time += 1 / 60;
+        rig.update({ dt: 1 / 60, time, obj, state: {} as WorldState });
+        levels.push(glow.value);
+      }
+      expect(dipStarts(levels, 60)).toEqual([]);
+      expect(Math.min(...levels)).toBeLessThan(0.99);
+    }
   });
 });
