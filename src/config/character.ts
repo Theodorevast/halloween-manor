@@ -127,7 +127,8 @@ export const VISITOR_SPECS: CharacterSpec[] = [
     flashlightHeight: 0.6,
   },
   {
-    // 女巫（同上，11417 三角面；2026-10-29 精修加 --trust legs --trust-dist 0.10）。calibrate()：正面 1.555 / 1.578
+    // 女巫（同上，11393 三角面；2026-10-29 精修加 --trust legs --trust-dist 0.10，10-30 加 --split-feet：删掉左鞋底被自动绑到右脚的 24 个面，
+    // 走、跑、逃跑时两只鞋之间不再拉出长条）。calibrate()：正面 1.555 / 1.578
     url: `${import.meta.env.BASE_URL}assets/visitors/witch.glb`,
     targetHeight: 1.1,
     maxLength: 1.4,
