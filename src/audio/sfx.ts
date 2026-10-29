@@ -1334,8 +1334,9 @@ export const trapArm: SfxFn = (bus, t, at) => {
   const s = new Snd(bus, { at, level: LEVEL.trapArm, wet: A.wet });
   // 每条带通一个颗粒轨：主裂声（一小簇，前密）+ 后面疏疏落落的小裂声（越来越轻）
   const tracks = A.bands.map(() => [] as Grain[]);
-  const put = (at: number, amp: number) => {
-    tracks[Math.floor(rng.next() * tracks.length)].push({ t: at, len: rand(0.0005, 0.003), amp, block: rng.next() < 0.4 });
+  // 颗粒的时刻叫 when，不叫 at：at 是这个声音放在哪（SfxFn 的第三个参数），别遮蔽它（最终审查 U M-11）
+  const put = (when: number, amp: number) => {
+    tracks[Math.floor(rng.next() * tracks.length)].push({ t: when, len: rand(0.0005, 0.003), amp, block: rng.next() < 0.4 });
   };
   const nc = Math.round(rand(A.crack[0], A.crack[1]));
   for (let i = 0; i < nc; i++) put(rand(0, A.crackSpan), A.amp * rand(0.5, 1));

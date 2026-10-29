@@ -121,7 +121,7 @@ function simulateWalk(bus: MixBus, t: number, who: NpcState, path: Vec2[], speed
 function simulateBreath(bus: MixBus, t: number, who: NpcState, pos: Vec2, ear: Vec2, fear: number, seconds: number) {
   const crowd = createCrowd(bus, true);
   const breath = createBreath(bus, crowd);
-  const w: NpcState = { ...who, pos: { ...pos }, mode: 'wander', speed: 0, fear, nervous: fear >= 60 };
+  const w: NpcState = { ...who, pos: { ...pos }, mode: 'wander', speed: 0, fear, nervous: fear >= FEAR.nervous };
   for (let f = 0; f < seconds * 60; f++) {
     crowd.update([w], t + f / 60, 1 / 60);
     breath.update([w], t + f / 60, 1 / 60, ear);
