@@ -742,6 +742,41 @@ describe('World：恐惧值（计划测试 7）', () => {
     expect(n.nervous).toBe(false);
   });
 
+  test('涨了恐惧值的「听见」照样算被吓、让回落重新计时：引诱声、尖叫传染（最终审查 S R3；穿墙声涨 0 不算，见 tests/ghost.test.ts）', () => {
+    /** 恐惧值 40、已经回落了 1 秒的人站回 pos，hear 让他听见一声（推进到听见的那一步）；之后 decayDelay 秒内不回落，再往后照常回落 */
+    const check = (seed: number, pos: Vec2, hear: (w: World, n: NpcState) => SimEvent[]) => {
+      const w = createWorld({ seed, autoSpawn: false });
+      const n = w.spawn({ pos, personality: 'average', lookDir: -Math.PI / 2 });
+      n.fear = 40;
+      run(w, FEAR.decayDelay + 1);
+      expect(n.fear).toBeLessThan(40); // 已经在回落
+      n.pos.x = pos.x;
+      n.pos.z = pos.z;
+      const before = n.fear;
+      const ev = hear(w, n);
+      const f1 = n.fear;
+      expect(f1).toBeGreaterThan(before);
+      run(w, FEAR.decayDelay - 0.2);
+      expect(n.fear).toBe(f1); // 重新计时：decayDelay 秒内不回落
+      run(w, 1);
+      expect(n.fear).toBeLessThan(f1); // 之后照常回落
+      return ev;
+    };
+    // 引诱声：卧室门外的走廊，听得见八音盒（2.85 米、有视线）
+    const lure = check(17, { x: 2.5, z: 6.5 }, (w) => {
+      w.trigger('music-box');
+      return w.step(DT);
+    });
+    expect(ofType(lure, 'heard').length).toBe(1);
+    // 尖叫传染：旁边 1 米有人吓跑了（尖叫），他听见
+    const scream = check(18, { x: 8, z: 6 }, (w, n) => {
+      const c = w.spawn({ pos: { x: n.pos.x + 1, z: n.pos.z }, personality: 'timid' });
+      c.fear = FEAR.max;
+      return w.step(DT);
+    });
+    expect(ofType(scream, 'startle').filter((e) => e.object === null).map((e) => e.amount)).toEqual([FEAR.contagion]);
+  });
+
   test('紧张时闲逛更快', () => {
     const w = createWorld({ seed: 16, autoSpawn: false });
     const calm = w.spawn({ pos: { x: 8, z: 6 }, personality: 'average' });

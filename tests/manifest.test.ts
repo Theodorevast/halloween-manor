@@ -194,11 +194,48 @@ describe('主动现身（吓人、赶人）', () => {
       return st[0].amount;
     };
     expect(PERSONALITIES.average.fearMult).toBe(1);
-    const close = amount({ x: G.x - 1, z: G.z }, (n) => bearingTo(n.pos, G));
-    expect(Math.abs(close - MANIFEST.fear * 1.3 * 1.2 * 1.25)).toBeLessThanOrEqual(0.5);
+    // 容差按要的值的 2% 算（最终审查 S M9）：MANIFEST.fear 看样时还要调（20 / 30），绝对容差会跟着变松或变紧
+    const near = (got: number, want: number) => expect(Math.abs(got - want)).toBeLessThanOrEqual(0.02 * want);
+    near(amount({ x: G.x - 1, z: G.z }, (n) => bearingTo(n.pos, G)), MANIFEST.fear * 1.3 * 1.2 * 1.25);
     const far = { x: G.x, z: G.z - 5.99 };
-    const edge = amount(far, (n) => bearingTo(n.pos, G) + VISION.halfAngle - 0.002);
-    expect(Math.abs(edge - MANIFEST.fear * 0.6 * 0.9)).toBeLessThanOrEqual(0.5);
+    near(amount(far, (n) => bearingTo(n.pos, G) + VISION.halfAngle - 0.002), MANIFEST.fear * 0.6 * 0.9);
+  });
+
+  test('停留期间走进视线的人被定住（最终审查 S M6）：蓄力时在 noticeRadius 外没察觉、落下时在 range 外没被吓到，停留中走近看见了就停住盯着（speed 0、不挪），到 end 那一步放开接着走', () => {
+    const w = createWorld({ seed: 110, autoSpawn: false });
+    // 走廊：鬼魂在西头，访客从东边往西走过来；7 米处手电照到鬼魂，愣一下（察觉 kind ghost），愣完接着走
+    const spot = { x: 2.0, z: 6.0 };
+    w.setGhost(spot);
+    const b = w.spawn({ pos: { x: 10.5, z: 6.0 }, personality: 'average', goal: { x: 1.0, z: 6.0 }, lookDir: Math.PI });
+    for (let k = 0; k < 60 * 5 && b.notice?.kind !== 'ghost'; k++) w.step(DT);
+    expect(b.notice?.kind).toBe('ghost');
+    expect(w.manifest()).toBe(true); // 他愣着的时候现身
+    const drop = until(w, 'drop');
+    expect(ofType(drop.ev, 'notice').filter((e) => e.kind === 'manifest')).toEqual([]);
+    expect(ofType(drop.ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([]);
+    expect(dist(b.pos, spot)).toBeGreaterThan(MANIFEST.range);
+    // 停留：愣完接着走，走进 MANIFEST.range 看见了就停住，一直停到 end 的前一步
+    let frozenAt: Vec2 | null = null, frozenSteps = 0, walked = 0;
+    let end: SimEvent[] = [];
+    for (let k = 0; k < Math.round((MANIFEST.hold + 0.1) / DT) && end.length === 0; k++) {
+      const ev = w.step(DT);
+      if (ev.some((e) => e.type === 'manifest' && e.phase === 'end')) end = ev;
+      else if (frozenAt) {
+        expect(b.speed).toBe(0);
+        expect(b.pos).toEqual(frozenAt);
+        frozenSteps++;
+      } else if (b.speed > 0) walked = Math.max(walked, b.speed);
+      else if (dist(b.pos, spot) <= MANIFEST.range) frozenAt = { ...b.pos };
+    }
+    expect(walked).toBeGreaterThan(1); // 停住之前是走着的
+    expect(frozenAt).not.toBeNull();
+    expect(frozenSteps).toBeGreaterThan(10);
+    expect(end.length).toBeGreaterThan(0);
+    // end 那一步放开：照原来的路接着往西走；被定住不加恐惧值、不算被吓
+    expect(b.speed).toBeGreaterThan(0);
+    expect(b.mode).toBe('wander');
+    expect(b.fear).toBe(0);
+    expect(ofType(end, 'startle')).toEqual([]);
   });
 
   test('被吓到的人僵住完转身后退：落下 2 秒后离那里至少 backOff 米、手电照着那边；加了一个绕开圈，到期去掉；之后闲逛不挑圈里的目标，路线不往圈里钻', () => {

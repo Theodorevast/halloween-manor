@@ -477,6 +477,38 @@ describe('鬼魂：World', () => {
     }
   });
 
+  test('全局去抖 GHOST.wallGap 秒（最终审查 S R1）：第一次穿墙后 0.5 秒才走进范围的人，离第一次不到 wallGap 秒的第二次穿墙听不见（他自己没听过、不在冷却里）；过了 wallGap 秒的下一次听得见', () => {
+    const w = createWorld({ seed: 94, autoSpawn: false });
+    const a = w.spawn({ pos: FOYER_SPOT, personality: 'average', lookDir: Math.PI / 2 });
+    // b 一开始在走廊东边，离门框将近 6 米，听不见
+    const FAR = { x: 13.25, z: 6.25 };
+    const b = w.spawn({ pos: FAR, personality: 'average', lookDir: Math.PI });
+    const flip = (inWall: boolean) => {
+      w.setGhost(inWall ? { ...DOOR_IN, inWall: true } : { ...DOOR_OUT, inWall: false });
+      return w.step(DT);
+    };
+    flip(false);
+    const t0 = w.state.time;
+    const first = flip(true); // 第一次穿墙
+    expect(soundNotices(first, a).length).toBe(1);
+    expect(soundNotices(first, b)).toEqual([]);
+    // 鬼魂出墙；0.5 秒后 b 走进范围（挪到走廊里离门框 2.1 米处）
+    while (w.state.time < t0 + 0.5 - 1e-9) flip(false);
+    putBack(b, HALL_SPOT);
+    while (w.state.time < t0 + 0.6 - 1e-9) flip(false);
+    putBack(b, HALL_SPOT);
+    const second = flip(true); // 离第一次 0.6 秒：去抖，谁也听不见
+    expect(GHOST.wallGap - 0.6).toBeGreaterThan(0.1);
+    expect(soundNotices(second, b)).toEqual([]);
+    expect(ofType(second, 'notice')).toEqual([]);
+    // 过了 wallGap 秒再穿墙：b 听得见（a 还在自己的冷却里）
+    while (w.state.time < t0 + GHOST.wallGap + 0.05) flip(false);
+    putBack(b, HALL_SPOT);
+    const third = flip(true);
+    expect(soundNotices(third, b).length).toBe(1);
+    expect(soundNotices(third, a)).toEqual([]);
+  });
+
   test('穿墙声不算被吓：恐惧值正在回落的人听见了，照样接着回落', () => {
     const w = createWorld({ seed: 90, autoSpawn: false });
     const a = w.spawn({ pos: FOYER_SPOT, personality: 'average', lookDir: Math.PI / 2 });
