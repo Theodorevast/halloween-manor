@@ -482,12 +482,15 @@ function flashes(tab: readonly (readonly [number, number])[], prev0: number): [n
   }
   return out;
 }
-/** 闪烁表里「变暗」的时刻（从 ≥ 0.6 掉到 < 0.3） */
+/**
+ * 闪烁表里「变暗」的时刻（从 ≥ 0.6 掉到 < 0.5）。2026-10-29 起附身台灯的表由字母节奏推出（view/props/lamp.ts），最暗是
+ * LIGHTFX.floor（0.3，不全灭）：原来的「< 0.3」一下都不响，暗下去的小噼啪就没了，所以放宽到 0.5
+ */
 function darks(tab: readonly (readonly [number, number])[]): number[] {
   const out: number[] = [];
   let prev = 1;
   for (const [at, b] of tab) {
-    if (b < 0.3 && prev >= 0.6) out.push(at);
+    if (b < 0.5 && prev >= 0.6) out.push(at);
     prev = b;
   }
   return out;

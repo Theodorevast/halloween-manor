@@ -27,7 +27,8 @@ export interface ScareSpec {
  * - latch：柜子里「咔哒」一声（锁舌），门板轻轻一震，像有人从里面推了一下
  * - open：门自己慢慢开出一条缝，到 openDeg 度（先快后慢，停住，不回弹、不晃），配一声长长的合页吱呀
  * - hold：停住，没有声音（看着它的访客被定住，手电照着门缝）
- * - slamAt（SCARES.wardrobe.hitAt 就用它）：门猛地合上，slamTime 秒合完；一声闷响加锁舌，柜顶落灰，低频冲击
+ * - slamAt：门猛地开始合上，slamTime 秒合完；合完（碰上门框）那一刻一声闷响加锁舌、低频冲击，柜顶落灰。
+ *   SCARES.wardrobe.hitAt 就是碰上的那一刻（slamAt + slamTime）：访客的受惊、尖叫和那一声撞在一起
  * - fingersChance：variant（trigger 事件）小于它时，合上之前先有几根苍白的手指从门缝里扶住门边（fingers 时段），看不见手后面连着什么
  * - settle：合上以后多久灰落完、环境声回来
  */
@@ -57,7 +58,7 @@ export const SCARES: Record<ScareType, ScareSpec> = {
   // 恐惧值 17（average 倒吸一口气不叫、timid 叫，比床轻：卧室里已经有床和台灯）、冷却 20。恐惧值 23 以上时单个 brave 吓得太快，
   // 「单个 brave 加鬼魂中位 ≤ 0.8 × 不加」过不了；冷却 14–17 时正常对局被吓跑的人中位存活短 2–4 秒。range 4–6、active 2.5–3.2
   // 机器人测出来的数字一样，先留原值。机器人还没把它当机关用，见 tests/bots.ts 的 TRAP_TYPES
-  wardrobe: { kind: 'sight', range: 5, fear: 17, cooldown: 20, active: 2.8, broken: 0, hitAt: WARDROBE.slamAt },
+  wardrobe: { kind: 'sight', range: 5, fear: 17, cooldown: 20, active: 2.8, broken: 0, hitAt: WARDROBE.slamAt + WARDROBE.slamTime },
 };
 
 
