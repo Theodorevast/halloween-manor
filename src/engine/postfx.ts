@@ -1,6 +1,6 @@
 // 后处理（TSL）。r186 里后处理管线类叫 THREE.RenderPipeline（PostProcessing 是 r183 起废弃的别名，会打警告）。
 //
-// High：场景（间接光乘上一帧的 SSAO）→ + 泛光（宽的几级偏暖：胶片光晕）→ 开场显影
+// High：场景（间接光乘上一帧的 SSAO）→ × 这一帧的 SSAO（直射光上的接触阴影，亮的光源不动）→ + 泛光（宽的几级偏暖：胶片光晕）→ 开场显影
 //       → 色调映射 + 转 sRGB → 调色 → 暗角 / 暗角脉冲 → 胶片颗粒；场景画完后用它的深度算这一帧的 SSAO
 // Low ：场景 → 开场显影 → 色调映射 + 转 sRGB → 调色 → 暗角 / 脉冲 → 颗粒（没有泛光、AO）
 // 2026-10-28 做减法：去掉了景深（常开的微缩景深、惊吓拉焦、悬停和开场跟焦）
@@ -31,19 +31,23 @@ import { HEAD_H, SILL_H } from '../view/walls';
 import type { Quality } from './types';
 
 /**
- * 泛光。阈值是场景线性亮度（色调映射之前）：被普通光照亮的漫反射面在 0.05–0.6 之间，
- * 只有手电光斑中心、灯泡 / 灯罩这类 HDR 亮处会超过 0.9，所以阈值偏高 + 一段软过渡。
+ * 泛光。阈值是场景线性亮度（色调映射之前）：被普通光照亮的漫反射面在 0.05–0.6 之间，手电正照着的近处表面也只到 1 上下，
+ * 这些都是「被照亮的表面」，不该晕开（用户说过不要泛光糊一片）；只有光源本身——灯罩口里被灯泡直照的内壁（亮度 3 以上）、
+ * 台灯泡（lamp.ts，约 2.4）、手电镜片（flashlight.ts，约 2.7）——要留在阈值上面。
+ * 所以阈值 2.2 + 一段宽的软过渡（smoothWidth 1.2：2.2 起、3.4 才全量），强度也收到 0.32（2026-10-30 ART-7；同一机位量过：
+ * 手电光斑、台灯旁的墙那层暖雾基本没了，灯罩上方的晕少三成，灯罩口的亮边和镜片的晕还在，只是小了）。
+ * 改这几个数之前，先看光源的亮度还在不在阈值上面（tests/postfx-ao.test.ts 守着）。
  * scale：亮部提取的分辨率比例（相对画布物理像素），按像素比再除一次，高 DPR 下屏幕上的光晕大小不变、开销不涨。
  * tints：每级 mip 的颜色（0 最细 → 4 最宽）。胶片光晕（halation）：强光穿过乳剂、在片基背面反射回来，
- * 在亮处外圈留下一圈偏红橙的晕；细的几级保持中性（灯芯不变色），越宽越暖。亮度（Rec.709）大致守恒
+ * 在亮处外圈留下一圈偏红橙的晕；细的几级保持中性（灯芯不变色），越宽越暖（最宽两级比原来收了一点，还是偏暖）。亮度（Rec.709）大致守恒
  */
 export const BLOOM = {
-  threshold: 0.9,
-  smoothWidth: 0.4,
-  strength: 0.45,
+  threshold: 2.2,
+  smoothWidth: 1.2,
+  strength: 0.32,
   radius: 0.45,
   scale: 0.5,
-  tints: [[1, 1, 1], [1.03, 0.99, 0.94], [1.14, 0.94, 0.76], [1.32, 0.85, 0.55], [1.48, 0.77, 0.42]] as [number, number, number][],
+  tints: [[1, 1, 1], [1.03, 0.99, 0.94], [1.14, 0.94, 0.76], [1.2, 0.9, 0.66], [1.3, 0.86, 0.58]] as [number, number, number][],
 };
 /** 暗角：d 是到画面中心的距离（边中点 0.71，角 1） */
 export const VIGNETTE = { strength: 0.45, inner: 0.35, outer: 1.0 };
@@ -92,11 +96,16 @@ export const REVEAL = {
 };
 
 /**
- * 环境光遮蔽（只在 High）：只乘在间接光（半球光、环境光）上，手电、台灯、月光的直射光照旧，透明物体不参与。
- * 要的是墙根、家具底下、房间角落暗一点，不是描边。
- * 做法：场景 pass 画完以后，用它的深度算这一帧的 AO（法线从深度重建），存起来给下一帧的受光材质用；
- * 材质按「上一帧的相机」把自己的世界坐标投回 AO 图上取值，镜头转动、推近时 AO 仍然贴在墙根上。
- * 没有单独的预 pass：少画一遍场景（CPU 少一次遍历），开场也少编一批着色器。代价是动的东西（访客）的 AO 慢一帧，看不出来。
+ * 环境光遮蔽（只在 High）。要的是墙根、家具底下、房间角落、访客脚下暗一点（接触阴影），不是描边。
+ * 做法：场景 pass 画完以后，用它的深度算这一帧的 AO（法线从深度重建），存起来，两处用：
+ * 1. 场景材质里：乘在间接光（半球光、环境光）上，用的是上一帧的结果；材质按「上一帧的相机」把自己的世界坐标投回 AO 图上取值，
+ *    镜头转动、推近时 AO 仍然贴在墙根上。没有单独的预 pass：少画一遍场景（CPU 少一次遍历），开场也少编一批着色器。
+ *    代价是动的东西（访客）的 AO 慢一帧，看不出来。但整栋房子的间接光几乎是 0（材质底色 0.013–0.04、半球光 ×0.55），
+ *    光靠这一处 AO 开关前后画面几乎没有差别（2026-10-30 美术总监量过）；
+ * 2. 后处理里（buildHigh，ART-4）：这一帧的结果，按 direct 的比例乘到整幅画面（直射光、自发光、叠上去的雾都在里面）上，
+ *    才是看得见的接触阴影；亮处（亮度 protect[0]–protect[1]，灯罩、镜片、光斑正中）渐渐不乘。
+ * 透明物体不写深度、不参与 AO，但它们叠在墙角时画面上的颜色会跟着被乘（雾、鬼魂、白气是加法 / 普通混合叠上去的）：
+ * direct 只给 0.4，最多压暗 40% × 遮挡，墙根那圈雾不会被压没。
  * range：超过 radius × range 米的遮挡不算。降低的墙顶在屏幕上紧挨着墙后的地板，深度却差一米多，
  * three 自带的衰减永远不到 0，墙后会出一圈黑晕
  */
@@ -112,7 +121,29 @@ export const AO = {
   scale: 0.5,
   /** 深度感知模糊：深度差超过 radius / sharpness 米的邻居基本不参与 */
   blurSharpness: 8,
+  /** 后处理里乘到整幅画面（直射光）上的比例：一个像素最多被压暗这么多（× 遮挡程度）。见 aoDirectWeight */
+  direct: 0.4,
+  /** 直射光上的 AO 的保护区间：像素的场景线性亮度（色调映射之前）从 protect[0] 到 protect[1] 渐渐不乘，亮的光源不被压暗 */
+  protect: [0.8, 2.0] as [number, number],
 };
+
+/** GLSL / TSL 的 smoothstep（两个边界之间 3t² − 2t³，边界之外取 0 / 1） */
+const smooth01 = (a: number, b: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
+
+/**
+ * 后处理里乘到直射光上的 AO 权重 k（buildHigh 里着色器的同一条曲线，纯函数、好测）：
+ * 亮度 lum（场景线性亮度）在 protect[0] 以下满额 direct，到 protect[1] 渐渐（smoothstep）降到 0；
+ * strength 是 uAOStrength（AO 关、Low 档、还没算出来时为 0，调试里 aoStrength(0.5) 就是一半）。
+ */
+export const aoDirectWeight = (lum: number, strength: number = 1): number =>
+  AO.direct * (1 - smooth01(AO.protect[0], AO.protect[1], lum)) * strength;
+
+/** 这个像素最后乘多少：mix(1, ao, k)。ao = 1（没有遮挡）原样；最暗也只压到 1 − direct */
+export const aoDirectFactor = (ao: number, lum: number, strength: number = 1): number =>
+  1 + (ao - 1) * aoDirectWeight(lum, strength);
 
 /** 调试 / 量性能用的开关：关掉的效果整段不进图。全关 = 升级前的管线 */
 export interface FxFlags {
@@ -143,7 +174,7 @@ export interface PostFx {
   freezeGrain: boolean;
   /** 调试：临时改 AO 强度（不重建管线，同一帧前后对比用）；null = AO.strength */
   aoStrength: number | null;
-  /** 调试：画面换成中间结果（0 正常，1 AO）；只在 ?fxview 下有效 */
+  /** 调试：画面换成中间结果（0 正常，1 AO 图，2 场景线性亮度 ÷ 4，3 后处理里 AO 实际乘的倍数）；只在 ?fxview 下有效 */
   view: number;
   dispose(): void;
 }
@@ -449,7 +480,19 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
     const highNodes: { dispose(): void }[] = [];
     let bloomNode: ReturnType<typeof bloom> | null = null;
     const buildHigh = () => {
+      // 场景 pass 在这一行第一次被遇到：three 按建图时第一次遇到的顺序调度各 pass，下面的 SSAO 排在它后面，读的是这一帧的深度
       let hdr: V3 = color.rgb;
+      let aoFactor: F | null = null; // 后处理里 AO 实际乘的倍数（调试视图 3 看它）
+      if (ssao) {
+        // AO 当接触阴影（ART-4）：这一帧的 AO（SSAO 在场景 pass 后面、这条管线的输出之前算好）乘到整幅画面上，不只是间接光。
+        // k 的曲线就是 aoDirectWeight：暗处满额 AO.direct，亮度到 protect 区间里渐渐降到 0（灯罩、镜片、光斑正中不被压暗）；
+        // uAOStrength 为 0（AO 关、刚切到 High、画布刚换尺寸）时一点都不乘。泛光吃的是没乘过的场景色：它只提取阈值以上的光源，
+        // 阈值（BLOOM.threshold）在保护区间上限之上，两边不冲突
+        const ao = ssao.getTextureNode().sample(uv()).r;
+        const k = float(AO.direct).mul(float(1).sub(smoothstep(AO.protect[0], AO.protect[1], luminance(color.rgb)))).mul(uAOStrength);
+        aoFactor = mix(float(1), ao, k) as unknown as F;
+        hdr = hdr.mul(aoFactor);
+      }
       if (bloomOn) {
         bloomNode = bloom(color, BLOOM.strength, BLOOM.radius, BLOOM.threshold);
         bloomNode.smoothWidth.value = BLOOM.smoothWidth;
@@ -462,10 +505,15 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
       pipe.outputColorTransform = false;
       let outNode: N<'vec4'> = finish(reveal(hdr));
       if (debugViews) {
-        // 调试视图（只在 ?fxview 下建）：1 = AO。
+        // 调试视图（只在 ?fxview 下建）：1 = AO 图；2 = 场景线性亮度 ÷ 4（读数 = 灰度 / 255 × 4，调泛光阈值、AO 保护区间时看亮度在哪）；
+        // 3 = 后处理里 AO 实际乘的倍数（白 = 1 不动）。
         // 用 mix 选，不用 select / If：WebGL 后端在条件块里采样贴图会出错（贴图 uv 翻转要建临时变量）
         const v1 = uView.equal(1).select(float(1), float(0));
         outNode = mix(outNode, vec4(vec3(aoTex.sample(uv()).r), 1), v1);
+        const v2 = uView.equal(2).select(float(1), float(0));
+        outNode = mix(outNode, vec4(vec3(luminance(color.rgb).div(4)), 1), v2);
+        const v3 = uView.equal(3).select(float(1), float(0));
+        outNode = mix(outNode, vec4(vec3(aoFactor ?? float(1)), 1), v3);
       }
       // SSAO 要排在场景 pass 后面（读这一帧的深度）。three 按建图时第一次遇到的顺序调度各 pass：
       // 在输出图最后摸一下 SSAO 的结果（乘 0）——场景 pass 早在前面就遇到了

@@ -175,7 +175,7 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality, seed 
   const lens = new THREE.Mesh(parts.lens, parts.lensMat);
   lens.name = 'torch-lens';
   // 镜片此刻的颜色（共用材质每画这一个镜片前读它）：和亮芯那盏灯同一个颜色 × torchDim，见下面 update
-  const lensColor = new THREE.Color(PALETTE.torchCore);
+  const lensColor = new THREE.Color(PALETTE.torchCore).multiplyScalar(3); // ×3：亮度约 2.7，在泛光阈值（BLOOM.threshold 2.2）上面，镜片还晕一点（ART-7，update 里同）
   lens.userData.lensColor = lensColor;
   const strength = uniform(0);
   const beamMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
@@ -253,7 +253,7 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality, seed 
         const w = Math.max(0, 1 - dim) * TORCH.dimWarmK;
         halo.color.copy(haloColor).lerp(warm, w);
         core.color.copy(coreColor).lerp(warm, w);
-        lensColor.copy(core.color).multiplyScalar(dim);
+        lensColor.copy(core.color).multiplyScalar(dim * 3);
       }
       halo.intensity = TORCH.halo.intensity * p.power * flick * dim;
       core.intensity = TORCH.core.intensity * p.power * flick * dim;
