@@ -52,6 +52,11 @@ export interface CharacterSpec {
   measureIdle?: boolean;
   /** 手电的高度（米，按 targetHeight 的身高）；不写用 FLASHLIGHT_HEIGHT */
   flashlightHeight?: number;
+  /**
+   * 访客登记簿上「穿哪套」写的名字（ui/register.ts）。只有联名两套写在这里：跟着 COLLAB_SPECS 在默认构建里一起被摇掉，
+   * 公开的几套写在 STRINGS.register.outfit（按地址的文件名）
+   */
+  label?: string;
 }
 
 export const CHARACTER: CharacterSpec = {
@@ -169,6 +174,7 @@ export const COLLAB_SPECS: CharacterSpec[] = [
   {
     // 承太郎装（P2 + 四视图 + Blender 精修 --trust arms,legs --trust-dist 0.10，再做贴图后处理：手套、大衣；12863 三角面）。calibrate()：正面 1.596 / 1.633 / 1.518
     url: `${import.meta.env.BASE_URL}assets/visitors/jotaro.glb`,
+    label: 'Jotaro',
     targetHeight: 1.1,
     maxLength: 1.4,
     facingOffset: Math.PI / 2,
@@ -183,6 +189,7 @@ export const COLLAB_SPECS: CharacterSpec[] = [
   {
     // DIO 装（同上，精修 --trust arms,legs --trust-dist 0.10：短袖跟着手臂（不然手垂下来袖子横着像翅膀）、腿后侧不再被拉长；13356 三角面）。calibrate()：正面 1.595 / 1.599 / 1.547
     url: `${import.meta.env.BASE_URL}assets/visitors/dio.glb`,
+    label: 'DIO',
     targetHeight: 1.1,
     maxLength: 1.4,
     facingOffset: Math.PI / 2,

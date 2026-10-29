@@ -238,6 +238,17 @@ export interface Outfit {
   asset: CharacterAsset | null;
 }
 
+/** 每个访客穿的是哪一套（访客编号 → 造型 id），见 outfitOf。人走了也留着：登记簿收夜时才翻；一夜几十个人，不清 */
+const outfitIds = new Map<number, string>();
+
+/**
+ * 访客登记簿（ui/register.ts）用：这个访客穿的是哪一套。造型 id 是地址的文件名（vampire、lantern-explorer、witch、skeleton，
+ * 联名的 jotaro、dio）；占位狐狸（placeholder-fox.glb）记作 fox。进门以后第一帧建角色时记下；还没建好的、穿备用小人的：undefined
+ */
+export function outfitOf(npcId: number): string | undefined {
+  return outfitIds.get(npcId);
+}
+
 /** loadFirstOutfit 的结果：第一个访客穿的那套，和之后在后台下载的其余几套（排在它前面、加载失败的那几套不再试） */
 export interface FirstOutfit {
   outfit: Outfit;
@@ -569,6 +580,8 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
 
   const create = (npc: NpcState, outfit = outfitFor()): Visual => {
     const { spec, asset } = outfit;
+    // 登记簿用（outfitOf）：预编译的临时访客编号是负的，不记；备用小人不是哪一套衣服，不记
+    if (npc.id > 0 && asset) outfitIds.set(npc.id, spec.url.slice(spec.url.lastIndexOf('/') + 1).replace(/\.glb$/, '').replace(/^placeholder-/, ''));
     const { model, front, halfWidth, height } = makeModel(outfit, npc.personality);
     const parts: Visual['parts'] = [];
     model.traverse((o) => {
