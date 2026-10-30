@@ -7,7 +7,7 @@
 //   受手电、月光照，不发光。第三人称：和墙一起溶开（walls.ts 的 applyDissolve，nearCut 和墙一样），不会墙溶开了画还悬在半空；
 //   鬼魂的冷光、手电的反弹光（bounce.ts）也照得到它们。不投影（贴着墙，影子看不出来，省掉阴影 pass 的几次绘制），受阴影。
 //   一开场就在场景里、可见、不标 deferCompile：开场前整栋房子的预编译（main.ts 的 compileInStreams）就编好；六幅的着色器一字不差，只编一条管线（?pipelog 量过，WebGPU、WebGL2 都是）
-// - 娃娃屋俯视不建：六幅都挂在内墙上，内墙在娃娃屋里一直是 0.5 米的矮墙，挂不住画；那六张贴图也不下载（PROP_TEXTURES）
+// - 娃娃屋俯视不建：内墙一直是 0.5 米的矮墙，外墙按镜头降低，都挂不住画；那六张贴图也不下载（PROP_TEXTURES）
 import * as THREE from 'three/webgpu';
 import { attribute, mix, positionLocal, positionWorld, texture, uniform, uv } from 'three/tsl';
 import { CELL, PAINTINGS, ROOMS, WALL_T, type PaintingArt, type PaintingPlacement } from '../config/house';
