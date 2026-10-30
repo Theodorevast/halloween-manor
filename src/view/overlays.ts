@@ -167,6 +167,18 @@ export function createWatchLinger(hold = WATCH_LINGER) {
 }
 
 /**
+ * 名牌上的小眼睛（FEEL-1）灭的时候先留 hold 秒（整体审查 AF#6：它跟着访客的手电一开一合）：该亮就马上亮；
+ * 不该亮了先留着，留着的时候又该亮就不灭、从那一刻重新算。st.at = 最近一次该亮的时刻（原地改）；返回此刻亮不亮
+ */
+export function holdOn(raw: boolean, now: number, st: { at: number }, hold = WATCH_LINGER): boolean {
+  if (raw) {
+    st.at = now;
+    return true;
+  }
+  return now - st.at < hold;
+}
+
+/**
  * 此刻待出手的动作（FEEL-1，名牌上的小眼睛按它亮）：准星 / 手指对着够得着的物件（hover）就是附身它；
  * 没对着物件、有鬼魂（第三人称）、现身就绪（idle、冷却为 0）时是在鬼魂所在处现身；别的时候（现身蓄力、停留、冷却中，娃娃屋没悬停）没有。
  * 准星对着够不着的物件时 hover 是 null：那一下点不了，能出手的仍然只有现身，眼睛照旧按现身亮
@@ -280,6 +292,8 @@ interface Plate {
   /** 名字前面的小眼睛（FEEL-1）：这个人会被下一个动作影响（is-reach）；物件还在冷却（is-cool，眼睛灰的）。只在变化时写类名 */
   reach: boolean;
   cool: boolean;
+  /** 小眼睛最近一次该亮的时刻（真实秒，holdOn 用：灭的时候先留 WATCH_LINGER 秒） */
+  reachHold: { at: number };
 }
 
 interface Mark {
@@ -349,7 +363,7 @@ export function createOverlays(
     const fill = div('ov-bar-fill', bar);
     // 「紧张」门槛的刻度：过了这条线访客走得更快、手电发抖
     div('ov-bar-tick', bar).style.left = `${(FEAR.nervous / FEAR.max) * 100}%`;
-    return { el, inner, fade: 1, name, tag, fill, shown: 0, color: '', fleeing: false, frame: -1, w: 0, lift: 0, reach: false, cool: false };
+    return { el, inner, fade: 1, name, tag, fill, shown: 0, color: '', fleeing: false, frame: -1, w: 0, lift: 0, reach: false, cool: false, reachHold: { at: -Infinity } };
   };
 
   const acquire = (n: NpcState): Plate => {
@@ -360,6 +374,7 @@ export function createOverlays(
     p.color = '';
     p.fleeing = false;
     p.reach = p.cool = false;
+    p.reachHold.at = -Infinity;
     p.el.classList.remove('is-fleeing', 'is-reach', 'is-cool');
     p.el.classList.add('is-on');
     // 只在访客进门时读一次布局：名字定了宽度就不变，之后每帧只改 transform
@@ -495,12 +510,14 @@ export function createOverlays(
         p.fleeing = fleeing;
         p.el.classList.toggle('is-fleeing', fleeing);
       }
-      const reach = reachIds.has(n.id);
+      // 灭的时候先留 WATCH_LINGER 秒（AF#6）；留着的那一会儿灰不灰照上一刻的
+      const now0 = reachIds.has(n.id);
+      const reach = holdOn(reachIds.has(n.id), now, p.reachHold);
       if (reach !== p.reach) {
         p.reach = reach;
         p.el.classList.toggle('is-reach', reach);
       }
-      const cool = reach && reachCool;
+      const cool = reach && (now0 ? reachCool : p.cool);
       if (cool !== p.cool) {
         p.cool = cool;
         p.el.classList.toggle('is-cool', cool);

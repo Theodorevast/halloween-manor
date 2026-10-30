@@ -68,7 +68,8 @@ export interface HauntDebug {
   keepHaunting(): void;
   /**
    * 一夜此刻的状态：phase（night / closed / silence / retreat / register）、这一夜的时刻、登记簿开着没有、前门开着多少、
-   * 墙上多一个影子出现过几次（otherShadow，从打开网页算；冒烟测试可以断言机器人的一夜至少一次）；没接时为 null
+   * 墙上多一个影子这一夜出现过几次（otherShadow；Keep haunting 时要调 OtherShadow.newNight 才清零，冒烟测试可以断言机器人的一夜至少一次）；
+   * 没接时为 null
    */
   night(): (NightSnapshot & { register: boolean; door: number; otherShadow: number }) | null;
 }

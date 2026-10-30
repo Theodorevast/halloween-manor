@@ -260,6 +260,11 @@ export interface OtherDirector {
   force(s: OtherSpot): void;
   /** 调试用：马上撤掉（不管照没照着），不发事件 */
   clear(): void;
+  /**
+   * 新的一夜（Keep haunting，整体审查 I-3：「一晚最多 max 次」原来是一次载入最多 max 次）：从模拟时间 time、已经吓跑 scaredOff 个算起，
+   * 出现过的次数、用过的站位、两次之间的间隔清零，放着的马上撤掉（不发事件）；after、afterScared、widenAt 都从这一刻重新算
+   */
+  newNight(time: number, scaredOff: number): void;
 }
 
 /**
@@ -291,6 +296,8 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
   let scanIn = 0;
   let forced: OtherSpot | null = null;
   const used = new Set<string>();
+  /** 这一夜从模拟时间几秒、吓跑了几个开始（newNight；开局是 0、0） */
+  let origin = 0, scaredBase = 0;
 
   const dist = (a: Vec2, b: Vec2) => Math.hypot(a.x - b.x, a.z - b.z);
   /** 离站位最近的访客（和亮着的手电）有多远（米，平面距离） */
@@ -313,7 +320,7 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
    * 保证一夜至少有一次，出现过一次以后照旧
    */
   const viewable = (s: OtherSpot, f: OtherFrame) =>
-    !f.inView || f.inView(s) || (appeared === 0 && f.time >= rule.widenAt - 1e-9 && (f.nearView?.(s) ?? false));
+    !f.inView || f.inView(s) || (appeared === 0 && f.time - origin >= rule.widenAt - 1e-9 && (f.nearView?.(s) ?? false));
 
   /** 挑一个站位（见上面「放在哪」）；没有合适的返回 null */
   const pick = (f: OtherFrame): OtherSpot | null => {
@@ -359,6 +366,16 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
     clear() {
       at = null;
       forced = null;
+    },
+    newNight(time, scaredOff) {
+      appeared = 0;
+      used.clear();
+      at = null;
+      forced = null;
+      nextAt = -Infinity;
+      scanIn = 0;
+      origin = time;
+      scaredBase = scaredOff;
     },
     step(f) {
       const ev: OtherEvent[] = [];
@@ -412,7 +429,7 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
         }
         return ev;
       }
-      if (appeared >= rule.max || (f.time < rule.after && f.scaredOff < rule.afterScared)) return ev;
+      if (appeared >= rule.max || (f.time - origin < rule.after && f.scaredOff - scaredBase < rule.afterScared)) return ev;
       if (f.time < nextAt || calm < look.ghostCalm) return ev;
       scanIn -= f.dt;
       if (scanIn > 0) return ev;
@@ -445,6 +462,11 @@ export interface OtherShadow extends Module {
   readonly appeared: number;
   /** 出现了一次时回调（登记簿记一笔） */
   onAppear(cb: () => void): void;
+  /**
+   * 新的一夜（Keep haunting 时调，整体审查 I-3）：这一夜出现过的次数、用过的站位清零，after、afterScared、widenAt 从此刻（上一帧的模拟时间、
+   * 吓跑数）重新算；放着的马上撤掉。还没接进 main.ts（收尾那一路接）
+   */
+  newNight(): void;
 }
 
 export interface OtherShadowOptions {
@@ -457,7 +479,7 @@ export interface OtherShadowOptions {
 export function createOtherShadow(core: RenderCore, opts: OtherShadowOptions = {}): OtherShadow {
   const search = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
   const listeners: (() => void)[] = [];
-  if (search?.has('noother')) return { appeared: 0, onAppear: (cb) => void listeners.push(cb) };
+  if (search?.has('noother')) return { appeared: 0, onAppear: (cb) => void listeners.push(cb), newNight() {} };
 
   const model = opts.model ?? null;
   // 外形：鬼魂模型里不动的那个合成几何体（和鬼魂自己的影子共用同一份，不多占显存）；没有就自己建一个程序化的人形
@@ -520,6 +542,8 @@ export function createOtherShadow(core: RenderCore, opts: OtherShadowOptions = {
   const spotRoom = new Map(OTHER_SPOTS.map((s) => [s.id, roomAt(...cellOf(s.x, s.z))]));
   /** 放宽以后（P1-2）：站位在镜头或鬼魂所在的房间、隔壁房间（第三人称才有；娃娃屋俯视整栋都看得见，不放宽）。每帧算一次附近的房间 */
   let near = new Set<RoomId>();
+  /** near 是按哪两个房间（镜头、鬼魂）算的 */
+  let nearOf: [RoomId | null, RoomId | null] | [] = [];
   const nearView = (s: OtherSpot) => {
     const r = spotRoom.get(s.id);
     return r !== undefined && r !== null && near.has(r);
@@ -576,6 +600,10 @@ export function createOtherShadow(core: RenderCore, opts: OtherShadowOptions = {
   return {
     get appeared() { return director.appeared; },
     onAppear(cb) { listeners.push(cb); },
+    newNight() {
+      director.newNight(frame.time, frame.scaredOff);
+      u.shadow.value = 0;
+    },
     update(ctx: FrameCtx) {
       const st = ctx.state as Partial<WorldState>;
       visitors.length = 0;
@@ -587,8 +615,13 @@ export function createOtherShadow(core: RenderCore, opts: OtherShadowOptions = {
       frame.ghost = ghostRig ? ghostRig.ghost : null;
       frame.ghostLit = ghostRevealAmount() > OTHER_LOOK.ghostLit || phase === 'windup' || phase === 'hold';
       if (rig) prepareView(rig);
-      if (ghostRig && frame.time >= OTHER_SHADOW.widenAt && director.appeared === 0) {
-        near = nearRooms([roomAt(...cellOf(cam.x, cam.z)), roomAt(...cellOf(ghostRig.ghost.x, ghostRig.ghost.z))]);
+      if (ghostRig && director.appeared === 0) {
+        // 镜头、鬼魂换了房间才重算（放宽从哪一刻算由导演管：newNight 以后从新的一夜算起）
+        const a = roomAt(...cellOf(cam.x, cam.z)), b = roomAt(...cellOf(ghostRig.ghost.x, ghostRig.ghost.z));
+        if (a !== nearOf[0] || b !== nearOf[1]) {
+          nearOf = [a, b];
+          near = nearRooms(nearOf);
+        }
       }
       for (const e of director.step(frame)) apply(e);
       // 满 maxShown 秒以后慢慢化掉：uShadow 跟着 level 从 1 线性降到 fadeFloor（化完撤掉时 apply 已经设成 0）

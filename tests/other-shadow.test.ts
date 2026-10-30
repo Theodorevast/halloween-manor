@@ -657,3 +657,74 @@ describe('附近的房间（nearRooms，P1-2 放宽 inView 用）', () => {
     expect([...nearRooms([null, 'kitchen'])].sort()).toEqual(['hall', 'kitchen']);
   });
 });
+
+describe('新的一夜（newNight，整体审查 I-3：「一晚最多 max 次」原来是一次载入最多 max 次）', () => {
+  it('出现满 max 次以后 newNight(时刻, 吓跑数)：次数清零、站位可以再用；after、afterScared 从那一刻重新算', () => {
+    const d = createOtherDirector([WEST, EAST]);
+    const mid = { x: 8, z: 6 };
+    const north = (p: Vec2) => torch(p.x, p.z, p.x, p.z - 3);
+    let t0 = LATE;
+    for (let k = 0; k < OTHER_SHADOW.max; k++) {
+      const w = until(d, OTHER_LOOK.gap + 5, () => ({ torches: [north(mid)], visitors: [mid] }), t0, 'place');
+      t0 += w.t;
+      const s = d.spot!;
+      const by = { x: s.x + s.nx * 3.2, z: s.z };
+      run(d, OTHER_SHADOW.litFor + 0.2, () => ({ torches: [torch(by.x, by.z, s.x, s.z)], visitors: [by] }), t0);
+      t0 += OTHER_SHADOW.litFor + 0.2;
+      run(d, 0.1, () => ({ torches: [north(by)], visitors: [by] }), t0);
+      t0 += 0.1;
+    }
+    expect(d.appeared).toBe(OTHER_SHADOW.max);
+    // Keep haunting：新的一夜从 t1 开始，那时已经吓跑了 5 个
+    const t1 = t0 + 10;
+    d.newNight(t1, 5);
+    expect(d.appeared).toBe(0);
+    expect(d.spot).toBeNull();
+    // 新的一夜里不到 after（吓跑的也只算这一夜的：再吓跑 afterScared − 1 个）：不放
+    expect(run(d, 3, () => ({ torches: [facingAway()], visitors: [HALL], scaredOff: 5 + OTHER_SHADOW.afterScared - 1 }), t1 + OTHER_SHADOW.after - 4)).toEqual([]);
+    // 到了这一夜的 after：放（站位也可以再用：西头上一夜用过）
+    const evs = run(d, 1, () => ({ torches: [facingAway()], visitors: [HALL], scaredOff: 5 }), t1 + OTHER_SHADOW.after);
+    expect(types(evs)).toEqual(['place']);
+    expect(d.spot?.id).toBe(WEST.id);
+  });
+
+  it('放宽（widenAt）也从新的一夜算起', () => {
+    const d = westOnly();
+    d.newNight(500, 0);
+    const near = { inView: () => false, nearView: () => true };
+    expect(run(d, 2, () => ({ torches: [facingAway()], visitors: [HALL], ...near }), 500 + OTHER_SHADOW.widenAt - 3)).toEqual([]);
+    expect(types(run(d, 2, () => ({ torches: [facingAway()], visitors: [HALL], ...near }), 500 + OTHER_SHADOW.widenAt))).toEqual(['place']);
+  });
+
+  it('画面那一份（createOtherShadow）：newNight() 把这一夜的次数清零、放着的撤掉（uShadow = 0）', () => {
+    const core = new THREE.Group();
+    const scene = new THREE.Scene();
+    scene.add(core);
+    const other = createOtherShadow({ scene, houseRoot: core, backend: 'WebGPU', quality: 'high' } as unknown as RenderCore);
+    const m = core.getObjectByName('other-shadow') as THREE.Mesh;
+    const saved = { ...torches[0] };
+    const npc = { id: 1, name: 'Ada', personality: 'average', pos: { ...HALL }, heading: 0, lookDir: 0, mode: 'wander', modeTime: 0, fear: 0, nervous: false, speed: 0, screaming: 0, path: [] } as NpcState;
+    let t = LATE;
+    const tick = (seconds: number, tt: TorchSample) => {
+      Object.assign(torches[0], tt);
+      for (let k = 0; k < Math.round(seconds / DT); k++) {
+        t += DT;
+        other.update!({ dt: DT, time: t, state: { time: t, npcs: [npc], objects: [], scaredOff: 0, hitStop: 0, manifest: idleManifest(), avoid: [] } as WorldState });
+      }
+    };
+    try {
+      tick(0.5, facingAway());
+      tick(OTHER_SHADOW.litFor * 0.5, facing());
+      expect(other.appeared).toBe(1);
+      expect((m.userData.uniforms as { shadow: { value: number } }).shadow.value).toBe(1);
+      other.newNight();
+      expect(other.appeared).toBe(0);
+      expect((m.userData.uniforms as { shadow: { value: number } }).shadow.value).toBe(0);
+      // 新的一夜从这一刻算：马上再推一会儿，不到 after 不放
+      tick(1, facingAway());
+      expect((m.userData.uniforms as { shadow: { value: number } }).shadow.value).toBe(0);
+    } finally {
+      Object.assign(torches[0], saved);
+    }
+  });
+});

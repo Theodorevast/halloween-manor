@@ -10,7 +10,7 @@ import { SCARES } from '../src/config/scares';
 import { STRINGS } from '../src/config/strings';
 import { angleOf } from '../src/lib/angle';
 import { createWorld } from '../src/sim/world';
-import { OUTCOME, WATCH_LINGER, createOutcomeWatch, createWatchLinger, pendingAct, tipState } from '../src/view/overlays';
+import { OUTCOME, WATCH_LINGER, createOutcomeWatch, createWatchLinger, holdOn, pendingAct, tipState } from '../src/view/overlays';
 import type { ManifestState, NpcMode, NpcState, ScareObjectState, ScareType, Vec2, World } from '../src/sim/types';
 
 // tsconfig 的 types 里只有 vite/client、没有 node 的类型，也不为一个测试把 node 类型加进整个工程：用变量当模块名取 node:fs。
@@ -397,5 +397,26 @@ describe('标签第二行的「X is watching」灭的时候留一会儿再换（
     const l2 = createWatchLinger();
     l2('music-box', { text: STRINGS.ready, tone: 'ready' }, 0);
     expect(l2('music-box', none, 0.1)).toEqual(none);
+  });
+});
+
+describe('名牌上的小眼睛灭的时候留一会儿（holdOn，整体审查 AF#6）', () => {
+  it(`亮起照旧（马上亮）；灭的时候先留 WATCH_LINGER 秒，留着的时候又该亮就不灭、从那一刻重新算`, () => {
+    const st = { at: -Infinity };
+    expect(holdOn(false, 0, st)).toBe(false);
+    expect(holdOn(true, 1, st)).toBe(true);
+    expect(holdOn(false, 1.1, st)).toBe(true);
+    expect(holdOn(false, 1 + WATCH_LINGER - 0.01, st)).toBe(true);
+    expect(holdOn(false, 1 + WATCH_LINGER + 0.01, st)).toBe(false);
+    // 留着的时候又亮：不灭，从那一刻重新算
+    expect(holdOn(true, 3, st)).toBe(true);
+    expect(holdOn(false, 3.3, st)).toBe(true);
+    expect(holdOn(true, 3.4, st)).toBe(true);
+    expect(holdOn(false, 3.4 + WATCH_LINGER - 0.01, st)).toBe(true);
+    expect(holdOn(false, 3.4 + WATCH_LINGER + 0.01, st)).toBe(false);
+  });
+
+  it('overlays.ts 的名牌用它：is-reach 按 holdOn 给，不直接按这一刻算出来的 reachIds', () => {
+    expect(overlays).toMatch(/holdOn\(reachIds\.has\(n\.id\)/);
   });
 });
