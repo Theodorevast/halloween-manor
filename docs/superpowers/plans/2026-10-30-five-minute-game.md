@@ -10,7 +10,7 @@
 - 手感设计的分析 `.superpowers/sdd/2026-10-30-five-minute-game/feel-and-feedback.md`（镜头、范围显示、反馈；第二部分的几路按它写）
 - 共用背景 `.superpowers/sdd/2026-10-30-five-minute-game/analysis-context.md`
 
-**Architecture：** 每路一个 worktree（`C:\Users\MSI\Desktop\万圣节-lanes\<路>`，分支 `feat/fmg-lane-<路>`），只改自己名下的文件，各自审查后合进 `feat/night-onboarding`。
+**Architecture：** 每路一个 worktree（`../万圣节-lanes\<路>`，分支 `feat/fmg-lane-<路>`），只改自己名下的文件，各自审查后合进 `feat/night-onboarding`。
 
 **Tech Stack：** Vite 8、TypeScript 7、three.js r186（`three/webgpu` + TSL，WebGL2 回退）、Web Audio（程序化）、vitest 5、playwright-core + 本机 Chrome
 

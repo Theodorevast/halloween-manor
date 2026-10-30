@@ -6,7 +6,7 @@
 
 **用户已定：** 屋里同时最多 4 人；JOJO 联名默认进轮换、公开构建也带（主会话已改，d419271）；恐怖图片用 GPT Image 2.5 sunburst 生成 9 张（主会话在生成，图到了交给 IMG 那一路）；其余照主会话的方案（下面各路）。
 
-**Architecture：** 每路一个 worktree（`C:\Users\MSI\Desktop\万圣节-lanes\<路>`，分支 `feat/pf-lane-<路>`），只改自己名下的文件，各自审查后合进 `feat/night-onboarding`。
+**Architecture：** 每路一个 worktree（`../万圣节-lanes\<路>`，分支 `feat/pf-lane-<路>`），只改自己名下的文件，各自审查后合进 `feat/night-onboarding`。
 
 ## Global Constraints
 
