@@ -1,7 +1,8 @@
 // 鬼魂挡住访客时自己淡下去（第二波 FEEL-5，view/ghost.ts 的 GHOST.occlude 和那几个纯函数）。
 // 朝人飘过去时他天然在鬼魂身后（鬼魂离镜头近、他远，过肩只偏 0.32 米，2 米外的人落在鬼魂身宽的投影里）；贴近发毛、现身落下被吓的人、
 // 吓跑的那个人，都被鬼魂自己挡住。做法：每帧把鬼魂和每个比它离镜头更远的访客投到屏幕上，算访客的矩形被鬼魂的矩形盖住多少，
-// 盖得多就把鬼魂的 u.fade 乘一个小于 1 的数（平时 0.35、现身的实体 0.5、正被手电照出来时 0.6），再平滑（变淡快、回来慢）。
+// 盖得多就把鬼魂的 u.fade 乘一个小于 1 的数（平时 0.6、现身的实体 0.7、正被手电照出来时 0.75；2026-10-30 路 GH 从 0.35 / 0.5 / 0.6 上调），
+// 再平滑（变淡快、回来慢）。
 // 这里只测不依赖渲染的部分：投影矩形、重叠比例、平滑、挑哪些访客；着色器里只是多乘一个 uniform 的值
 import { describe, expect, it } from 'vitest';
 import { CHARACTER } from '../src/config/character';
@@ -64,12 +65,12 @@ describe('rectOverlap：重叠面积 ÷ 访客矩形的面积（访客被盖住�
 });
 
 describe('coverOf：重叠比例 → 挡住的程度（smoothstep(from, to)）', () => {
-  it('参数照 FEEL-5：from 0.15、to 0.5；k 平时 0.35、现身的实体 0.5、被照出来 0.6；变淡 0.12 秒、回来 0.35 秒', () => {
+  it('参数照 FEEL-5：from 0.15、to 0.5；k 平时 0.6、现身的实体 0.7、被照出来 0.75（路 GH 从 0.35 / 0.5 / 0.6 上调）；变淡 0.12 秒、回来 0.35 秒', () => {
     expect(O.from).toBe(0.15);
     expect(O.to).toBe(0.5);
-    expect(O.alpha).toBe(0.35);
-    expect(O.solid).toBe(0.5);
-    expect(O.revealed).toBe(0.6);
+    expect(O.alpha).toBe(0.6);
+    expect(O.solid).toBe(0.7);
+    expect(O.revealed).toBe(0.75);
     expect(O.in).toBe(0.12);
     expect(O.out).toBe(0.35);
   });
@@ -153,11 +154,18 @@ describe('approachCover：指数逼近（变淡快、回来慢）', () => {
 });
 
 describe('occludeK：挡住时鬼魂留下多少', () => {
-  it('平时 0.35；现身的实体 0.5（吓人的那一下，留一半）；正被手电照着 0.6（照出来的显形要看得见）；又是实体又被照着取大的', () => {
-    expect(occludeK(false, false)).toBe(0.35);
-    expect(occludeK(true, false)).toBe(0.5);
-    expect(occludeK(false, true)).toBe(0.6);
-    expect(occludeK(true, true)).toBe(0.6);
+  // 2026-10-30 用户试玩（路 GH）：「太透明」，平时 0.35 → 0.6；实体、被照着照比例上调：淡掉的那一截（1 − k）都乘 0.4 / 0.65，
+  // 实体 0.5 → 0.7、被照着 0.6 → 0.75（还是平时 < 实体 < 被照着）
+  it('平时 0.6；现身的实体 0.7；正被手电照着 0.75（照出来的显形要看得见）；又是实体又被照着取大的', () => {
+    expect(occludeK(false, false)).toBe(0.6);
+    expect(occludeK(true, false)).toBe(0.7);
+    expect(occludeK(false, true)).toBe(0.75);
+    expect(occludeK(true, true)).toBe(0.75);
+  });
+  it('照比例：实体、被照着淡掉的那一截和平时淡掉的那一截同一个比例缩（原来 0.35 / 0.5 / 0.6）', () => {
+    const k = (1 - O.alpha) / (1 - 0.35);
+    expect(1 - O.solid).toBeCloseTo((1 - 0.5) * k, 1);
+    expect(1 - O.revealed).toBeCloseTo((1 - 0.6) * k, 1);
   });
 });
 

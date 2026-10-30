@@ -6,11 +6,23 @@ export const STRINGS = {
   start: {
     headphones: 'Put on headphones.',
     begin: 'Click to begin the haunting.',
-    /** 渲染器和模型还在加载时，开场按钮上的文案 */
+    /** 渲染器和模型还在加载、着色器还在编时，开场按钮上的文案（下面跟一条慢慢变满的细线） */
     loading: 'Lighting the candles…',
-    hint: 'Possess objects to scare the visitors out the front door.',
-    /** 第三人称（能操控鬼魂）时接在 hint 后面 */
-    ghostHint: 'They only see what their flashlight shows.',
+    /** 这一局的目标：三步说明上面那一行 */
+    goal: 'Scare the visitors out the front door.',
+    /**
+     * 三步说明（2026-10-30 用户试玩：「F 没有任何提示，要有游戏说明」）。hud.ts 的 titleSteps 按设备挑：
+     * 触屏第二步用 Tap 的说法；没有现身的（触屏、娃娃屋）第三步换成 again。appear 里单独的 F 排成键帽
+     */
+    steps: {
+      find: 'Find someone with a flashlight.',
+      look: 'Possess what they are looking at — an eye appears above it. Make a sound first if no one is looking.',
+      tapLook: 'Tap what they are looking at — an eye appears above it. Make a sound first if no one is looking.',
+      appear: 'Step into their light and press F to appear.',
+      again: 'Scare them again before they calm down, and they will run.',
+    },
+    /** 三步说明下面一行：一夜多长、天亮时怎样 */
+    night: 'A night lasts about five minutes. At dawn the house empties.',
   },
   counter: (n: number) => `Scared off tonight: ${n}`,
   buttons: {
@@ -76,7 +88,7 @@ export const STRINGS = {
    * 文案克制：一句话、没有感叹号、没有数字，和播报一个口气
    */
   onboarding: {
-    /** 点了开始、遮罩还挂着的时候按钮上的字（原来回到 Lighting the candles…，看着像退回去了） */
+    /** 还在点蜡烛时就点了开始（记下了，编好就自动开场，2026-10-30 newbie G5）：按钮上的字，细线照常往前走 */
     almostLit: 'The candles are almost lit…',
     /** 「点一下继续」下面挂的操作说明（Esc 就是暂停：随时能再看） */
     controlsOnPause: 'WASD drift · Mouse look · Click to possess · Hold to set a trap · Right-click or F to appear · Wheel zoom',
@@ -101,11 +113,25 @@ export const STRINGS = {
       trapsFull: 'Two traps are already set.',
       tooFar: 'Too far away.',
     },
-    /** 一次附身落空（惊吓类的生效窗口结束都没吓到人）：播报一行，只在头几次 */
+    /** 一次附身落空（惊吓类的生效窗口结束都没吓到人）：播报一行。第一次附身吓到人之前每次都说，之后只在头几次（hud.ts 的 missLineDue） */
     missed: (prop: string) => `No one saw the ${prop.toLowerCase()}.`,
+    /** 现身落下、谁也没吓到（2026-10-30 newbie S1：原来一个字都没有）。和 missed 同一个规矩 */
+    manifestMissed: 'No one saw you. Stand in their light.',
+    /**
+     * 常驻的按键说明（右下角，2026-10-30 HT-2）：每一行一个键、一个动作；F 那一行后面写状态（STRINGS.ready / STRINGS.cooldown）。
+     * 三样都用过一次以后只留 F 和状态
+     */
+    legend: {
+      click: 'Click',
+      possess: 'possess',
+      hold: 'Hold',
+      trap: 'set a trap',
+      appear: 'appear',
+    },
+    /** 现身的键（标题页第三步、右下角、准星旁的键帽都排成这一个字） */
+    fKey: 'F',
     /** 触屏 */
     tapToBegin: 'Tap to begin the haunting.',
-    tapHint: 'Tap a glowing object when someone is looking at it.',
     turnSideways: 'Turn your phone sideways for a better view.',
   },
   /**

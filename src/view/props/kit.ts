@@ -1,7 +1,7 @@
 // 物件共用的小工具：把基础几何体拼成「一个刚体部件 = 一个网格」、幽光外壳、拾取盒、缓动。
 // 每个会单独动的部件合并成一个带顶点色的几何体，整套物件只有三十来个 draw call（手电阴影每盏还要再画一遍）。
 import * as THREE from 'three/webgpu';
-import { abs, dot, float, mix, normalLocal, normalView, positionLocal, positionView, positionViewDirection, smoothstep, uniform } from 'three/tsl';
+import { abs, dot, mix, modelViewMatrix, normalLocal, normalView, positionLocal, positionView, positionViewDirection, smoothstep, uniform, vec4 } from 'three/tsl';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { Quality } from '../../engine/types';
 import type { ScareObjectState, SimEvent, WorldState } from '../../sim/types';
@@ -125,20 +125,27 @@ export function mesh(geo: THREE.BufferGeometry, mat: THREE.Material, name: strin
 // ── 幽光外壳 ──────────────────────────────────────────────────────────
 /** 第三人称、没对准时：离镜头这么近（米）的外壳淡掉（从前一个数到后一个数由无到有），见 createGlow 的 focus */
 export const GLOW_NEAR: [number, number] = [0.9, 1.8];
+/** 第三人称、对准（悬停、附身那一下）时也一样淡掉，只是近得多：镜头擦着物件时，贴着镜头那一截不画成一大块（2026-10-30 eye S-5） */
+export const GLOW_NEAR_FOCUS: [number, number] = [0.25, 0.6];
 
 /**
- * 每个物件一份外壳材质：背面、加法混合、沿法线鼓出 thickness 米。
- * 外壳只在物体轮廓外一圈露出来（物体本身挡住了中间），朝向镜头越正的地方越亮、轮廓外缘渐隐，像一圈软光。
+ * 每个物件一份外壳材质：背面、加法混合、沿法线鼓出一点。外壳只在物体轮廓外一圈露出来（物体本身挡住了中间）。
+ * 鼓出多少：thickness 米 + px × pxM × 这个顶点离镜头多远（米）。pxM 是离镜头 1 米处一个 CSS 像素多少米（第三人称按 ghostCamera.pxPerM 设，
+ * 娃娃屋给 0）：第三人称的外壳按屏幕像素算粗细，远近一样细（2026-10-30 eye S-5：原来 1.2–2 厘米，镜头擦着厨房门时门框边上一条二十几像素宽的
+ * 薄荷绿，细的台灯杆被描得和杆一样粗，看着像整块平涂）。
  * 朝向按每个片元自己的视线算（2026-10-30 美术分析 ART-5）：原来按正交相机算（|观察空间法线的 z|），第三人称的透视镜头下
  * 不对，画面偏边上的物件轮廓上会留一圈亮边。正交相机下 positionViewDirection 就是 (0, 0, 1)，和原来一模一样。
- * tint：外壳的颜色；soft：0 = 原来的曲线（朝向 × 0.75 + 0.25，轮廓最外那一圈还留 25%），1 = smoothstep(0.15, 0.6, 朝向)，
- * 轮廓最外那一圈淡到 0。第三人称用 1 和降饱和的颜色，娃娃屋保持原样（props.ts 按镜头设）。
+ * tint：外壳的颜色；soft：0 = 娃娃屋原来的软光（朝向 × 0.75 + 0.25，轮廓最外那一圈还留 25%），
+ * 1 = 第三人称的细线：只有一两个像素宽，不再按朝向分浓淡（细到这样，按朝向淡出只会把大物件扁平的边淡没），整条一样亮。
  * focus（只在 soft 时起作用）：0 = 平时，离镜头 GLOW_NEAR 米以内的那一截不画——镜头擦着一个物件时（走廊里镜头贴着厨房门），
- * 外壳在画面边上是一条几个像素宽、贯穿画面的亮带（美术分析的 d50 机位）；1 = 悬停、附身那一下，照原样
+ * 外壳在画面边上是一条贯穿画面的亮带（美术分析的 d50 机位）；1 = 悬停、附身那一下，只有 GLOW_NEAR_FOCUS 米以内的不画。
+ * 镜头整个钻进物件里时（从里面看，外壳背面铺满一片，就是那块平涂）由 props.ts 直接不画外壳
  */
 export function createGlow() {
   const amount = uniform(0);
   const thickness = uniform(0.022);
+  const px = uniform(0);
+  const pxM = uniform(0);
   const tint = uniform(new THREE.Color(PALETTE.possess));
   const soft = uniform(0);
   const focus = uniform(0);
@@ -149,13 +156,15 @@ export function createGlow() {
     blending: THREE.AdditiveBlending,
     fog: false,
   });
-  material.positionNode = positionLocal.add(normalLocal.mul(thickness));
-  // |n·v| 越大越靠近物体轮廓内侧 → 越亮；外缘 → 0
+  // 这个顶点离镜头多远（观察空间的深度，米）：鼓出的米数按它换算成屏幕上的像素
+  const depth = modelViewMatrix.mul(vec4(positionLocal, 1)).z.negate().max(0);
+  material.positionNode = positionLocal.add(normalLocal.mul(thickness.add(px.mul(pxM).mul(depth))));
+  // |n·v| 越大越靠近物体轮廓内侧 → 越亮；外缘 → 0（娃娃屋的软光）
   const facing = abs(dot(normalView, positionViewDirection));
-  const near = smoothstep(GLOW_NEAR[0], GLOW_NEAR[1], positionView.length());
-  const rim = smoothstep(0.15, 0.6, facing).mul(mix(near, float(1), focus));
-  material.colorNode = tint.mul(amount).mul(mix(facing.mul(0.75).add(0.25), rim, soft));
-  return { material, amount, thickness, tint, soft, focus };
+  const dist = positionView.length();
+  const near = mix(smoothstep(GLOW_NEAR[0], GLOW_NEAR[1], dist), smoothstep(GLOW_NEAR_FOCUS[0], GLOW_NEAR_FOCUS[1], dist), focus);
+  material.colorNode = tint.mul(amount).mul(mix(facing.mul(0.75).add(0.25), near, soft));
+  return { material, amount, thickness, px, pxM, tint, soft, focus };
 }
 
 export type Glow = ReturnType<typeof createGlow>;

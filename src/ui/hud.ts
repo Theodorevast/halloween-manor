@@ -3,12 +3,19 @@
 // 丢了指针锁定时的「Click to resume」；旋转按钮藏起来。这些状态从 watchGhostUi 来，不用 main.ts 接线。
 // 视觉方向写在 styles.css 开头。文案全部从 STRINGS 取；动态文字一律用 textContent，不拼 HTML。
 // 上手（2026-10-30 试玩报告 P1-1 b、P1-2 b、P1-3、P1-6）：
-// - 点了开始、遮罩还挂着时按钮写 The candles are almost lit…（不退回 Lighting the candles…，看着像卡住了）
-// - 开场的操作说明推迟到第一个访客走过以后（KEYS.delay 秒），停 KEYS.hold 秒；垫一层很淡的黑底，只在「·」处折行；
+// - 开场的操作说明推迟到第一个访客走过以后（KEYS.delay 秒）；垫一层很淡的黑底，只在「·」处折行；
 //   和情境提示（ui/hints.ts）排在同一个位置，同一时刻只放一句（bottomLine）
-// - 「Click to resume」那张标签下面挂一行操作说明（Esc 就是暂停，随时能再看）
-// - 附身落空（惊吓类到生效窗口结束都没吓到人）：播报补一行安静的 No one saw the lamp.，只在头 MISSED_LINES 次
-// - 触屏：按钮写 Tap to begin、标题页提示多半句怎么点；竖屏时标题页和开场各说一句「把手机横过来」
+// - 「Click to resume」那张标签下面挂一行操作说明（Esc 就是暂停，随时能再看），暂停时画面整体压暗（eye S-4）
+// - 触屏：按钮写 Tap to begin；竖屏时标题页和开场各说一句「把手机横过来」
+// 说明和开局（2026-10-30 用户试玩「F 没有任何提示，要有游戏说明」，严格玩家 newbie F1、S1、G1、G5）：
+// - 标题页：目标一行、三步说明（titleSteps：触屏用 Tap，没有现身的换掉第三步，第三步里的 F 排成键帽）、一夜多长；
+//   开场按钮在准备好之前写 Lighting the candles…、下面一条慢慢变满的细线（setProgress，transform 的过渡在合成线程上走），
+//   准备好才亮（加上标本签的框、呼吸）。整页都能点；还在点蜡烛时就点了的记下来（按钮改写 almostLit），main.ts 准备好了自动开场
+// - 常驻的按键说明（右下角）：Click possess · Hold set a trap · F appear，F 后面写 Ready / 冷却秒数（fStatus）；
+//   三样都用过以后只留 F 和状态（createUseWatch）；暂停时让给「Click to resume」下面那一行完整的
+// - 开场的操作说明留到第一次成功附身为止（createOpeningLine），中间情境提示要用那一行时让出来、提示说完再回来
+// - 失败要说话：附身落空（No one saw the lamp.）、现身落空（No one saw you. Stand in their light.）在各自第一次成功之前每次都说，
+//   之后只在一共说过的不到 MISSED_LINES 次时说（hints.ts 的 missLineDue）
 // 天亮自己走的人（exit 带 calm，2026-10-30「一夜」）：播报写 walked out into the morning（安静的灰字），不跳计数；
 // 收夜时最后再来的那一位（spawn 带 last）不播进门那一行（收夜的控制器播 lastArrival）
 // 瞄准和反馈（2026-10-30 手感分析）：
@@ -23,8 +30,8 @@ import { STRINGS } from '../config/strings';
 import { watchGhostUi } from '../engine/ghostRig';
 import type { FrameCtx, Module, Quality } from '../engine/types';
 import type { NightPhase } from '../night';
-import type { SimEvent, WorldState } from '../sim/types';
-import { bottomLine, createMissWatch, markLineEnds, setSegments } from './hints';
+import type { ManifestState, SimEvent, WorldState } from '../sim/types';
+import { bottomLine, createMissWatch, createSuccessWatch, createUseWatch, markLineEnds, missLineDue, setSegments } from './hints';
 
 export interface HudHandlers {
   /** 返回 false：先别收起开场遮罩（还在准备），准备好了 main.ts 自己调 hideStart() */
@@ -36,13 +43,20 @@ export interface HudHandlers {
   onToggleQuality(): Quality;
 }
 
+/** 建 HUD 时就要知道的（标题页的三步说明按它挑）：ghost = 第三人称（有鼠标和键盘，main.ts 的 ghostMode） */
+export interface HudOptions {
+  ghost?: boolean;
+}
+
 export interface Hud extends Module {
   showStart(): void;
   hideStart(): void;
   showError(msg: string): void;
   setQuality(q: Quality): void;
-  /** 渲染器和模型还没就绪时为 false：开场按钮显示加载文案、点了不开始。默认 true */
+  /** 还没准备好时为 false：开场按钮写 Lighting the candles…、下面一条细线显示进度；点了记下来（main.ts 准备好了自动开场）。默认 true */
   setReady(ready: boolean): void;
+  /** 准备到哪儿了（0..1，main.ts 按 src/warmup.ts 的 bootProgress 给）：开场按钮下面那条细线 */
+  setProgress(fraction: number): void;
   /** 播报一行（不是模拟事件带出来的那种，比如收夜的 "No one else is coming tonight."）。quiet = 次要的灰字 */
   say(text: string, tone?: 'quiet' | 'scare'): void;
   /** 一夜此刻在哪一段（main.ts 每帧给，只在变化时动 DOM）：收夜以后出门那一行不再问 Who's next?；光收回、登记簿时准星和冷却环淡掉 */
@@ -62,15 +76,16 @@ export const TICKER = { max: 4, life: 6, fade: 1.2, merge: 1.2, night: 10 };
 /** 开场遮罩淡出（秒），和 styles.css 里 .hud-start 的 transition 一致 */
 const START_FADE = 0.8;
 /**
- * 第三人称开场的操作说明（秒）：开场后多久开始淡入、停多久、淡出多久（淡出和 styles.css 里 .hud-keys 的 transition 一致，
- * 淡完才把那一行还给情境提示）。原来 1.2 秒就出来、停 6 秒，正好撞上第一个访客推门、从身边走过（开场后约 2–4 秒），
- * 没人看（2026-10-30 试玩报告 P1-3 c）
+ * 第三人称开场的操作说明（秒）：开场后多久淡入（delay）；第一次至少停多久（hold）——之后要等第一次成功附身才走
+ * （2026-10-30 newbie G1：原来停 10 秒就走，那 10 秒新手正忙着看访客进门）；情境提示要用那一行时让出来，提示说完再回来，
+ * 再回来的那几次至少停 again 秒才让；淡出多久（fade，和 styles.css 里 .hud-keys 的 transition 一致，淡完才把那一行还回去）。
+ * delay 原来 1.2 秒，正好撞上第一个访客推门、从身边走过（开场后约 2–4 秒），没人看（2026-10-30 试玩报告 P1-3 c）
  */
-export const KEYS = { delay: 4.5, hold: 10, fade: 1.2 };
+export const KEYS = { delay: 4.5, hold: 10, again: 3, fade: 1.2 };
 /** 触屏竖屏：开场后多久说一句「把手机横过来」、停多久（秒）；横过来了就收。等娃娃屋的开场镜头（约 2.5 秒）落定再说 */
 const TURN = { delay: 3, hold: 7 };
-/** 附身落空的那一行播报只在头几次（之后玩家已经懂了，不刷屏） */
-const MISSED_LINES = 3;
+/** 开场按钮下面那条细线：比真进度往前多走一点（JS 卡着的时候它照样往前挪，见 setProgress），最多多走这么多；两次改写至少隔多久（毫秒） */
+const WICK = { lead: 0.04, minGap: 120 };
 
 // 图标：细线 + 实心箭头，像旧版画里的刻线。currentColor 跟着按钮颜色走
 const SVG = (body: string) => `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${body}</svg>`;
@@ -100,7 +115,12 @@ const TEMPLATE = `
     ${RULE}
     <p class="hud-headphones"></p>
     <p class="hud-hint"><span class="hud-hint-text"></span><span class="hud-turn"></span></p>
-    <button type="button" class="hud-begin"></button>
+    <ol class="hud-steps"><li></li><li></li><li></li></ol>
+    <p class="hud-night"></p>
+    <div class="hud-begin-wrap">
+      <button type="button" class="hud-begin"><span class="hud-begin-text"></span></button>
+      <span class="hud-wick" aria-hidden="true"><span class="hud-wick-fill"></span></span>
+    </div>
     <p class="hud-error" role="alert" hidden></p>
   </div>
   <div class="hud-start-light" aria-hidden="true"></div>
@@ -111,6 +131,11 @@ const TEMPLATE = `
   <div class="hud-aim" aria-hidden="true"></div>
   <div class="hud-cool" aria-hidden="true"></div>
   <p class="hud-note hud-keys"></p>
+  <div class="hud-legend" aria-hidden="true">
+    <p class="hud-legend-row hud-legend-more" data-row="possess"><span class="hud-legend-key"></span> <span class="hud-legend-act"></span></p>
+    <p class="hud-legend-row hud-legend-more" data-row="trap"><span class="hud-legend-key"></span> <span class="hud-legend-act"></span></p>
+    <p class="hud-legend-row" data-row="appear"><kbd class="hud-key"></kbd><span class="hud-legend-act hud-legend-more"></span><span class="hud-legend-state"></span></p>
+  </div>
   <div class="hud-resume" role="status"><p class="hud-resume-card"></p><p class="hud-note hud-resume-keys"></p></div>
   <div class="hud-controls">
     <button type="button" class="hud-btn" data-act="left">${ICON_LEFT}</button>
@@ -194,13 +219,15 @@ function tickerLine(e: SimEvent, s: WorldState, closed: boolean): TickerLine | n
 }
 
 /**
- * 一个模拟事件在 HUD 上的结果：播报几行、计数跳到多少（null = 不动）。纯函数（tests/hints.test.ts 测）。
- * 现身落下：被吓到的每人一行（同一步的 startle 是 object = 'ghost'，tickerLine 不播）；
+ * 一个模拟事件在 HUD 上的结果：播报几行、计数跳到多少（null = 不动）。纯函数（tests/hints.test.ts、tests/opening.test.ts 测）。
+ * 现身落下：被吓到的每人一行（同一步的 startle 是 object = 'ghost'，tickerLine 不播）；谁也没吓到、而且这一次该说（opts.manifestMiss，
+ * hud.ts 按 missLineDue 给）：一行安静的 No one saw you. Stand in their light.（2026-10-30 newbie S1：原来一个字都没有）；
  * 出门：被吓跑的计数跳到 total、数字压印一下；天亮自己走的（calm）不算吓跑，计数不动
  */
-export function hudLines(e: SimEvent, s: WorldState, opts: { closed?: boolean } = {}): { lines: TickerLine[]; count: number | null } {
+export function hudLines(e: SimEvent, s: WorldState, opts: { closed?: boolean; manifestMiss?: boolean } = {}): { lines: TickerLine[]; count: number | null } {
   if (e.type === 'manifest') {
     if (e.phase !== 'drop') return { lines: [], count: null };
+    if (e.scared.length === 0) return { lines: opts.manifestMiss ? [{ text: STRINGS.onboarding.manifestMissed, tone: 'quiet' }] : [], count: null };
     const lines: TickerLine[] = [];
     for (const id of e.scared) {
       const n = s.npcs.find((x) => x.id === id)?.name;
@@ -268,9 +295,8 @@ export function pushLine(rows: TickerRow[], line: TickerLine, now: number): { me
 }
 
 /**
- * 开场按钮上的字：能点之前 Lighting the candles…；能点了 Click（触屏 Tap）to begin the haunting.；
- * 点过开始、遮罩还挂着（还在编管线、等造型）The candles are almost lit…——原来退回 Lighting the candles…，
- * 光标又刚被锁走，看着像卡死了（试玩报告 P1-1 b）
+ * 开场按钮上的字：准备好之前 Lighting the candles…；准备好了 Click（触屏 Tap）to begin the haunting.；
+ * 还没准备好就点了开始（记下来了，准备好自动开场）：The candles are almost lit…，一直写到淡出（不跳回 Click to begin）
  */
 export function beginLabel(o: { ready: boolean; begun: boolean; touch: boolean }): string {
   if (o.begun) return STRINGS.onboarding.almostLit;
@@ -278,13 +304,106 @@ export function beginLabel(o: { ready: boolean; begun: boolean; touch: boolean }
   return o.touch ? STRINGS.onboarding.tapToBegin : STRINGS.start.begin;
 }
 
-export function createHud(root: HTMLElement, h: HudHandlers): Hud {
+/**
+ * 标题页的三步说明（2026-10-30 用户：「要有游戏说明」）：找拿手电的人；附身他正看着的东西（触屏说 Tap）；
+ * 第三人称：走进他的光里按 F 现身。没有现身的（触屏、有鼠标的娃娃屋）第三步换成「趁他没缓过来再吓」
+ */
+export function titleSteps(o: { touch: boolean; ghost: boolean }): string[] {
+  const st = STRINGS.start.steps;
+  return [st.find, o.touch ? st.tapLook : st.look, o.ghost ? st.appear : st.again];
+}
+
+/** 常驻的按键说明里 F 后面的状态：就绪写 Ready；冷却中写剩几秒（同悬停标签，向上取整）；正在现身（蓄力、停留）不写 */
+export function fStatus(m: ManifestState): string {
+  if (m.phase === 'idle') return m.cooldown > 0 ? STRINGS.cooldown(m.cooldown) : STRINGS.ready;
+  if (m.phase === 'cooldown') return STRINGS.cooldown(m.cooldown);
+  return '';
+}
+
+/**
+ * 第三人称开场的操作说明（WASD drift · Mouse look · …）什么时候挂着（2026-10-30 newbie G1）。纯逻辑（tests/opening.test.ts 测），
+ * 用画面下方正中那一行（hints.ts 的 bottomLine）：
+ * - start：开场就先占着那一行（第一个访客推门的那几秒不出任何字），KEYS.delay 秒后显示
+ * - 第一次至少挂 KEYS.hold 秒；之后要等第一次成功附身（succeeded）才淡出、把那一行还回去，不再回来
+ * - 情境提示在等那一行（wanted，bottomLine.takeRequest）：挂够了（第一次 KEYS.hold，再回来的 KEYS.again）就淡出让给它；
+ *   它说完把那一行还回来，还没成功附身就再挂上
+ * tick 每帧调，返回此刻显示不显示（淡出的时候已经是 false：CSS 慢慢淡）
+ */
+export function createOpeningLine(k = KEYS) {
+  let phase: 'idle' | 'queued' | 'on' | 'fading' | 'away' | 'done' = 'idle';
+  /** queued：什么时候显示；on：从什么时候显示的；fading：什么时候淡完 */
+  let at = 0;
+  let shows = 0;
+  return {
+    get done(): boolean {
+      return phase === 'done';
+    },
+    start(now: number): void {
+      if (phase !== 'idle') return;
+      phase = 'queued';
+      at = now + k.delay;
+      bottomLine.claim('keys');
+    },
+    tick(now: number, succeeded: boolean, wanted: boolean): boolean {
+      switch (phase) {
+        case 'queued':
+          if (now >= at && bottomLine.claim('keys')) {
+            phase = 'on';
+            at = now;
+            shows++;
+          }
+          break;
+        case 'on':
+          if (now - at >= (shows === 1 ? k.hold : k.again) && (succeeded || wanted)) {
+            phase = 'fading';
+            at = now + k.fade;
+          }
+          break;
+        case 'fading':
+          if (now >= at) {
+            bottomLine.release('keys');
+            // 让给提示的、还没成功附身的：回来；成功附身了的：不回来
+            phase = succeeded ? 'done' : 'away';
+          }
+          break;
+        case 'away':
+          if (succeeded) phase = 'done';
+          else if (!wanted && bottomLine.claim('keys')) {
+            phase = 'on';
+            at = now;
+            shows++;
+          }
+          break;
+      }
+      return phase === 'on';
+    },
+  };
+}
+
+/** 一句话里单独的那个键（F）排成键帽（标题页第三步）；没有就照常写字 */
+function setWithKey(el: HTMLElement, text: string, key: string): void {
+  const i = text.indexOf(` ${key} `);
+  if (i < 0) {
+    el.textContent = text;
+    return;
+  }
+  const kbd = document.createElement('kbd');
+  kbd.className = 'hud-key';
+  kbd.textContent = key;
+  el.replaceChildren(text.slice(0, i + 1), kbd, text.slice(i + 1 + key.length));
+}
+
+export function createHud(root: HTMLElement, h: HudHandlers, opts: HudOptions = {}): Hud {
   root.innerHTML = TEMPLATE;
   const $ = <T extends Element = HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
   const start = $('.hud-start');
   const beginBtn = $<HTMLButtonElement>('.hud-begin');
+  const beginTextEl = $('.hud-begin-text');
+  const wickFill = $('.hud-wick-fill');
   const headphones = $('.hud-headphones');
   const hint = $('.hud-hint');
+  const steps = $('.hud-steps');
+  const nightLine = $('.hud-night');
   const error = $('.hud-error');
   const play = $('.hud-play');
   const counterLabel = $('.hud-counter-label');
@@ -299,6 +418,8 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   const resume = $('.hud-resume');
   const resumeKeys = $('.hud-resume-keys');
   const hintText = $('.hud-hint-text');
+  const legend = $('.hud-legend');
+  const legendState = $('.hud-legend-state');
   setSegments(keysHint, STRINGS.ghost.controls);
   $('.hud-resume-card').textContent = STRINGS.ghost.resume;
   setSegments(resumeKeys, STRINGS.onboarding.controlsOnPause);
@@ -307,16 +428,22 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   const touch = !matchMedia('(pointer: fine)').matches;
   const portraitMq = matchMedia('(orientation: portrait)');
   root.classList.toggle('is-touch', touch);
-  /** 标题页底部的玩法说明：触屏多半句怎么点 */
-  const hintBase = touch ? `${STRINGS.start.hint} ${STRINGS.onboarding.tapHint}` : STRINGS.start.hint;
 
   $('.hud-title').textContent = STRINGS.title;
   headphones.textContent = STRINGS.start.headphones;
-  const beginText = beginLabel({ ready: true, begun: false, touch });
-  beginBtn.textContent = beginText;
-  beginBtn.setAttribute('aria-label', beginText);
-  hintText.textContent = hintBase;
+  hintText.textContent = STRINGS.start.goal;
+  // 三步说明（titleSteps 按设备挑），第三步里单独的 F 排成键帽；下面一行一夜多长
+  titleSteps({ touch, ghost: opts.ghost ?? false }).forEach((text, i) => setWithKey(steps.children[i] as HTMLElement, text, STRINGS.onboarding.fKey));
+  nightLine.textContent = STRINGS.start.night;
   $('.hud-turn').textContent = STRINGS.onboarding.turnSideways;
+  // 常驻的按键说明：每一行一个键、一个动作；F 那一行后面的状态每帧按模拟写（只在变化时）
+  const lg = STRINGS.onboarding.legend;
+  for (const [row, key, act] of [['possess', lg.click, lg.possess], ['trap', lg.hold, lg.trap]] as const) {
+    $(`[data-row="${row}"] .hud-legend-key`).textContent = key;
+    $(`[data-row="${row}"] .hud-legend-act`).textContent = act;
+  }
+  $('[data-row="appear"] .hud-key').textContent = STRINGS.onboarding.fKey;
+  $('[data-row="appear"] .hud-legend-act').textContent = lg.appear;
   for (const [b, label] of [[left, STRINGS.buttons.rotateLeft], [right, STRINGS.buttons.rotateRight]] as const) {
     b.setAttribute('aria-label', label);
     b.title = label;
@@ -326,6 +453,19 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   let startShown = false;
   let ready = true;
   let begun = false;
+  /** 开场按钮下面那条细线：写到哪儿了（scaleX，只增不减）、上一次改写的时刻（毫秒） */
+  let wickAt = 0;
+  let wickWritten = -Infinity;
+  /** 开场按钮上的字：按 ready、begun 写（只在变化时动 DOM） */
+  let beginText = '';
+  const refreshBegin = () => {
+    const label = beginLabel({ ready, begun, touch });
+    if (label === beginText) return;
+    beginText = label;
+    beginTextEl.textContent = label;
+    beginBtn.setAttribute('aria-label', label);
+  };
+  refreshBegin();
   let errored = false;
   let playing = false;
   let now = 0;
@@ -334,9 +474,16 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   /** 播报栏里的行（合并、挤出的判断在 pushLine）和它们的 <li> */
   const rows: TickerRow[] = [];
   const liOf = new Map<TickerRow, HTMLLIElement>();
-  /** 附身落空：判断见 hints.ts 的 createMissWatch；播报过几次 */
+  /** 附身落空：判断见 hints.ts 的 createMissWatch；附身落空、现身落空各播报过几次（第一次成功之前每次都说，见 missLineDue） */
   const misses = createMissWatch();
   let missedSaid = 0;
+  let manifestSaid = 0;
+  /** 成功过没有（附身吓到了人、现身吓到了人）：落空的播报、开场的操作说明看它 */
+  const success = createSuccessWatch();
+  /** 三样动作都用过没有：常驻的按键说明缩成只剩 F（is-compact） */
+  const used = createUseWatch();
+  let legendCompact = false;
+  let fText: string | null = null;
   /** 一夜在哪一段（setNightPhase）：收夜以后（不在 night）出门不问 Who's next?；closing = 光收回前门、登记簿翻开 */
   let nightClosed = false;
   let closing = false;
@@ -350,11 +497,14 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   };
   start.addEventListener('pointermove', onLight);
 
+  // 整页都能点（newbie G5：原来点标题大字也算，可是加载中点了被禁用的按钮，这一下就丢了）。
+  // 还没准备好：记下来（main.ts 的 begin 返回 false，准备好了自动开场），按钮改写 almostLit；按钮禁用时不吃点击（styles.css），点击落到整页上
   const begin = () => {
-    if (!startShown || !ready || begun || errored) return;
+    if (!startShown || begun || errored) return;
     begun = true;
-    // onBegin 必须在这次点击 / 按键的调用栈里同步执行：音频解锁要靠用户手势
+    // onBegin 必须在这次点击 / 按键的调用栈里同步执行：音频解锁、指针锁定要靠用户手势
     if (h.onBegin() !== false) hideStart();
+    else refreshBegin();
   };
   start.addEventListener('click', begin);
 
@@ -378,7 +528,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     refreshGhost();
   }
 
-  // ── 第三人称：准星、操作提示、「点一下继续」 ─────────────────────
+  // ── 第三人称：准星、操作提示、常驻的按键说明、「点一下继续」 ─────────────────────
   const ghost = { active: false, engaged: false, locked: false, pending: false, aiming: false, far: false, cool: 0 };
   let resumeOn = false;
   // toggle 带第二个参数时，类名没变就不写属性，状态变化时整体刷一遍即可
@@ -386,6 +536,8 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     const live = ghost.active && playing && !errored;
     left.hidden = right.hidden = ghost.active;
     aim.classList.toggle('is-on', live && ghost.locked);
+    // 常驻的按键说明（右下角）：和准星一起，指针锁着（在操控鬼魂）时才有；暂停时让给「Click to resume」下面那一行完整的
+    legend.classList.toggle('is-on', live && ghost.locked);
     aim.classList.toggle('is-aiming', live && ghost.locked && ghost.aiming);
     // 够不着（2026-10-30 手感分析 FEEL-7）：准星对着 4–10 米外看得见的物件，外圈浮出来但是虚线（styles.css 的 .hud-aim.is-far）
     aim.classList.toggle('is-far', live && ghost.locked && !ghost.aiming && ghost.far);
@@ -400,11 +552,14 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     if (r) markLineEnds(resumeKeys);
   }
 
-  // ── 开场的那一句（第三人称：操作说明；触屏竖屏：把手机横过来），一页只出现一次 ──────────
-  // 排在画面下方正中那一行，和情境提示轮流用（hints.ts 的 bottomLine）。开场一开始就先占着这一行，直到它说完、淡完：
-  // 第一个访客推门、从身边走过的那几秒（开场后约 2–4 秒）画面上不出任何字，情境提示（比如被他的手电照到）也等它说完再看还算不算数
+  // ── 开场的那一句（第三人称：操作说明；触屏竖屏：把手机横过来）──────────
+  // 排在画面下方正中那一行，和情境提示轮流用（hints.ts 的 bottomLine）。开场一开始就先占着这一行：
+  // 第一个访客推门、从身边走过的那几秒（开场后约 2–4 秒）画面上不出任何字，情境提示（比如被他的手电照到）也等着。
+  // 第三人称的操作说明留到第一次成功附身为止，中间让给情境提示（createOpeningLine）；触屏竖屏那一句只说一次
   let openingQueued = false;
-  /** 等着上 / 正在显示的那一句；turn = 「把手机横过来」（横过来了就不说、说着的也收） */
+  /** 第三人称的操作说明 */
+  let keysLine: ReturnType<typeof createOpeningLine> | null = null;
+  /** 触屏竖屏那一句：等着上 / 正在显示；横过来了就不说、说着的也收 */
   let opening: { due: number; hold: number; turn: boolean } | null = null;
   let openingOn = false;
   let openingOff = 0;
@@ -414,21 +569,33 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     if (!playing || openingQueued || errored) return;
     if (ghost.active) {
       openingQueued = true;
-      opening = { due: now + KEYS.delay, hold: KEYS.hold, turn: false };
+      keysLine = createOpeningLine();
+      keysLine.start(now);
     } else if (touch) {
       openingQueued = true;
       if (portraitMq.matches) opening = { due: now + TURN.delay, hold: TURN.hold, turn: true };
+      if (opening) bottomLine.claim('keys');
     }
-    if (opening) bottomLine.claim('keys');
   }
   function updateOpening() {
+    if (keysLine) {
+      // 情境提示在等那一行：每帧读一次（读完就清，提示等着的每一帧都会再要）
+      const on = keysLine.tick(now, success.possession, bottomLine.takeRequest('keys'));
+      if (on !== openingOn) {
+        openingOn = on;
+        if (on) setSegments(keysHint, STRINGS.ghost.controls);
+        keysHint.classList.toggle('is-on', on);
+        if (on) markLineEnds(keysHint);
+      }
+      return;
+    }
     if (opening && !openingOn && now >= opening.due) {
       if (opening.turn && !portraitMq.matches) {
         // 已经横过来了：不用说了，这一行还回去
         opening = null;
         bottomLine.release('keys');
       } else if (bottomLine.claim('keys')) {
-        setSegments(keysHint, opening.turn ? STRINGS.onboarding.turnSideways : STRINGS.ghost.controls);
+        setSegments(keysHint, STRINGS.onboarding.turnSideways);
         keysHint.classList.add('is-on');
         markLineEnds(keysHint);
         openingOn = true;
@@ -453,8 +620,6 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   addEventListener('resize', onResize);
 
   const unwatchGhost = watchGhostUi((s) => {
-    // 能操控鬼魂（第三人称）时开场提示多一句：访客只看得见手电照着的东西
-    if (s.active !== ghost.active) hintText.textContent = s.active ? `${hintBase} ${STRINGS.start.ghostHint}` : hintBase;
     ghost.active = s.active;
     ghost.engaged = s.engaged;
     ghost.locked = s.locked;
@@ -611,6 +776,8 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     },
     setNightPhase(phase) {
       nightClosed = phase !== 'night';
+      // 收夜的静场（silence）：现身按了也不算（main.ts 的 hushed），右下角别再写 F Ready
+      play.classList.toggle('is-silent', phase === 'silence');
       const c = phase === 'retreat' || phase === 'register';
       if (c === closing) return;
       closing = c;
@@ -619,26 +786,61 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     },
     setReady(r) {
       ready = r;
-      // 已经点过开始（main.ts 的 begin 还要等后台预编译、等造型）：写 almostLit，不退回加载中
-      const label = beginLabel({ ready: r, begun, touch });
-      beginBtn.textContent = label;
-      beginBtn.setAttribute('aria-label', label);
+      refreshBegin();
+      // disabled：脚本（冒烟测试、perf、stall-outfits）靠它判断能不能开场；禁用时按钮不吃点击（styles.css），点击落到整页上照样记下来
       beginBtn.disabled = !r;
+      // 准备好了：细线走满、淡掉，按钮加上标本签的框、开始呼吸（styles.css 的 .hud-start.is-ready）
+      start.classList.toggle('is-ready', r);
+      if (r) {
+        wickAt = 1;
+        wickFill.style.transform = 'scaleX(1)';
+      }
+    },
+    setProgress(fraction) {
+      if (ready || errored) return;
+      // 比真进度多走一点（最多 WICK.lead，越到后面越少）：transform 的过渡在合成线程上走，主线程卡着（编管线的时候）细线也照样往前挪一截；
+      // 只增不减；两次改写至少隔 WICK.minGap 毫秒（进度一个物体报一次，太密）
+      const p = Math.max(0, Math.min(1, fraction));
+      const target = Math.min(0.995, Math.max(wickAt, p + Math.min(WICK.lead, (1 - p) * 0.3)));
+      const t = performance.now();
+      if (target - wickAt < 0.002 || (t - wickWritten < WICK.minGap && target - wickAt < 0.05)) return;
+      wickAt = target;
+      wickWritten = t;
+      wickFill.style.transform = `scaleX(${target.toFixed(3)})`;
     },
     onEvent(e, state) {
       misses.onEvent(e);
-      const { lines: out, count: n } = hudLines(e, state, { closed: nightClosed });
+      success.onEvent(e);
+      used.onEvent(e);
+      // 现身落空：这一次该不该说（第一次现身吓到人之前每次都说，见 missLineDue）
+      const manifestMiss = missLineDue(manifestSaid, success.manifest);
+      const { lines: out, count: n } = hudLines(e, state, { closed: nightClosed, manifestMiss });
+      if (manifestMiss && e.type === 'manifest' && e.phase === 'drop' && e.scared.length === 0) manifestSaid++;
       for (const l of out) push(l);
       if (n !== null) setCount(n, true);
+      // 三样都用过了：常驻的按键说明缩成只剩 F 和状态
+      if (used.all && !legendCompact) {
+        legendCompact = true;
+        legend.classList.add('is-compact');
+      }
     },
     update(ctx: FrameCtx) {
       now = ctx.time;
       updateOpening();
-      // 附身落空（这一帧的事件都分发完了）：头几次补一行安静的播报，之后不再说
+      // 附身落空（这一帧的事件都分发完了）：第一次附身吓到人之前每次补一行安静的播报，之后只在头几次（missLineDue）
       for (const m of misses.settle(ctx.state.objects)) {
-        if (missedSaid >= MISSED_LINES) break;
+        if (!missLineDue(missedSaid, success.possession)) continue;
         missedSaid++;
         push({ text: STRINGS.onboarding.missed(STRINGS.propName[m.type]), tone: 'quiet' });
+      }
+      // 常驻的按键说明里 F 后面的状态（只在变化时写；Ready 用幽绿，秒数用灰烬色）
+      if (ghost.active) {
+        const t = fStatus(ctx.state.manifest);
+        if (t !== fText) {
+          fText = t;
+          legendState.textContent = t;
+          legendState.classList.toggle('is-ready', t === STRINGS.ready);
+        }
       }
       // 计数以事件为准；万一漏了事件（调试快进等），从 state 补上，只增不减
       if (ctx.state.scaredOff > count) setCount(ctx.state.scaredOff, false);
