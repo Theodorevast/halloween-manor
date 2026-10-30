@@ -6,6 +6,8 @@
 // - compileWhole、compileInStreams：整栋房子（不剔除）编给场景 pass，分几路同时编。three r186 的 compileAsync 一个物体一个物体地排，
 //   每个都等 GPU 编完它的管线才排下一个；分几路，GPU 那边就能同时编几条（本机实测：整栋房子约 10 秒 → 约 5 秒）
 // - createSettleGate：GPU 把活干完以后，等帧间隔也稳下来才算准备好
+// - withDeadline、PREHEAT_LIMIT：预热的每一步有上限，一步挂住也不会让按钮永远不亮（整体审查 I-1）
+// - createLoopGuard：动画循环里抛错时怎么报（整体审查 I-2）
 // - bootProgress：开场按钮那条细线该到哪儿（各段按权重相加，只增不减）
 import type * as THREE from 'three/webgpu';
 
@@ -171,6 +173,57 @@ export function createSettleGate(o: { frames: number; slowMs: number; maxWait: n
       smooth = intervalMs <= o.slowMs ? smooth + 1 : 0;
       return smooth >= o.frames || now - t0 >= o.maxWait;
     },
+  };
+}
+
+/**
+ * 预热这两步的上限（毫秒，2026-10-30 整体审查 I-1）。这两步一挂住，按钮就永远不亮，也没有错误界面，而按钮挡的是所有玩家的入口。
+ * 本机正常时预编译约 5 秒、等 GPU 约 3.5 秒，所以这里放得很宽，只防挂死。到点不算失败，接着往下走，大不了点了开始以后卡一下：
+ * - gpuMs：等 GPU 把活干完（onSubmittedWorkDone）。到点就接着数平稳的帧
+ * - compileMs：整栋房子的预编译。到点走「边画边编」（开场遮罩挡着）；没编完的继续在后台编，这是安全的：改之前的流程就是边循环边编
+ */
+export const PREHEAT_LIMIT = { gpuMs: 10_000, compileMs: 90_000 };
+
+/**
+ * p 和一个表赛跑：ms 毫秒内有结果就照原样给（成了给值，失败给原来的错），表收掉；到点还没结果就失败，错误里写着等的是什么（what）、等了多久。
+ * 只是不再等了，p 本身不会被停掉，它之后怎样都不再影响这里（晚到的失败也不算未处理的拒绝）
+ */
+export function withDeadline<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what}：等了 ${ms / 1000} 秒还没好`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/**
+ * 动画循环里抛错怎么报（2026-10-30 整体审查 I-2）。three 的 Animation 先排下一帧再调回调，所以同一个错会每帧抛一次；
+ * 而就绪判断排在真画后面，抛错就永远走不到，按钮不亮，boot().catch 也接不到 rAF 回调里的异常。返回 (err, opening) => void，每次抛错调一次：
+ * - opening（还没开局）：第一次走 fatal（main.ts：挂错误界面），只走一次
+ * - 开局以后：只记日志，画面不打扰
+ * - 日志（两种都记）：同样的错只记一次（按文字认，每帧新建的 Error 也算同一个），最多记 maxLogs 种（文字里带变化的编号时不刷屏）
+ */
+export function createLoopGuard(o: { fatal(): void; log(err: unknown): void }, maxLogs = 5): (err: unknown, opening: boolean) => void {
+  const seen = new Set<string>();
+  let fatalDone = false;
+  return (err, opening) => {
+    const key = err instanceof Error ? err.message : String(err);
+    if (!seen.has(key) && seen.size < maxLogs) {
+      seen.add(key);
+      o.log(err);
+    }
+    if (opening && !fatalDone) {
+      fatalDone = true;
+      o.fatal();
+    }
   };
 }
 

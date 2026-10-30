@@ -33,7 +33,7 @@ import { PROP_TEXTURES, createPaintings, loadPaintings } from './view/paintings'
 import { createParticlesView } from './view/particles';
 import { createPropsView } from './view/props';
 import { createRangeFrost } from './view/rangeFrost';
-import { COMPILE_STREAMS, bootProgress, compileInStreams, compileWhole, createSettleGate, drawNothing, type BootStage } from './warmup';
+import { COMPILE_STREAMS, PREHEAT_LIMIT, bootProgress, compileInStreams, compileWhole, createLoopGuard, createSettleGate, drawNothing, withDeadline, type BootStage } from './warmup';
 
 const stage = document.getElementById('stage')!;
 const canvas = document.createElement('canvas');
@@ -370,21 +370,32 @@ async function boot() {
   /**
    * 整栋真画过以后，GPU 把交上去的活都干完了没有（WebGPU：queue.onSubmittedWorkDone。那几帧同步新建的管线 GPU 要编好几秒，
    * 而主线程还能接着出几帧才被挡住，所以只看帧间隔不够：实测「稳了」之后 1.5 秒又停 4 秒，正好落在点了开始以后。WebGL2 没有这一步，直接算干完）。
-   * 干完了才开始数平稳的帧
+   * 干完了才开始数平稳的帧。最多等 PREHEAT_LIMIT.gpuMs（整体审查 I-1：它不回，按钮就永远不亮）
    */
   let gpuAsked = false;
   const askGpu = () => {
     gpuAsked = true;
     const device = (c.renderer.backend as { device?: { queue?: { onSubmittedWorkDone?: () => Promise<unknown> } } }).device;
     const done = device?.queue?.onSubmittedWorkDone?.() ?? Promise.resolve();
-    void done.then(() => progress({ gpu: true }), () => progress({ gpu: true }));
+    void withDeadline(done, PREHEAT_LIMIT.gpuMs, '等 GPU 把活干完').then(
+      () => progress({ gpu: true }),
+      (err) => {
+        console.warn('[boot] 不等 GPU 了，接着往下走', err);
+        progress({ gpu: true });
+      },
+    );
   };
   drawNothing(c.scene, () => c.render(r.camera));
   const t0 = performance.now();
   for (const o of deferred) o.visible = true;
   const precompiled = new URLSearchParams(location.search).has('nobgcompile')
     ? Promise.resolve()
-    : compileInStreams(c.scene, COMPILE_STREAMS, (p) => compileWhole(c, r.camera, engine.post?.sceneTarget(r.camera) ?? null, p), (f) => progress({ compile: f }));
+    // 最多等 PREHEAT_LIMIT.compileMs（整体审查 I-1）：到点走下面「边画边编」那个分支，没编完的继续在后台编
+    : withDeadline(
+        compileInStreams(c.scene, COMPILE_STREAMS, (p) => compileWhole(c, r.camera, engine.post?.sceneTarget(r.camera) ?? null, p), (f) => progress({ compile: f })),
+        PREHEAT_LIMIT.compileMs,
+        '整栋房子预编译',
+      );
   for (const o of deferred) o.visible = false;
   // 整栋真画的那一帧（warmAll）也等恐怖画的贴图：那一帧把它们都传上 GPU，开局以后第一次看到时不卡。下载卡住最多等 PAINTING_WAIT_MS（view/paintings.ts）
   Promise.all([precompiled, paintingsLoaded]).then(
@@ -447,7 +458,8 @@ async function boot() {
   const frameWatch = watchFrameTime(() => { if (quality === 'high' && !qualityPicked) setQuality('low'); });
   let last = performance.now();
   let time = 0;
-  c.renderer.setAnimationLoop(() => {
+  /** 一帧（抛错的处理见下面的 loopError） */
+  const frame = () => {
     const now = performance.now();
     const gap = now - last;
     // 切回标签页时 dt 可能很大：限制在 0.1 秒以内，模拟不会一下跳过很多
@@ -508,6 +520,24 @@ async function boot() {
         bootMark('GPU 缓过来了');
       }
       becomeReady();
+    }
+  };
+  // 循环里抛错（整体审查 I-2）：就绪判断排在真画后面，一抛错就走不到，boot().catch 也接不到 rAF 回调里的异常，按钮会永远不亮。
+  // 还没开局（遮罩挂着，包括按钮已经亮了、玩家还没点）：挂错误界面、停循环，点了也开不了场；开局以后只记日志（一次偶发的错不该把一局停掉）
+  const loopError = createLoopGuard({
+    fatal: () => {
+      lost = true;
+      audio.setMuted(true);
+      hud.showError(STRINGS.bootFailed);
+      void c.renderer.setAnimationLoop(null);
+    },
+    log: (err) => console.error('[loop] 动画循环抛错', err),
+  });
+  c.renderer.setAnimationLoop(() => {
+    try {
+      frame();
+    } catch (err) {
+      loopError(err, !started && !lost);
     }
   });
   // 动画循环开始：延后编译的物件先在正常渲染里画几帧（玩家看不见：开场遮罩挡着；这些物件这时都是透明 / 缩成 0 的，下一帧各模块的 update 再按需要藏起来）

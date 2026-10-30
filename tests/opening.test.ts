@@ -2,7 +2,7 @@
 // 开局不空等（src/warmup.ts：分几路预编译、等 GPU 缓过来、进度）、标题页的三步说明和整页可点、常驻的按键说明、
 // 准星旁的 F 键帽、失败要说话（现身落空那一句、落空的播报在第一次成功之前不闭嘴）、开场的操作说明留到第一次成功附身。
 // 纯逻辑直接测；DOM 的样子读 styles.css 的规则
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { MANIFEST } from '../src/config/visitors';
 import { STRINGS } from '../src/config/strings';
@@ -11,7 +11,7 @@ import { createWorld } from '../src/sim/world';
 import { bottomLine, createSuccessWatch, createUseWatch, missLineDue } from '../src/ui/hints';
 import { KEYS, beginLabel, createOpeningLine, fStatus, hudLines, titleSteps } from '../src/ui/hud';
 import { fKeyDue } from '../src/view/overlays';
-import { COMPILE_STREAMS, PROGRESS_WEIGHTS, SETTLE, bootProgress, compileInStreams, compileWhole, createSettleGate, drawNothing, partitionDrawables, type CompileRenderer } from '../src/warmup';
+import { COMPILE_STREAMS, PREHEAT_LIMIT, PROGRESS_WEIGHTS, SETTLE, bootProgress, compileInStreams, compileWhole, createLoopGuard, createSettleGate, drawNothing, partitionDrawables, withDeadline, type CompileRenderer } from '../src/warmup';
 
 // tsconfig 的 types 里没有 node 的类型：同 overlays.test.ts，用变量当模块名取 node:fs
 const fsId = 'node:fs';
@@ -412,7 +412,7 @@ describe('失败要说话（newbie S1）', () => {
   });
 });
 
-describe('开场的操作说明留到第一次成功附身为止（newbie G1），中间让给情境提示', () => {
+describe('开场的操作说明留到第一次成功附身为止（newbie G1），最多约 30 秒，中间让给情境提示', () => {
   /** 推进到 t（每 0.1 秒一步），返回最后一次的「显示没有」 */
   const run = (line: ReturnType<typeof createOpeningLine>, from: number, to: number, o: { ok?: boolean; want?: () => boolean } = {}) => {
     let on = false;
@@ -420,13 +420,53 @@ describe('开场的操作说明留到第一次成功附身为止（newbie G1）�
     return on;
   };
 
-  it(`开场后 ${KEYS.delay} 秒出来；没成功附身就一直留着（原来 ${KEYS.hold} 秒就走）`, () => {
+  it(`开场后 ${KEYS.delay} 秒出来；一直没成功附身也最多挂 ${KEYS.max} 秒（试玩：两行字整夜压在画面下沿，右下角已有常驻说明），淡完还回那一行，不再回来`, () => {
     const line = createOpeningLine();
     line.start(0);
     expect(bottomLine.owner).toBe('keys'); // 开场一开始就先占着那一行
     expect(run(line, 0, KEYS.delay - 0.2)).toBe(false);
     expect(run(line, KEYS.delay - 0.1, KEYS.delay + 0.1)).toBe(true);
-    expect(run(line, KEYS.delay + 0.2, 120)).toBe(true);
+    const end = KEYS.delay + KEYS.max;
+    expect(run(line, KEYS.delay + 0.2, end - 0.2)).toBe(true);
+    expect(run(line, end - 0.1, end + 0.2)).toBe(false);
+    expect(bottomLine.owner).toBe('keys'); // 淡出中还占着
+    run(line, end + 0.3, end + KEYS.fade + 0.5);
+    expect(bottomLine.owner).toBeNull();
+    expect(line.done).toBe(true);
+    expect(run(line, end + 10, end + 300)).toBe(false);
+  });
+
+  it(`让给提示再回来的：显示的时间加起来也不超过 ${KEYS.max} 秒`, () => {
+    const line = createOpeningLine();
+    line.start(0);
+    // 第一次挂满 hold 就让给在等的提示；提示占着那一段不算显示
+    run(line, 0, KEYS.delay + KEYS.hold + KEYS.fade + 0.5, { want: () => true });
+    let shown = 0;
+    for (let t = KEYS.delay + KEYS.hold + KEYS.fade + 0.6; t < 200; t += 0.1) if (line.tick(t, false, false)) shown += 0.1;
+    expect(shown).toBeGreaterThan(KEYS.max - KEYS.hold - 0.5);
+    expect(shown).toBeLessThan(KEYS.max - KEYS.hold + 0.5);
+    expect(line.done).toBe(true);
+  });
+
+  it(`让给提示时已经只剩不到 ${KEYS.again} 秒：不再回来（不出来闪一下就走）`, () => {
+    const line = createOpeningLine();
+    line.start(0);
+    let t = 0;
+    const step = (seconds: number, want = false) => {
+      for (const end = t + seconds; t < end; t += 0.1) line.tick(t, false, want);
+    };
+    step(KEYS.delay + 0.1); // 出来了
+    step(KEYS.max - 1.2); // 显示到只剩约 1 秒
+    step(KEYS.fade + 0.5, true); // 提示要用：让出来、淡完
+    expect(bottomLine.owner).toBeNull();
+    expect(line.done).toBe(true);
+    expect(line.tick(t + 1, false, false)).toBe(false);
+  });
+
+  it('上限约 30 秒，比第一次至少挂的时间长', () => {
+    expect(KEYS.max).toBeGreaterThanOrEqual(25);
+    expect(KEYS.max).toBeLessThanOrEqual(35);
+    expect(KEYS.max).toBeGreaterThan(KEYS.hold);
   });
 
   it(`成功附身以后：第一次至少停满 ${KEYS.hold} 秒，再淡出（${KEYS.fade} 秒）、把那一行还回去，不再回来`, () => {
@@ -494,3 +534,145 @@ describe('暂停、做不到的那一句读得出来（eye S-4）', () => {
   });
 });
 
+// ── 开局不能挂死（2026-10-30 整体审查 I-1、I-2：两条都是读代码推出来的路径）──────────────────
+
+describe('预热的每一步有上限（withDeadline，整体审查 I-1）', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('到点没结果：走失败分支（错误里写着等的是什么、等了多久）；原来的 promise 后来再回来也不走第二次', async () => {
+    vi.useFakeTimers();
+    let finish!: (v: string) => void;
+    const slow = new Promise<string>((res) => { finish = res; });
+    const ok = vi.fn();
+    const fallback = vi.fn();
+    void withDeadline(slow, 1000, 'GPU').then(ok, fallback);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fallback).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(String(fallback.mock.calls[0][0])).toMatch(/GPU.*1 秒/);
+    finish('late');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(ok).not.toHaveBeenCalled();
+    expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it('按时回来：走正常分支、带着原来的值；表收掉了，过了点也不走失败分支', async () => {
+    vi.useFakeTimers();
+    let finish!: (v: string) => void;
+    const p = new Promise<string>((res) => { finish = res; });
+    const ok = vi.fn();
+    const fallback = vi.fn();
+    void withDeadline(p, 1000, 'GPU').then(ok, fallback);
+    finish('done');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ok).toHaveBeenCalledWith('done');
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it('按时失败：原样走失败分支（还是原来那个错）；表也收掉', async () => {
+    vi.useFakeTimers();
+    const boom = new Error('boom');
+    const fallback = vi.fn();
+    void withDeadline(Promise.reject(boom), 1000, 'GPU').catch(fallback);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fallback).toHaveBeenCalledWith(boom);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('到点以后原来的 promise 才失败：不算未处理的拒绝，也不走第二次', async () => {
+    vi.useFakeTimers();
+    let fail!: (e: Error) => void;
+    const slow = new Promise<void>((_res, rej) => { fail = rej; });
+    const fallback = vi.fn();
+    const unhandled = vi.fn();
+    const proc = (globalThis as unknown as { process: { on(e: string, f: () => void): void; off(e: string, f: () => void): void } }).process;
+    proc.on('unhandledRejection', unhandled);
+    void withDeadline(slow, 1000, 'GPU').catch(fallback);
+    await vi.advanceTimersByTimeAsync(1000);
+    fail(new Error('late'));
+    vi.useRealTimers();
+    await new Promise((res) => setTimeout(res, 5));
+    proc.off('unhandledRejection', unhandled);
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it('上限：GPU 那一步 10 秒，预编译那一步 90 秒（都比本机正常的时长宽得多）', () => {
+    expect(PREHEAT_LIMIT.gpuMs).toBe(10_000);
+    expect(PREHEAT_LIMIT.compileMs).toBe(90_000);
+  });
+
+  it('main.ts：两步都套了上限；GPU 到点记一笔接着往下走，预编译到点走原来「边画边编」那个分支', () => {
+    const main = src('main.ts');
+    const ask = /const askGpu = \(\) => \{([\s\S]*?)\n {2}\};/.exec(main)?.[1] ?? '';
+    expect(ask).toMatch(/withDeadline\(done, PREHEAT_LIMIT\.gpuMs/);
+    expect(ask).toMatch(/console\.warn/);
+    expect(ask.match(/progress\(\{ gpu: true \}\)|go\(\)/g)?.length).toBeGreaterThanOrEqual(1);
+    const pre = main.slice(main.indexOf('const precompiled ='), main.indexOf('bootMark(\'场景建好，开始预编译\')'));
+    expect(pre).toMatch(/withDeadline\(\s*compileInStreams\(/);
+    expect(pre).toMatch(/PREHEAT_LIMIT\.compileMs/);
+    expect(pre).toMatch(/console\.warn\('\[boot\] 整栋房子预编译失败，改为边画边编', err\)/);
+    // 到点以后 bgDone、warmAll 照样设：循环和就绪判断走得下去
+    const fail = pre.slice(pre.indexOf('(err) =>'));
+    expect(fail).toMatch(/bgDone = true/);
+    expect(fail).toMatch(/warmAll = true/);
+  });
+});
+
+describe('动画循环抛错（createLoopGuard，整体审查 I-2）', () => {
+  const guard = (maxLogs?: number) => {
+    const fatal = vi.fn();
+    const log = vi.fn();
+    return { fatal, log, on: createLoopGuard({ fatal, log }, maxLogs) };
+  };
+
+  it('还没开局：第一次走 fatal（错误界面），记一次日志；three 每帧重抛同一个错，都不再报', () => {
+    const g = guard();
+    const err = new Error('render failed');
+    for (let frame = 0; frame < 120; frame++) g.on(err, true);
+    expect(g.fatal).toHaveBeenCalledTimes(1);
+    expect(g.log).toHaveBeenCalledTimes(1);
+    expect(g.log).toHaveBeenCalledWith(err);
+  });
+
+  it('fatal 过以后换一个错也不再走 fatal（错误界面只挂一次）', () => {
+    const g = guard();
+    g.on(new Error('a'), true);
+    g.on(new Error('b'), true);
+    expect(g.fatal).toHaveBeenCalledTimes(1);
+  });
+
+  it('开局以后：只记日志，不走 fatal；每帧同样的错（新建的 Error 也算）只记一次', () => {
+    const g = guard();
+    for (let frame = 0; frame < 120; frame++) g.on(new Error('same'), false);
+    expect(g.fatal).not.toHaveBeenCalled();
+    expect(g.log).toHaveBeenCalledTimes(1);
+  });
+
+  it('不同的错各记一次，最多记 maxLogs 种（错误文字里带变化的编号时不会刷屏）', () => {
+    const g = guard(3);
+    for (let k = 0; k < 50; k++) g.on(new Error(`node ${k}`), false);
+    expect(g.log).toHaveBeenCalledTimes(3);
+  });
+
+  it('抛的不是 Error（字符串）也认得出是同一个', () => {
+    const g = guard();
+    g.on('oops', false);
+    g.on('oops', false);
+    expect(g.log).toHaveBeenCalledTimes(1);
+  });
+
+  it('main.ts：循环体包在 try/catch 里；还没开局（遮罩挂着、设备也没丢）才算要命；要命时设 lost、挂 bootFailed、停循环', () => {
+    const main = src('main.ts');
+    expect(main).toMatch(/setAnimationLoop\(\(\) => \{\s*try \{\s*frame\(\);\s*\} catch \(err\) \{\s*loopError\(err, !started && !lost\);/);
+    const made = main.slice(main.indexOf('createLoopGuard({'), main.indexOf('setAnimationLoop(() => {\n    try'));
+    expect(made).toMatch(/lost = true/);
+    expect(made).toMatch(/hud\.showError\(STRINGS\.bootFailed\)/);
+    expect(made).toMatch(/setAnimationLoop\(null\)/);
+  });
+});
