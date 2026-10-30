@@ -13,8 +13,11 @@ export const PALETTE = {
   lamp: 0xffb35c,
   /** 可附身物件的幽光 */
   possess: 0x7dffa8,
-  /** 吓跑瞬间的暗角脉冲 */
-  dread: 0x5a0a0a,
+  /**
+   * 吓跑瞬间的暗角脉冲：近黑的冷色，混进四角只是把画面边缘往暗里收一点（2026-10-30 第二波 VX：原来是暗红 0x5a0a0a，
+   * 整屏泛红像动作游戏的「你受伤了」，newbie S2、eye S-2）
+   */
+  dread: 0x080b11,
   /** 室内材质：深色木头、旧墙纸、地砖 */
   woodDark: 0x2a1c14,
   wood: 0x4a3222,

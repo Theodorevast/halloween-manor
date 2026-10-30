@@ -11,7 +11,8 @@
 // （lightfx.ts 写：现身时附近的手电跟着暗），暗下去时颜色往暖红偏（钨丝灯越暗越红）；手上那个镜片也跟着一起暗、一起偏色
 import * as THREE from 'three/webgpu';
 import {
-  abs, color, dot, mix, mx_noise_float, normalView, normalize, positionView, positionWorld, pow, smoothstep, time, uniform, uv, vec3,
+  Fn, abs, color, dot, length, lightPosition, mix, mx_noise_float, normalView, normalize, positionView, positionWorld, pow, smoothstep, time,
+  uniform, uv, vec3,
 } from 'three/tsl';
 import { CELL, GRID_H, GRID_W, blocksSight, buildTiles, type Tile } from '../config/house';
 import { VISION } from '../config/visitors';
@@ -55,7 +56,22 @@ export const TORCH = {
     // 墙面和光几乎平行时最容易出条纹（阴影痤疮）：bias 往负、再沿法线推一点
     bias: -0.0008,
     normalBias: { high: 0.03, low: 0.05 } as Record<Quality, number>,
+    /**
+     * 影子里留一点光（2026-10-30 第二波 VX，eye G-4「手电打出来的影子纯黑、边缘破碎，第一眼以为墙破了个洞」）：
+     * intensity 是影子挡掉多少（1 = 全挡），留下的那点算是屋里别处弹回来的光；radius 是 PCF 取样的半径（阴影图的像素），
+     * 边缘软一点、不再是一格一格的锯齿。都是 uniform（three 的 reference），改值不重编
+     */
+    intensity: 0.85,
+    radius: 3.5,
   },
+  /**
+   * 手电贴近时压暗（2026-10-30 第二波 VX：深红沙发上一块发粉的光斑、eye G-9 侧面一大块橙色光斑）：照度按 d^−decay 衰减，
+   * 离手电不到 1 米的面亮得冲过头，色调映射把它压成一团发白、发粉的光斑（深红的布被照得太亮，AgX 把高光往白里收，红就成了粉）。
+   * 两盏灯的颜色再乘 torchNearK(d, near)（见下），照度变成 (d⁶ + near⁶)^(−decay/6)：远处和原来一样，近处停在 near 米处的水平，不再往上冲。
+   * 那团光斑主要是亮芯（窄、强）：亮芯的 near 大一些。贴着照时总照度约 28（原来半米处 150、0.3 米处 265），和光斑落地的地方（aim 3.5 米，约 17）是一个量级，
+   * 所以贴近的东西还是最亮的，但颜色还在；光斑落地的地方差不到 4%
+   */
+  near: { halo: 2, core: 3 },
   /** 紧张：亮度闪烁的深度（见 NERVOUS_FLICKER）、光束抖动的幅度（弧度） */
   nervous: { flicker: OLD_FLICKER ? NERVOUS_FLICKER.old : NERVOUS_FLICKER.safe, jitter: 0.035 },
   /** 假体积光：最长多少米、最亮时的不透明度 */
@@ -102,6 +118,28 @@ export function nervousWave(time: number, seed: number): number {
   const n = Math.max(0, Math.sin(time * 17.3 + seed) * Math.sin(time * 6.1 + seed * 2.3));
   const dip = Math.sin(time * 1.9 + seed) > 0.94 ? 0.5 : 0;
   return Math.min(1, n + dip);
+}
+
+/**
+ * 手电贴近时的压暗系数（CPU 版，测试用；着色器里 nearFalloff 是同一个式子）：k(d) = (d / d′)^decay，d′ = (d⁶ + near⁶)^(1/6)。
+ * 乘上原来的 d^−decay，照度就是 d′^−decay：d ≫ near 时 d′ ≈ d（不变），d ≪ near 时 d′ ≈ near（停在 near 米处的水平）
+ */
+export function torchNearK(d: number, n: number): number {
+  return Math.pow(d / Math.pow(d ** 6 + n ** 6, 1 / 6), TORCH.decay);
+}
+
+/**
+ * 两盏聚光灯的颜色上再乘的那一项（three r186 的 SpotLightNode：灯带 colorNode 时，光锥投影范围里的光乘上 colorNode(投影坐标)）。
+ * 要用 TSL 的 Fn 包起来：LightsNode 拿它算着色器缓存键（getCacheKey），SpotLightNode 把它当函数调；SpotLightNode 自己的颜色还是灯的 color。
+ * 按片元到这盏灯的距离算 torchNearK，投影坐标用不上。投影范围按灯的阴影相机算，离灯比阴影相机的近平面还近的点不乘：
+ * 外圈的近平面 TORCH.shadow.near（0.1 米），亮芯不投影，把它的近平面设得很小（见 createFlashlight）
+ */
+function nearFalloff(light: THREE.SpotLight, near: number) {
+  return Fn(() => {
+    const d = length(positionWorld.sub(lightPosition(light)));
+    const d2 = d.mul(d);
+    return pow(d.div(pow(d2.mul(d2).mul(d2).add(near ** 6), 1 / 6)), TORCH.decay);
+  });
 }
 
 /**
@@ -161,6 +199,12 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality, seed 
   halo.castShadow = true;
   halo.shadow.camera.near = TORCH.shadow.near;
   halo.shadow.bias = TORCH.shadow.bias;
+  halo.shadow.intensity = TORCH.shadow.intensity;
+  halo.shadow.radius = TORCH.shadow.radius;
+  // 贴近时压暗（TORCH.near）：两盏灯都乘。亮芯不投影，它的阴影相机只用来算「在不在光锥投影范围里」，近平面放到 2 厘米
+  core.shadow.camera.near = 0.02;
+  (halo as unknown as { colorNode: unknown }).colorNode = nearFalloff(halo, TORCH.near.halo);
+  (core as unknown as { colorNode: unknown }).colorNode = nearFalloff(core, TORCH.near.core);
   // 房子任务把「只投影的全高墙」放在 layer 1：让外圈的阴影相机也看见它们，光就不会从降低的墙上方漏到隔壁
   halo.shadow.camera.layers.enable(1);
   // 鬼魂只进手电阴影图的那份影子（ghost.ts，被照出、现身时才不丢）
