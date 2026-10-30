@@ -13,7 +13,9 @@ import { defineConfig, type Plugin } from 'vite';
  */
 // 2026-10-30 用户定：公开构建也带联名（授权由用户负责），默认带上；COLLAB=0 构建才去掉（下面的插件、define）
 const COLLAB = process.env.COLLAB !== '0';
-const COLLAB_FILES = ['assets/visitors/jotaro.glb', 'assets/visitors/dio.glb', 'assets/visitors/manifest.json'];
+const COLLAB_FILES = ['assets/visitors/jotaro.glb', 'assets/visitors/dio.glb'];
+/** 流水线的记录，运行时没人读，里面有 assets-src 的内部路径：任何构建都不进 dist */
+const PIPELINE_FILES = ['assets/visitors/manifest.json'];
 
 function stripCollab(): Plugin {
   let outDir = 'dist';
@@ -24,8 +26,7 @@ function stripCollab(): Plugin {
       outDir = resolve(c.root, c.build.outDir);
     },
     closeBundle() {
-      if (COLLAB) return;
-      for (const f of COLLAB_FILES) rmSync(join(outDir, f), { force: true });
+      for (const f of COLLAB ? PIPELINE_FILES : [...PIPELINE_FILES, ...COLLAB_FILES]) rmSync(join(outDir, f), { force: true });
     },
   };
 }
