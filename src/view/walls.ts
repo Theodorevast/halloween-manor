@@ -414,11 +414,13 @@ export const DISSOLVE = {
    * 视线胶囊：镜头这头、鬼魂这头的水平半径（正交相机的视线是平行的，两头都用 ghostR），竖直方向在鬼魂那头乘 tall（横截面是竖着的椭圆：
    * 盖住鬼魂从头顶到下摆，左右只比身子宽一点，在 2 米宽的走廊正中飘时两边的墙不会跟着结霜）；
    * 鬼魂那头是平的，过了身体中部 capPad 米截断。
-   * nearCut（2026-10-30 FEEL-4 墙后的镜头）：把镜头和鬼魂隔开的那一面墙（镜头、鬼魂分在这一面的两侧），和吊臂相交在靠镜头那一半
-   * （t* < nearCut）时整面溶开，只留鬼魂身后那一截：鬼魂在房间里、镜头退到墙外时，画面不再是一个四周黑墙的舷窗。
-   * 只给墙、窗、天花板、前门（dissolveAt 的 nearCut 参数），家具不溶；鬼魂贴着墙（墙在吊臂靠鬼魂那一半）时还是原来的舷窗
+   * 墙后的镜头（2026-10-30 FEEL-4，修复第 2 轮）：把镜头和鬼魂隔开的那一面墙（镜头、鬼魂分在这一面的两侧），鬼魂沿吊臂过了这面墙
+   * cutFrom 米以后，从吊臂和墙面的交点开一个洞、按多出来的米数 × grow 往外长（舷窗慢慢张大成剖面），只留鬼魂身后那一截：
+   * 鬼魂在房间里、镜头退到墙外时，画面不再是一个四周黑墙的舷窗；鬼魂刚穿过墙（身子还在墙里、刚出墙）时还是原来的舷窗。
+   * 用沿吊臂的米数而不是吊臂长的比例：吊臂会变（滚轮 1–4 米，碰天花板时被压短），按比例的话长吊臂时舷窗留太久、短吊臂时穿墙的舷窗被截掉。
+   * 只给墙、窗、天花板、前门（dissolveAt 的 nearCut 参数），家具不溶
    */
-  sight: { camR: 0.3, ghostR: 0.5, tall: 1.6, capPad: 0.12, nearCut: 0.5 },
+  sight: { camR: 0.3, ghostR: 0.5, tall: 1.6, capPad: 0.12, cutFrom: 0.8, grow: 3 },
   /** 洞边的噪声：两层（freq 每米几个起伏，amp 米）；creep：花纹每秒往上飘多少米（像烟，不是静止的破洞） */
   noise: [{ freq: 2.3, amp: 0.17 }, { freq: 6.1, amp: 0.06 }] as const,
   creep: 0.06,
@@ -516,7 +518,7 @@ type V3n = THREE.Node<'vec3'>;
 /**
  * 片元 P（房屋坐标，N 是它所在面的法线）的溶解：keep = 不在洞里（给 maskNode），frost 0..1 霜的厚度，rim 0..1 紧贴洞口的那一圈。
  * holeScale 只缩放鬼魂周围的洞（家具用 DISSOLVE.furniture）；视线胶囊不缩，隔着衣柜也要看得见鬼魂。
- * nearCut：隔开镜头和鬼魂、和吊臂相交在靠镜头那一半的面整面溶开（DISSOLVE.sight.nearCut；墙、窗、天花板、前门传 true，家具、物件不传）。
+ * nearCut：隔开镜头和鬼魂的面，鬼魂沿吊臂过了它 cutFrom 米以后从交点开洞往外长（DISSOLVE.sight；墙、窗、天花板、前门传 true，家具、物件不传）。
  * 噪声只在离洞 reach 米以内的片元上算（If 分支），离洞远的整片墙只多两次距离计算。
  * 分支外先把要用的量存进变量，分支里只赋值：避开「共享节点第一次在分支里生成，另一边读到 0」的坑（调研文档）
  */
@@ -544,14 +546,17 @@ export function dissolveAt(
     const dSight = max(length(vec3(rad.x, rad.y.div(tall), rad.z)).sub(mix(u.sightR.x, u.sightR.y, t)), beyond);
     let near: F = float(1e3);
     if (nearCut) {
-      // 按这一面所在的平面判断（同一个平面上处处一样，整面一个结果）：hc、hg 是镜头、鬼魂到这个平面的有向距离，异号 = 这一面把两者隔开；
-      // t* = |hc| / (|hc| + |hg|) 是吊臂和这个平面相交的地方（0 镜头、1 鬼魂）。相交在靠镜头那一半（t* < nearCut）就整面溶开，
-      // 只留鬼魂身后那一截（沿吊臂过了鬼魂 capPad 米以外，和视线胶囊的平头同一个 beyond）。正在穿的那面墙（t* 接近 1）不受影响，
-      // 还是原来的舷窗；走廊两边的墙不隔开两者，也不受影响。修复第 1 轮（审查 I-3）：原来按每个片元自己在吊臂上的投影 tr 切，
-      // 斜墙和吊臂相交在近半段时，靠鬼魂那一截（tr > nearCut）留成两块结霜的黑板（f02、f12a）
+      // 按这一面所在的平面判断：hc、hg 是镜头、鬼魂到这个平面的有向距离，异号 = 这一面把两者隔开；t* = |hc| / (|hc| + |hg|) 是吊臂和
+      // 这个平面相交的地方（0 镜头、1 鬼魂），X* 是交点。鬼魂沿吊臂过了这面墙 (1 − t*) × 吊臂长；多出 cutFrom 的部分乘 grow 当洞的半径，
+      // 洞从 X*（正是原来舷窗的中心）往外长：场的梯度还是 1，切边、霜带和舷窗的边一样紧，舷窗慢慢张大成剖面，不留黑板。
+      // 只留鬼魂身后那一截（沿吊臂过了鬼魂 capPad 米以外，和视线胶囊的平头同一个 beyond）；走廊两边的墙不隔开两者，不受影响。
+      // 修复第 2 轮（复审 I-4）：第 1 轮按整个平面取同一个值，鬼魂停在离墙 1–1.4 米时整条墙线在噪声带里变成满屏带冷光边的霜块，
+      // 晃鼠标还会在舷窗 / 满屏霜块 / 整面没了之间来回切；第 0 轮按每个片元的投影 tr 切，斜墙留两块黑板
       const hc = dot(N, u.cam.sub(P)), hg = dot(N, u.ghost.sub(P));
       const tStar = abs(hc).div(abs(hc).add(abs(hg)).add(1e-6));
-      near = select(hc.mul(hg).lessThan(0), max(tStar.sub(D.sight.nearCut).mul(u.segLen), beyond), float(1e3));
+      const past = float(1).sub(tStar).mul(u.segLen).sub(D.sight.cutFrom);
+      const open = length(P.sub(u.cam.add(u.seg.xyz.mul(tStar)))).sub(past.mul(D.sight.grow));
+      near = select(hc.mul(hg).lessThan(0), max(open, beyond), float(1e3));
     }
     const sd = min(min(dGhost, dSight), near).toVar();
     const field = sd.toVar();
@@ -596,7 +601,7 @@ export interface DissolveOptions {
   masked?: boolean;
   /** 不受光照的材质（MeshBasic，天花板）：底色乘这个当作环境光下的亮度，再加自发光那几项 */
   unlitAmbient?: number;
-  /** 隔开镜头和鬼魂、和吊臂相交在靠镜头那一半的面整面溶开（见 DISSOLVE.sight.nearCut）：墙、天花板给 true，家具不给 */
+  /** 隔开镜头和鬼魂的面，鬼魂沿吊臂过了它 cutFrom 米以后从交点开洞往外长（见 DISSOLVE.sight）：墙、天花板给 true，家具不给 */
   nearCut?: boolean;
 }
 

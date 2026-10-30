@@ -304,6 +304,26 @@ describe('反弹光不跟着手电以外的东西开关（countDips 按 60 Hz �
     }
   });
 
+  it('落点九成时间没有（比如手电站在门洞格里斜擦门洞侧面）、一成落在房间里：只淡出一次，不会一圈圈地清空、放下、再清空（复审 M-5）', () => {
+    clearBounce();
+    for (const t of torches) t.power = 0;
+    const inside = torch(8, 0.8, 11.8, 8, 0, 8.3); // 门槛那一格往北照：落在门厅地板上
+    const outside = torch(8, 0.8, 13.2, 8, 0, 9.7); // 门外：没有落点
+    const probe = { P: { x: 8.3, y: 0, z: 9.0 }, N: { x: 0, y: 1, z: 0 } };
+    Object.assign(torches[0], inside);
+    for (let k = 0; k < HZ; k++) updateBounce(near, DT);
+    const top = bounceLevelAt(probe.P, probe.N);
+    expect(top).toBeGreaterThan(0.01);
+    const levels: number[] = [];
+    for (let k = 0; k < 3 * HZ; k++) {
+      Object.assign(torches[0], k % 10 === 9 ? inside : outside);
+      updateBounce(near, DT);
+      levels.push(bounceLevelAt(probe.P, probe.N) / top);
+    }
+    expect(countDips([1, ...levels], HZ)).toBe(1);
+    expect(levels.at(-1)).toBeLessThan(0.01);
+  });
+
   it('真的转过去照隔壁（不是抖）：旧房间慢慢淡出（不少于 0.2 秒，一路只往下），新房间慢慢亮起来', () => {
     clearBounce();
     for (const t of torches) t.power = 0;

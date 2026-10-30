@@ -260,7 +260,7 @@ export function createFrontDoor(core: RenderCore, rig: GhostRig | null): FrontDo
   const houseOffset = uniform(new THREE.Vector3());
   if (dissolve) {
     const P = positionWorld.sub(houseOffset);
-    // nearCut（walls.ts 的 DISSOLVE.sight.nearCut）：和南墙一样，隔开镜头和鬼魂、在吊臂靠镜头那一段时整片溶开，不然墙溶开了门板、门框悬在半空
+    // nearCut（walls.ts 的 DISSOLVE.sight）：和南墙一样，隔开镜头和鬼魂时从吊臂和门的交点开洞往外长，不然墙溶开了门板、门框悬在半空
     const d = dissolveAt(ghostDissolve, P, normalWorld, DISSOLVE.furniture, true);
     material.maskNode = d.keep;
     // 影子照旧：溶开的只是「看穿」

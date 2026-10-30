@@ -101,10 +101,10 @@ export const bounceCamFade = (d: number) => 1 - sm(TORCH_BOUNCE.camFade[0], TORC
 /** 一组反弹（一个房间）：room 为 null = 空着；x, y, z 低通过的落点（m* 是第一级）；k 淡入淡出（0..1）；cam 离镜头远近的淡出系数（低通过的） */
 interface Glow { room: RoomId | null; rect: Rect4; x: number; y: number; z: number; mx: number; my: number; mz: number; k: number; cam: number }
 /** 一支手电的平滑状态：now 现在照着的房间、old 刚换下来正在淡出的房间；pend / pendT 落点跑到哪个房间（null = 没有落点）、在那边占上风多久了 */
-interface Track { now: Glow; old: Glow; pend: RoomId | null | undefined; pendT: number }
+interface Track { now: Glow; old: Glow; pend: RoomId | null | undefined; pendT: number; dropped: boolean }
 
 const idleGlow = (): Glow => ({ room: null, rect: { x0: 0, z0: 0, x1: 0, z1: 0 }, x: 0, y: -100, z: 0, mx: 0, my: -100, mz: 0, k: 0, cam: 0 });
-const tracks: Track[] = Array.from({ length: TORCH_COUNT }, () => ({ now: idleGlow(), old: idleGlow(), pend: undefined, pendT: 0 }));
+const tracks: Track[] = Array.from({ length: TORCH_COUNT }, () => ({ now: idleGlow(), old: idleGlow(), pend: undefined, pendT: 0, dropped: false }));
 
 const camDist = (g: P3, cam: P3) => Math.hypot(g.x - cam.x, g.y - cam.y, g.z - cam.z);
 
@@ -137,13 +137,30 @@ export function updateBounce(cam: P3, dt: number) {
       tr.old = idleGlow();
       tr.pend = undefined;
       tr.pendT = 0;
+      tr.dropped = false;
     } else {
       const h = bounceTarget(t);
       const now = tr.now;
       if (now.room === null) {
-        if (h) place(now, h, cam);
-        tr.pend = undefined;
-        tr.pendT = 0;
+        // 第一次点亮直接放下；因为落点没了才空着的（dropped），也要在新房间占上风 hold 秒才放下（复审 M-5）：
+        // 不然落点在「没有落点」和某个房间之间抖、而且没有落点占多数时，会一圈圈地清空、放下、再清空
+        if (h && !tr.dropped) {
+          place(now, h, cam);
+          tr.pend = undefined;
+          tr.pendT = 0;
+        } else if (h) {
+          if (h.room === tr.pend) tr.pendT += dt;
+          else {
+            tr.pend = h.room;
+            tr.pendT = dt;
+          }
+          if (tr.pendT >= B.hold - 1e-9) {
+            place(now, h, cam);
+            tr.dropped = false;
+            tr.pend = undefined;
+            tr.pendT = 0;
+          }
+        } else tr.pendT = Math.max(0, tr.pendT - dt);
       } else if (h && h.room === now.room) {
         // 还在这个房间：落点两级低通着跟过去
         now.mx += (h.x - now.mx) * kPoint;
@@ -170,6 +187,7 @@ export function updateBounce(cam: P3, dt: number) {
             tr.old = now;
             tr.now = idleGlow();
             if (h) place(tr.now, h, cam);
+            else tr.dropped = true;
           }
           tr.pend = undefined;
           tr.pendT = 0;
@@ -192,6 +210,7 @@ export function clearBounce() {
     tr.old = idleGlow();
     tr.pend = undefined;
     tr.pendT = 0;
+    tr.dropped = false;
   }
   for (const q of bounceQ) q.value.w = 0;
 }
