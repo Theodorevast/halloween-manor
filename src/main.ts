@@ -29,6 +29,7 @@ import { createHouseView } from './view/house';
 import { createLightFx } from './view/lightfx';
 import { createOtherShadow } from './view/otherShadow';
 import { createOverlays } from './view/overlays';
+import { PROP_TEXTURES, createPaintings, loadPaintings } from './view/paintings';
 import { createParticlesView } from './view/particles';
 import { createPropsView } from './view/props';
 import { createRangeFrost } from './view/rangeFrost';
@@ -161,6 +162,10 @@ async function boot() {
   // 第一个访客穿的那套造型（其余几套开场按钮可用之后才下载，见 ready 之后的 streamOutfits）；第三人称时还有鬼魂的模型
   // （config/ghost.ts 的 url 为 null 时用程序化的人形，不下载）
   const firstOutfit = loadFirstOutfit();
+  // 恐怖画的贴图（view/paintings.ts）：现在就开始下载（低优先级，让第一套造型先下）。开场按钮不等它；真正开场（bgDone）等它，见文件末尾。
+  // 第三人称 9 张约 0.89 MB；娃娃屋没有墙上那六幅，只下画像两张、镜中人脸（约 0.24 MB）
+  const paintingsLoaded = loadPaintings(ghostMode ? {} : { ids: PROP_TEXTURES });
+  void paintingsLoaded.then((p) => bootMark(`恐怖画的贴图：${p.ready.length} 张好了，${p.failed.length} 张失败，${p.late.length} 张没等到`));
   const ghostModel = ghostMode ? loadGhostModel().catch((err) => {
     console.warn('鬼魂模型加载失败，改用程序化的人形', err);
     return null;
@@ -215,6 +220,8 @@ async function boot() {
   // 情境提示、登记簿是界面，挂在 HUD 的层里（#hud，渲染器起不来时不建：错误界面上不该有本子）
   const house = createHouseView(c, r);
   const frontDoor = createFrontDoor(c, isGhostRig(r) ? r : null);
+  // 墙上的六幅恐怖画（第三人称才有，娃娃屋的内墙是矮墙挂不住）：开场的预编译之前就在场景里，六幅共用一条管线
+  const paintings = createPaintings(c, r);
   // 关门声跟着画面：一群人出门时门等最后一个才甩，只响那一声（前门在 modules 里排在声音前面，同一批事件先到它）
   audio.setFrontDoor(frontDoor);
   // 和玩家的鬼魂同一个外形（共用几何体和阴影管线）；给了镜头才只放在玩家看得见的墙上、躲开玩家的鬼魂
@@ -256,7 +263,7 @@ async function boot() {
   /** 场景叠层收起着没有（收尾时收起，Keep haunting 以后放开；只在变化时动 DOM） */
   let overlaysHidden = false;
   modules.push(
-    house, createFogView(c, r), props, rangeFrost, characters, frontDoor, otherShadow, createParticlesView(c),
+    house, createFogView(c, r), props, rangeFrost, characters, frontDoor, paintings, otherShadow, createParticlesView(c),
     ...(ghostFx && isGhostRig(r) ? [createGhostView(c, r, ghostFx), ghostFx.lights, ghostFx.frost] : []),
     createJuice(r, c), cine, audio, overlays, hud, hints, registerView,
     // 一夜只在开场之后走（开场前模拟没动；图形设备丢了以后也不再往下走，免得登记簿翻在错误界面上）
@@ -452,7 +459,8 @@ async function boot() {
   } else {
     outfitsSettled = true;
   }
-  precompiled.then(
+  // 开场（bgDone）也等恐怖画的贴图：下面整栋真画的那一帧（warmAll）把它们都传上 GPU，开局以后第一次看到时不卡。下载卡住最多等 PAINTING_WAIT_MS
+  Promise.all([precompiled, paintingsLoaded]).then(
     () => {
       bgDone = true;
       warmAll = true;

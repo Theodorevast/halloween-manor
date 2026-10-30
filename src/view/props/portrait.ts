@@ -1,25 +1,85 @@
-// 肖像：画架上一幅维多利亚风格的女士像。被附身时眼睛（单独的小球）猛地转向最近的访客、瞳孔泛起幽绿，
-// 盯 0.6 秒、画框发抖，然后整幅画向前扑倒、脸朝下砸在地上，回弹一下。broken 期间一直趴着，reset 时飘回画架。
+// 肖像：画架上一幅维多利亚风格的女士像（2026-10-30 起是素材中台生成的油画，public/assets/paintings/portrait.webp，穿丧服的年轻女士）。
+// 被附身时眼睛猛地转向最近的访客、瞳孔里亮起一点幽绿；就在那一刻，她的脸开始化开成同一幅画的恐怖版（portrait-possessed.webp：
+// 脸成了张大嘴的骷髅、脸周围的颜料起泡龟裂），从脸往外约 0.4 秒漫过整幅画（见 PORTRAIT_REVEAL），不闪；
+// 盯 0.6 秒、画框发抖，然后整幅画向前扑倒、脸朝下砸在地上，回弹一下。broken 期间一直趴着，reset 时还脸朝下就换回平常的样子，飘回画架。
 // 画砸下去时把地上积的灰吹开：画扶回画架以后，地板上留下一块比周围干净的长方形印子，几秒里慢慢淡掉（见 PRINT）。
 import * as THREE from 'three/webgpu';
-import { abs, color, exp, float, length, max, min, mix, mx_noise_float, positionLocal, smoothstep, uniform, vec2, vec3 } from 'three/tsl';
-import { C, Parts, bodyMaterial, bump, inOutCubic, inOutSine, inQuad, lerp, mesh, outCubic, outQuad, seg, wobble, type PropFrame, type PropRig } from './kit';
+import {
+  abs, clamp, color, dot, exp, float, length, max, min, mix, mx_noise_float, positionLocal, smoothstep, texture, uniform, uv, vec2, vec3,
+} from 'three/tsl';
+import { C, Parts, bodyMaterial, bump, inCubic, inOutCubic, inOutSine, inQuad, lerp, mesh, outCubic, outQuad, seg, wobble, type PropFrame, type PropRig } from './kit';
 import { PALETTE } from '../palette';
+import { paintingTexture } from '../paintings';
 
 // 画布尺寸（米）和画框
 const CW = 0.62, CH = 0.82;
 const FW = 0.74, FH = 0.94, FD = 0.05;
+/** 画布的宽、高（米）：两张贴图按这个比例裁（tests/paintings.test.ts 查） */
+export const PORTRAIT_CANVAS = [CW, CH] as const;
 /** 画框底边（翻倒的转轴）在物件局部坐标里的位置：画架托板上、托板前沿 */
 const LEDGE_Y = 0.755, LEDGE_Z = 0.13;
 /** 平时向后靠的角度（rotation.x，负 = 顶部往后） */
 const LEAN = -0.1;
 /** 倒地后转轴的位置 */
 const FALLEN_Z = 0.25;
-/** 眼睛在画框坐标里的位置（画框底边中点为原点）、眼球半径 */
-const EYE_Y = FH / 2 + 0.1;
-const EYE_X = 0.046;
-const EYE_R = 0.017;
 const CANVAS_Z = -0.012;
+/** 备用的程序画（paintPortrait）里两只眼睛离中线多远（米） */
+const EYE_X = 0.046;
+
+/**
+ * 画上的眼睛（贴图 uv：左上角为原点，向右、向下；和 portrait.webp 逐像素对得上）。
+ * pupils：平时那张两只眼的瞳孔；sockets：恐怖版两个黑眼窝的中心；open：眼睛（眼睑之间）的半宽、半高。
+ * 附身时瞳孔往访客那边挪（眼睑里的那一块贴图整体平移，最多 travel），瞳孔里亮起一点幽绿（换脸以后亮在眼窝里）
+ */
+const EYES = {
+  pupils: [[0.421, 0.263], [0.532, 0.264]] as [number, number][],
+  sockets: [[0.411, 0.244], [0.513, 0.251]] as [number, number][],
+  open: [0.024, 0.012] as [number, number],
+  travel: [0.009, 0.004] as [number, number],
+  /** 幽绿的一点：亮芯、外晕的大小（画布高度为 1）和亮度 */
+  core: { r: 0.004, gain: 2.6 },
+  halo: { r: 0.013, gain: 0.35 },
+};
+/** 眼睛在画框坐标里的高度（画框底边中点为原点）：访客的方向按这里算 */
+const EYE_Y = FH / 2 + (0.5 - EYES.pupils[0][1]) * CH;
+/** 眼睛最多转多少（弧度）：左右 yaw，往下 down、往上 up */
+const LOOK = { yaw: 0.85, down: 0.55, up: 0.35 };
+
+/**
+ * 换脸：被附身、眼睛甩过去那一刻（T.snap）起，time 秒里从脸（face，贴图 uv）往外化开到整幅画。前沿的形状：
+ * 到脸的距离（画布高度为 1，宽按 CW / CH 缩）加噪声（最多 noise，见 portraitReveal），软边 soft；前沿后面 3 × soft 那一圈颜料暗下去 scorch
+ * （像从画布背后烧过来），前沿过去就恢复。reach：离脸最远的角有多远。不加亮、不闪
+ */
+export const PORTRAIT_REVEAL = {
+  time: 0.4,
+  face: [0.49, 0.3] as [number, number],
+  noise: 0.08,
+  soft: 0.05,
+  reach: 0.81,
+  scorch: 0.25,
+  /**
+   * 换过去的那张脸里透出一点冷光（线性，乘恐怖版的颜色）：访客的手电拿得低，光圈的上沿才扫到脸，换脸常常落在暗处看不出来。
+   * 只在脸上（离脸 radius[0] 起淡、radius[1] 没），跟着换脸化开的进度亮起来（不跳），砸地以后跟眼睛的幽绿一起退掉；颜色同鬼魂的冷光
+   */
+  inner: { gain: 0.16, radius: [0.09, 0.2] as [number, number], color: [0.55, 0.68, 0.86] as [number, number, number] },
+};
+/** 前沿走完整幅画要走多远：最远的角 + 噪声 + 烧暗那一圈（进度 1 时哪儿都换完、也不再暗） */
+const REVEAL_SPAN = PORTRAIT_REVEAL.reach + PORTRAIT_REVEAL.noise + PORTRAIT_REVEAL.soft * 3;
+
+/**
+ * 换脸的进度（0 = 平常的女士像，1 = 换完）：t 是触发以后的秒数。先慢后快：眼睛先甩过去，隔一拍脸才开始化（约 8 帧看得出它在化开），
+ * 脸之外那一大片差别小，最后很快漫过去。原来用 inOutSine 时脸 4 帧就换完，像切了一张图（看样发现）
+ */
+export const portraitRot = (t: number) => inCubic(seg(t, T.snap, T.snap + PORTRAIT_REVEAL.time));
+
+/** 贴图 uv（u, v，左上角为原点）这一点在进度 rot 时换过去了多少（0..1）；n 是这一点的噪声（0..1）。着色器里是同一个式子 */
+export function portraitReveal(u: number, v: number, rot: number, n: number): number {
+  const R = PORTRAIT_REVEAL;
+  const d = Math.hypot((u - R.face[0]) * (CW / CH), v - R.face[1]);
+  const front = rot * REVEAL_SPAN - d - n * R.noise;
+  const k = Math.min(1, Math.max(0, front / R.soft));
+  return k * k * (3 - 2 * k);
+}
 
 /**
  * 地上的印子。原本想做「墙上一块没褪色的墙纸」，但这幅画是立在画架上的：画面离北墙约 0.45 米，
@@ -59,7 +119,10 @@ const T = {
   end: 1.3,
 };
 
-/** 用 Canvas 画一张维多利亚女士像：深色衣裙、高领蕾丝、盘发，脸色发青，表情冷硬；整张画发黄、带龟裂 */
+/**
+ * 用 Canvas 画一张维多利亚女士像：深色衣裙、高领蕾丝、盘发，脸色发青，表情冷硬；整张画发黄、带龟裂。
+ * 2026-10-30 起只是备用：两张生成的油画下载不到时用它（两张都用它，就没有换脸）
+ */
 function paintPortrait(): HTMLCanvasElement {
   const PX = 420;
   const W = Math.round(CW * PX), H = Math.round(CH * PX);
@@ -261,30 +324,50 @@ export function createPortrait(): PropRig {
   const frame = mesh(frameGeo, bodyMaterial(0.55, 0.35), 'portrait-frame');
   pivot.add(frame);
 
-  const tex = new THREE.CanvasTexture(paintPortrait());
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  const canvasMat = new THREE.MeshStandardNodeMaterial({ map: tex, roughness: 0.62, metalness: 0 });
+  // 画布：两张油画（平常的、恐怖版，逐像素对齐），按换脸的进度 rot 混；下载不到时两张都用程序画的那张。
+  // 贴图不翻转（paintings.ts），贴图 uv 左上角为原点：t = (u, 1 − v)
+  const texNormal = paintingTexture('portrait', paintPortrait);
+  const texHorror = paintingTexture('portraitPossessed', paintPortrait);
+  const rot = uniform(0);
+  const eyeGlow = uniform(0);
+  /** 瞳孔往访客那边挪多少（贴图 uv，最多 EYES.travel） */
+  const eyeLook = uniform(new THREE.Vector2());
+  // 上过光油：一层柔和的光泽。画布往后仰，手电从下面照上来正好反到镜头里，0.62 时下半幅一片白（看样发现），所以比墙上的画更哑一点
+  const canvasMat = new THREE.MeshStandardNodeMaterial({ roughness: 0.78, metalness: 0 });
+  {
+    const R = PORTRAIT_REVEAL;
+    const t = vec2(uv().x, float(1).sub(uv().y));
+    /** 画布高度为 1 的坐标（宽按 CW / CH 缩）：距离、噪声都按它算，横竖一样圆 */
+    const q = vec2(t.x.mul(CW / CH), t.y);
+    const at = (p: [number, number]) => vec2(p[0] * (CW / CH), p[1]);
+    // 眼睑里的那一块往访客那边平移：瞳孔转过去（只平移平常那张：恐怖版是空眼窝）
+    const lid = (c: [number, number]) => float(1).sub(smoothstep(0.55, 1, length(t.sub(vec2(...c)).div(vec2(...EYES.open)))));
+    const tEyes = t.sub(eyeLook.mul(lid(EYES.pupils[0]).add(lid(EYES.pupils[1]))));
+    const normal = texture(texNormal, tEyes).rgb;
+    const horror = texture(texHorror, t).rgb;
+    // 化开的前沿：到脸的距离 + 两层噪声（0..1），式子同 portraitReveal
+    const n01 = clamp(mx_noise_float(vec3(q.mul(6), 1.7)).mul(0.6).add(mx_noise_float(vec3(q.mul(17), 4.3)).mul(0.3)).mul(0.5).add(0.5), 0, 1);
+    const dFace = length(q.sub(at(R.face)));
+    const front = rot.mul(REVEAL_SPAN).sub(dFace).sub(n01.mul(R.noise));
+    const m = smoothstep(0, R.soft, front);
+    const scorch = m.mul(float(1).sub(smoothstep(R.soft, R.soft * 3, front))).mul(R.scorch);
+    canvasMat.colorNode = mix(normal, horror, m).mul(float(1).sub(scorch));
+    // 瞳孔里那一点幽绿：亮芯 + 外晕，跟着瞳孔挪；换脸时移到眼窝中心
+    const toSocket = smoothstep(0.1, 0.3, rot);
+    const pin = (i: number) => {
+      const p = mix(at(EYES.pupils[i]), at(EYES.sockets[i]), toSocket).add(vec2(eyeLook.x.mul(CW / CH), eyeLook.y));
+      const e = q.sub(p);
+      const r2 = dot(e, e);
+      return exp(r2.div(-EYES.core.r * EYES.core.r)).mul(EYES.core.gain).add(exp(r2.div(-EYES.halo.r * EYES.halo.r)).mul(EYES.halo.gain));
+    };
+    const inner = horror.mul(vec3(...R.inner.color)).mul(m.mul(float(1).sub(smoothstep(R.inner.radius[0], R.inner.radius[1], dFace))).mul(eyeGlow).mul(R.inner.gain));
+    canvasMat.emissiveNode = color(PALETTE.possess).mul(eyeGlow).mul(pin(0).add(pin(1))).add(inner);
+  }
   const canvasMesh = mesh(new THREE.PlaneGeometry(CW, CH), canvasMat, 'portrait-canvas');
   canvasMesh.castShadow = false; // 画框和背板已经投影了
   canvasMesh.position.set(0, cy, CANVAS_Z);
+  canvasMesh.userData.rot = rot; // 测试读换脸的进度
   pivot.add(canvasMesh);
-
-  // 眼睛：一个球，正前方一圈是瞳孔（用局部 z 坐标在着色器里分出来），附身时瞳孔发幽绿的光
-  const eyeGlow = uniform(0);
-  const eyeMat = new THREE.MeshStandardNodeMaterial({ roughness: 0.3, metalness: 0 });
-  const pupil = smoothstep(float(EYE_R * 0.74), float(EYE_R * 0.8), positionLocal.z);
-  eyeMat.colorNode = mix(color(0x9c937c), color(0x0a0706), pupil);
-  eyeMat.emissiveNode = color(PALETTE.possess).mul(pupil).mul(eyeGlow).mul(2.2);
-  const eyeGeo = new THREE.SphereGeometry(EYE_R, 14, 10);
-  const eyes = [-1, 1].map((s) => {
-    const e = new THREE.Mesh(eyeGeo, eyeMat);
-    e.name = 'portrait-eye';
-    e.rotation.order = 'YXZ';
-    e.position.set(s * EYE_X, EYE_Y, CANVAS_Z);
-    pivot.add(e);
-    return e;
-  });
   model.add(pivot);
 
   // 地上的印子：一块平铺在地板上的面片，盖住画倒地时的位置再往外一圈（画倒地后转轴在 FALLEN_Z，画沿 +z 躺平）
@@ -373,8 +456,15 @@ export function createPortrait(): PropRig {
     const lx = dx * Math.cos(yaw) - dz * Math.sin(yaw);
     const lz = dx * Math.sin(yaw) + dz * Math.cos(yaw);
     const ex = lx - eyeWorld.x, ez = lz - eyeWorld.z, ey = 1.0 - eyeWorld.y; // 看访客的脸（约 1 米高）
-    look.tYaw = THREE.MathUtils.clamp(Math.atan2(ex, Math.max(ez, 0.05)), -0.85, 0.85);
-    look.tPitch = THREE.MathUtils.clamp(Math.atan2(ey, Math.hypot(ex, ez)), -0.55, 0.35);
+    look.tYaw = THREE.MathUtils.clamp(Math.atan2(ex, Math.max(ez, 0.05)), -LOOK.yaw, LOOK.yaw);
+    look.tPitch = THREE.MathUtils.clamp(Math.atan2(ey, Math.hypot(ex, ez)), -LOOK.down, LOOK.up);
+  };
+  /** 复原开始（画还脸朝下）：换回平常的女士像，扶起来的时候已经是她 */
+  const beginReset = () => {
+    r = 0;
+    sinceReset = 0;
+    printFrom = print;
+    rot.value = 0;
   };
 
   return {
@@ -393,20 +483,20 @@ export function createPortrait(): PropRig {
     },
     reset() {
       if (!fallen) return;
-      r = 0;
-      sinceReset = 0;
-      printFrom = print;
+      beginReset();
     },
     update(f) {
       const { dt, obj } = f;
       // 兜底：错过了事件时按 state 对齐（例如中途创建视图）
       if (t < 0 && r < 0) {
-        if (!fallen && obj.broken > 0 && obj.active <= 0) { fallen = true; fallenPose(); print = 1; }
-        else if (fallen && obj.broken <= 0) { r = 0; sinceReset = 0; printFrom = print; }
+        if (!fallen && obj.broken > 0 && obj.active <= 0) { fallen = true; fallenPose(); print = 1; rot.value = 1; }
+        else if (fallen && obj.broken <= 0) beginReset();
       }
 
       if (t >= 0) {
         t += dt;
+        // 眼睛甩过去那一刻起换脸（扑倒、趴着时一直是恐怖版，复原时才换回来）
+        rot.value = portraitRot(t);
         // 0–0.6：盯着人
         if (t < T.fall + 0.1) aimEyes(f);
         const snap = t < T.snap ? outCubic(seg(t, 0, T.snap)) : 1;
@@ -471,10 +561,13 @@ export function createPortrait(): PropRig {
       printAmt.value = print;
       printMesh.visible = print > 0.002;
 
-      for (const e of eyes) e.rotation.set(-look.pitch, look.yaw, 0);
+      // 瞳孔挪到哪：左右按转角、上下按俯仰（往下看 = 贴图 uv 往下），各自到头时挪满 EYES.travel
+      eyeLook.value.set((look.yaw / LOOK.yaw) * EYES.travel[0], (-look.pitch / LOOK.down) * EYES.travel[1]);
     },
     dispose() {
-      tex.dispose(); // 几何体和材质由 props.ts 统一释放
+      // 几何体和材质由 props.ts 统一释放；贴图是 paintings.ts 全页共用的那两张（再建一次物件时会重新上传）
+      texNormal.dispose();
+      texHorror.dispose();
     },
   };
 }
