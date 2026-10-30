@@ -1,17 +1,21 @@
 // 访客登记簿的记录（2026-10-30「一夜」）：纯 TypeScript，吃 SimEvent 和 WorldState（vitest 直接测），页面在 registerView.ts。
 // 每个访客一行：名字 · 性格标注 · 穿哪套；第二行是几点进来、怎么走的。
-// 「怎么走的」= 逃跑之前最后一个让他恐惧值上涨的事件，逃跑那一刻定下来：
-//   物件的 startle、引诱类的 heard（听见了也涨恐惧值）→ ranFrom；那一下是机关发作的（trap sprung 紧跟着那件的 trigger）→ trap
-//   现身落下（manifest drop 的 scared）→ sawYou
-//   后颈一凉、慢慢发毛（chill）→ coldBreath
+// 「怎么走的」= 逃跑之前让他恐惧值涨得最多的那一类来源（2026-10-30 路 GP，critic S-4：原来只记最后一下，
+// 两次现身吓到 95、最后几点是后颈一凉的人写成 felt a cold breath）。逃跑那一刻定下来，四类：
+//   物件（startle、引诱类的 heard：听见了也涨恐惧值）→ ranFrom，写这一类里涨得最多的那一件；那件是机关发作的（trap sprung 紧跟着
+//     那件的 trigger）→ trap（同一件物件机关和附身分开算）
+//   现身落下（manifest drop 的 scared，同一步紧跟着的 object = GHOST_SOURCE 的 startle 是那一笔）→ sawYou
+//   后颈一凉、慢慢发毛（chill；后颈一凉同一步紧跟着的 GHOST_SOURCE startle 是同一笔，不另加）→ coldBreath
 //   被别人的尖叫吓到（startle 的 object 为 null）→ scream
-//   现身落下、后颈一凉同一步还有一个 object = GHOST_SOURCE 的 startle：是同一笔恐惧值，不改上面记下的
+//   每一类把涨的恐惧值加起来（事件里的 amount；手写的 heard 没有 amount 时按物件的基础恐惧值），一样多时最近涨过的那一类算
 // 天亮自己走的（exit 带 calm）写 leftAtDawn，不算吓跑；还在屋里的写 stillInside。
 // 钟点：模拟时间 0 是 NIGHT.clock.start 点，NIGHT.dawn 是 NIGHT.clock.end 点，中间线性，过了天亮照样往后走。
 // Keep haunting 以后是新的一夜（newNight，整体审查 I-3）：换一页（上一夜的人、墙上多一个影子那一句不再带），钟点从这一夜开始的时刻算。
-// 页脚两三句，数字用英文单词写在句子里。不做大号数字、表格、打分、评级
+// 页脚两三句，数字用英文单词写在句子里。不做大号数字、表格、打分、评级。
+// 收夜那一页（page 的 closing）页脚第一句是一句评语（STRINGS.register.verdict，2026-10-30 路 GP）：按这一夜吓跑的比例，克制，不计分
 import { VISITOR_SPECS } from '../config/character';
 import { NIGHT } from '../config/night';
+import { SCARES } from '../config/scares';
 import { STRINGS } from '../config/strings';
 import { GHOST_SOURCE } from '../sim/types';
 import type { Personality, ScareType, SimEvent, WorldState } from '../sim/types';
@@ -22,8 +26,10 @@ const F = R.footer;
 export const REGISTER = {
   /** 一页最多写几行（宽屏两栏各六行）；多出来的一句 andOthers 带过（只多一个时整页都写，不写 "and one others"） */
   maxLines: 12,
-  /** 页脚最多几句（cameRan 算一句；墙上多一个影子那一句也算） */
+  /** 页脚最多几句（cameRan 算一句；墙上多一个影子那一句也算；收夜那一页最前面的评语不算在里面） */
   footer: 3,
+  /** 评语按吓跑的比例（吓跑的 / 进来的）分档：全跑了 all；至少 most 是 most；有人跑是 few；一个没跑是 none */
+  verdict: { most: 0.5 },
 };
 
 // ── 钟点 ─────────────────────────────────────────────
@@ -71,12 +77,47 @@ export function outfitName(id: string | undefined): string {
 
 // ── 记录 ─────────────────────────────────────────────
 
-/** 怎么走的（逃跑之前最后一个让他恐惧值上涨的事件） */
+/** 来源的键：物件按「哪件 + 是不是机关」分开，别的按类 */
+const causeKey = (c: Cause): string => (c.kind === 'prop' ? `prop:${c.prop}:${c.trap ? 'trap' : ''}` : c.kind);
+
+/**
+ * 怎么走的：涨得最多的那一类（物件的各件加在一起算一类），一样多时最近涨过的那一类；是物件就写这一类里涨得最多的那一件
+ * （一样多时最近的）。没记到任何一笔（调试时直接改了恐惧值）为 null
+ */
+function mainCause(v: { tally: ReadonlyMap<string, Tally> }): Cause | null {
+  const kinds = new Map<Cause['kind'], { amount: number; seq: number; best: Tally }>();
+  for (const t of v.tally.values()) {
+    const k = kinds.get(t.cause.kind);
+    if (!k) kinds.set(t.cause.kind, { amount: t.amount, seq: t.seq, best: t });
+    else {
+      k.amount += t.amount;
+      k.seq = Math.max(k.seq, t.seq);
+      if (t.amount > k.best.amount || (t.amount === k.best.amount && t.seq > k.best.seq)) k.best = t;
+    }
+  }
+  let top: { amount: number; seq: number; best: Tally } | null = null;
+  for (const k of kinds.values()) if (!top || k.amount > top.amount || (k.amount === top.amount && k.seq > top.seq)) top = k;
+  return top ? top.best.cause : null;
+}
+
+/** 收夜那一页的评语：按吓跑的比例（REGISTER.verdict）。一个人都没来过时不写 */
+export function verdictOf(ran: number, came: number): string | null {
+  if (came <= 0) return null;
+  const V = R.verdict;
+  if (ran >= came) return V.all;
+  if (ran / came >= REGISTER.verdict.most) return V.most;
+  return ran > 0 ? V.few : V.none;
+}
+
+/** 怎么走的（逃跑之前让他恐惧值涨得最多的那一类来源） */
 export type Cause =
   | { kind: 'prop'; prop: ScareType; trap: boolean }
   | { kind: 'sawYou' }
   | { kind: 'coldBreath' }
   | { kind: 'scream' };
+
+/** 一个来源（物件按「哪件 + 是不是机关」分开）一共让他涨了多少、最近一次是第几笔（一样多时最近的算） */
+interface Tally { cause: Cause; amount: number; seq: number }
 
 interface Visitor {
   id: number;
@@ -84,10 +125,13 @@ interface Visitor {
   personality: Personality;
   /** 进门（spawn）的模拟时刻；没见过他的 spawn（登记簿建得比他进门晚）为 null，那一行不写几点进来 */
   cameAt: number | null;
-  /** 最近一次让他恐惧值上涨的事件；逃跑那一刻定下来 */
-  cause: Cause | null;
-  /** cause 是哪个模拟时刻记下的：同一步里 GHOST_SOURCE 的 startle 不覆盖现身、后颈一凉 */
-  causeAt: number;
+  /** 各个来源涨了多少（键见 causeKey）；逃跑、出门以后不再加 */
+  tally: Map<string, Tally>;
+  /**
+   * 同一步里紧跟着的 GHOST_SOURCE startle 是哪一笔：现身落下（sawYou，要加上）还是后颈一凉（neck，chill 里已经加过）；
+   * at 是那一步的模拟时刻，过了这一步就不算
+   */
+  ghostNext: { kind: 'sawYou' | 'neck'; at: number } | null;
   /** 开始逃跑的模拟时刻 */
   ranAt: number | null;
   /** 天亮自己走出前门的模拟时刻（exit 带 calm） */
@@ -122,8 +166,11 @@ export interface Register {
   onEvent(e: SimEvent, state: Readonly<WorldState>): void;
   /** 墙上多一个影子出现过 */
   noteOtherOne(): void;
-  /** 翻开这一页。now：此刻的模拟时间（还在屋里的人算到这一刻）；maxLines 默认 REGISTER.maxLines */
-  page(now: number, maxLines?: number): RegisterPage;
+  /**
+   * 翻开这一页。now：此刻的模拟时间（还在屋里的人算到这一刻）；maxLines 默认 REGISTER.maxLines；
+   * closing：收夜那一页（页脚第一句写评语 verdict），中途翻开的不写
+   */
+  page(now: number, maxLines?: number, opts?: { closing?: boolean }): RegisterPage;
   /** 新的一夜从模拟时间 t0 开始（Keep haunting）：换一页，名单、墙上多一个影子那一句清掉，钟点按 t − t0 算（第二夜也是 9 pm 起） */
   newNight(t0: number): void;
 }
@@ -149,24 +196,39 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
     if (!n) return null;
     const v: Visitor = {
       id, name: n.name, personality: n.personality, cameAt,
-      cause: null, causeAt: -1, ranAt: null, calmAt: null, sawYou: false, outfit: outfitOf(id),
+      tally: new Map(), ghostNext: null, ranAt: null, calmAt: null, sawYou: false, outfit: outfitOf(id),
     };
     byId.set(id, v);
     list.push(v);
     return v;
   };
 
-  /** 恐惧值涨了一下：记下是什么（逃跑、出门以后不再改） */
-  const raise = (id: number, cause: Cause | null, state: Readonly<WorldState>) => {
+  /** 第几笔（tally 的 seq）：一样多时最近涨过的那一类算 */
+  let seq = 0;
+
+  /** 恐惧值涨了 amount：记到这个来源上（逃跑、出门以后不再改） */
+  const raise = (id: number, cause: Cause | null, amount: number, state: Readonly<WorldState>) => {
     const v = ensure(id, state);
     if (!v || !cause || v.ranAt !== null || v.calmAt !== null) return;
-    v.cause = cause;
-    v.causeAt = state.time;
+    const key = causeKey(cause);
+    const t = v.tally.get(key);
+    seq += 1;
+    if (t) {
+      t.amount += amount;
+      t.seq = seq;
+    } else v.tally.set(key, { cause, amount, seq });
   };
 
   const propCause = (objectId: string, state: Readonly<WorldState>): Cause | null => {
     const o = state.objects.find((x) => x.id === objectId);
     return o ? { kind: 'prop', prop: o.type, trap: byTrap.get(objectId) ?? false } : null;
+  };
+
+  /** 引诱类的 heard 涨了多少：事件里有就用（模拟都给）；手写的没有就按物件的基础恐惧值 */
+  const heardAmount = (objectId: string, amount: number | undefined, state: Readonly<WorldState>): number => {
+    if (amount !== undefined) return amount;
+    const o = state.objects.find((x) => x.id === objectId);
+    return o ? SCARES[o.type].fear : 0;
   };
 
   /** 第二行：几点进来、怎么走的。第二个钟点和进门那个同在上午或下午时不再写 am / pm（"came in at 9:12 pm; ran from the wardrobe at 9:18"） */
@@ -177,7 +239,7 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
     if (came !== null) parts.push(R.cameIn(clock(came)));
     if (v.ranAt !== null) {
       const time = at(v.ranAt);
-      const c = v.cause;
+      const c = mainCause(v);
       if (c?.kind === 'prop') parts.push(c.trap ? R.trap(STRINGS.propName[c.prop], time) : R.ranFrom(STRINGS.propName[c.prop], time));
       else if (c?.kind === 'sawYou') parts.push(R.sawYou(time));
       else if (c?.kind === 'coldBreath') parts.push(R.coldBreath(time));
@@ -193,10 +255,13 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
     return { id: v.id, name: v.name, tag: STRINGS.personalityTag[v.personality], outfit: outfitName(v.outfit), story: story(v) };
   };
 
-  /** 吓跑人最多的那件物件：至少两个、至少占吓跑的一半、比别的物件都多（"did most of the work" 要说实话）；没有就是 null */
+  /** 吓跑人最多的那件物件（按每个人怎么走的，mainCause）：至少两个、至少占吓跑的一半、比别的物件都多（"did most of the work" 要说实话）；没有就是 null */
   const busiest = (ran: Visitor[]): ScareType | null => {
     const tally = new Map<ScareType, number>();
-    for (const v of ran) if (v.cause?.kind === 'prop') tally.set(v.cause.prop, (tally.get(v.cause.prop) ?? 0) + 1);
+    for (const v of ran) {
+      const c = mainCause(v);
+      if (c?.kind === 'prop') tally.set(c.prop, (tally.get(c.prop) ?? 0) + 1);
+    }
     const [first, second] = [...tally].sort((a, b) => b[1] - a[1]);
     if (!first || first[1] < 2 || first[1] * 2 < ran.length || (second && second[1] === first[1])) return null;
     return first[0];
@@ -220,15 +285,17 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
   };
 
   /**
-   * 页脚：有人吓跑时先写 cameRan（came 数所有进来的，ran 只数吓跑的），再按顺序挑能写的，连 cameRan 最多 REGISTER.footer 句：
+   * 页脚：收夜那一页（closing）先写一句评语（verdict，按吓跑的比例），不占下面的句数；
+   * 有人吓跑时写 cameRan（came 数所有进来的，ran 只数吓跑的），再按顺序挑能写的，连 cameRan 最多 REGISTER.footer 句：
    *   mostWork（一件物件干了大半的活）→ someSaw（有人见过你现身）→ neverRan（有人天亮自己走了）→ stayedLongest → noneSaw（兜底）。
    * 墙上多一个影子出现过时，最后单独一句 oneMore，也占一句
    */
-  const foot = (now: number) => {
+  const foot = (now: number, closing: boolean) => {
     const ran = list.filter((v) => v.ranAt !== null);
     const calm = list.filter((v) => v.calmAt !== null).length;
     const seen = list.filter((v) => v.sawYou).length;
     const out: string[] = [];
+    const verdict = closing ? verdictOf(ran.length, list.length) : null;
     if (ran.length > 0) out.push(F.cameRan(inWords(list.length, true), inWords(ran.length, true)));
     const picks: string[] = [];
     const prop = busiest(ran);
@@ -239,7 +306,7 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
     if (stay) picks.push(F.stayedLongest(stay.name, clock(stay.until)));
     if (list.length > 0 && seen === 0) picks.push(F.noneSaw);
     out.push(...picks.slice(0, Math.max(0, REGISTER.footer - out.length - (otherOne ? 1 : 0))));
-    return { footer: out, postscript: otherOne ? F.oneMore : '' };
+    return { footer: verdict ? [verdict, ...out] : out, postscript: otherOne ? F.oneMore : '' };
   };
 
   return {
@@ -257,28 +324,35 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
           sprung = null;
           break;
         case 'heard':
-          raise(e.npc, propCause(e.object, state), state);
+          raise(e.npc, propCause(e.object, state), heardAmount(e.object, e.amount, state), state);
           break;
         case 'startle': {
-          if (e.object === null) raise(e.npc, { kind: 'scream' }, state);
-          else if (e.object !== GHOST_SOURCE) raise(e.npc, propCause(e.object, state), state);
+          if (e.object === null) raise(e.npc, { kind: 'scream' }, e.amount, state);
+          else if (e.object !== GHOST_SOURCE) raise(e.npc, propCause(e.object, state), e.amount, state);
           else {
-            // 现身落下、后颈一凉：同一步前面那个事件已经记过（同一笔恐惧值）。前面没有（手写的事件）就按后颈一凉算
+            // 现身落下：这一笔就是现身吓的（drop 事件只说吓到了谁，涨多少在这里）。后颈一凉：chill 里已经加过，不另加。
+            // 同一步前面都没有（手写的事件）就按后颈一凉算
             const v = ensure(e.npc, state);
-            const marked = v?.causeAt === t && (v.cause?.kind === 'sawYou' || v.cause?.kind === 'coldBreath');
-            if (!marked) raise(e.npc, { kind: 'coldBreath' }, state);
+            const next = v?.ghostNext?.at === t ? v.ghostNext : null;
+            if (v) v.ghostNext = null;
+            if (next?.kind === 'sawYou') raise(e.npc, { kind: 'sawYou' }, e.amount, state);
+            else if (!next) raise(e.npc, { kind: 'coldBreath' }, e.amount, state);
           }
           break;
         }
-        case 'chill':
-          raise(e.npc, { kind: 'coldBreath' }, state);
+        case 'chill': {
+          raise(e.npc, { kind: 'coldBreath' }, e.amount, state);
+          const v = e.neck ? byId.get(e.npc) : undefined;
+          if (v) v.ghostNext = { kind: 'neck', at: t };
           break;
+        }
         case 'manifest':
           if (e.phase !== 'drop') break;
           for (const id of e.scared) {
             const v = ensure(id, state);
-            if (v) v.sawYou = true;
-            raise(id, { kind: 'sawYou' }, state);
+            if (!v) continue;
+            v.sawYou = true;
+            v.ghostNext = { kind: 'sawYou', at: t };
           }
           break;
         case 'flee': {
@@ -306,10 +380,10 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
       otherOne = false;
       origin = t0;
     },
-    page(now, maxLines = REGISTER.maxLines) {
+    page(now, maxLines = REGISTER.maxLines, opts = {}) {
       const shown = list.length > maxLines + 1 ? list.slice(0, maxLines) : list;
       const hidden = list.length - shown.length;
-      return { lines: shown.map(line), others: hidden > 0 ? R.andOthers(inWords(hidden)) : '', ...foot(now) };
+      return { lines: shown.map(line), others: hidden > 0 ? R.andOthers(inWords(hidden)) : '', ...foot(now, opts.closing === true) };
     },
   };
 }

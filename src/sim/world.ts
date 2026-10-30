@@ -7,12 +7,16 @@
 // 「一夜」（2026-10-30）三个开关，都是两次 step 之间调的，默认不调，不调就和原来逐步相同：
 // close() 收夜（不再进人，屋里没人就最后再放一位）、reopen() 又开门（照常补人）、dawn() 天亮（先收夜但不补那一位，屋里的人自己走出去）。
 // 开局的间隔另给在 WorldOptions.openingGaps。
+// 用户试玩以后（2026-10-30，路 GP）又有三个开关，也是只有正式游戏给（config/visitors.ts 的 nightWorld）：屋里最多几人（target）、
+// 结伴进门（pairs，见 spawner.ts）、收夜以后更容易被吓（late：close / dawn 以后 NpcCtx 带 gain、decay，reopen 撤掉）。
+// 同一次还改了两条规则（对所有人，机器人也一样）：现身蓄力只让「手电照着那里的」和「已经紧张（FEAR.nervous）、看得见那里的」人转过来（manifest.ts 的
+// sensesManifest），吓多少按恐惧值加成；被引诱的人查看时把四周扫一圈、在惊吓物件上停一下（npc.ts 的 SCAN）
 import { cellOf, FRONT_DOOR } from '../config/house';
 import { FEAR, GHOST, HIT_STOP, MANIFEST, TRAP, VISION } from '../config/visitors';
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
-import { createManifest, idleManifest, manifestFear } from './manifest';
-import { beginLeave, canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhostWall, notice, retreat, separate, startle, startleWith, updateNpc, walkTo } from './npc';
+import { createManifest, idleManifest, manifestFear, sensesManifest } from './manifest';
+import { beginLeave, boost, canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhostWall, notice, retreat, separate, startle, startleWith, updateNpc, walkTo } from './npc';
 import type { Npc, NpcCtx } from './npc';
 import { canHear, canSee } from './perception';
 import { createRng } from './rng';
@@ -53,7 +57,7 @@ export function createWorld(opts: WorldOptions): World {
   const manifestScared = new Set<number>();
   /** 和 state.npcs 一一对应（同顺序），带内部状态 */
   const npcs: Npc[] = [];
-  const spawner = opts.autoSpawn === false ? null : new Spawner(rng, opts.openingGaps);
+  const spawner = opts.autoSpawn === false ? null : new Spawner(rng, opts.openingGaps, { target: opts.target, pairs: opts.pairs });
   let nextId = 1;
   /** 收夜了（close 或 dawn 调过、还没 reopen）：close 靠它不重复放「最后一位」 */
   let closed = false;
@@ -95,7 +99,15 @@ export function createWorld(opts: WorldOptions): World {
     crowd: npcs,
     ghost: null,
     avoid: state.avoid,
+    props: state.objects,
   };
+
+  /** 收夜以后更容易被吓（WorldOptions.late）：close / dawn 时打开，reopen 时撤掉；不给 late 就什么都不做 */
+  function setLate(on: boolean) {
+    if (!opts.late) return;
+    ctx.gain = on ? opts.late.gain : undefined;
+    ctx.decay = on ? opts.late.decay : undefined;
+  }
 
   const inHouse = () => npcs.reduce((c, n) => c + (canBeScared(n) ? 1 : 0), 0);
 
@@ -151,14 +163,14 @@ export function createWorld(opts: WorldOptions): World {
     return npc.s;
   }
 
-  /** 尖叫传染：尖叫声 FEAR.screamRadius 内听得见的人恐惧 +contagion × 性格倍率，转入警觉走向尖叫者（不僵住） */
+  /** 尖叫传染：尖叫声 FEAR.screamRadius 内听得见的人恐惧 +contagion × 性格倍率（收夜以后再乘 boost），转入警觉走向尖叫者（不僵住） */
   function flushScreams() {
     for (let q = 0; q < screamQueue.length; q++) {
       const src = screamQueue[q];
       for (const n of npcs) {
         if (n === src || !canBeScared(n)) continue;
         if (!canHear(grid, n.s.pos, src.s.pos, FEAR.screamRadius)) continue;
-        const amount = FEAR.contagion * n.mult;
+        const amount = boost(ctx, FEAR.contagion * n.mult);
         hear(n, ctx, amount, src.s.pos, { type: 'startle', npc: n.s.id, object: null, amount, scream: false });
       }
     }
@@ -194,8 +206,9 @@ export function createWorld(opts: WorldOptions): World {
 
   /**
    * 主动现身的这一步（设计文档 3.2）：
-   * - windup：发事件；MANIFEST.noticeRadius 米内的人察觉（kind manifest，隔墙也算：附近的灯在闪），盯着那里直到落下
-   * - drop：看得见那里（光锥 + 视线 + MANIFEST.range）的人被吓到：manifestFear × 性格倍率 × 习惯化（按 'manifest' 这一种算），
+   * - windup：发事件；察觉的人（manifest.ts 的 sensesManifest：手电此刻照着那里的，或者已经紧张、MANIFEST.noticeRadius 米内有视线的）
+   *   察觉（kind manifest），盯着那里直到落下。2026-10-30 起隔着墙的、不紧张又没照着那里的人不再转过来（critic F-1，路 GP）
+   * - drop：看得见那里（光锥 + 视线 + MANIFEST.range）的人被吓到：manifestFear（含恐惧值加成）× 性格倍率 × 习惯化（按 'manifest' 这一种算），
    *   照常受惊（object = GHOST_SOURCE），僵住结束后后退到离那里至少 MANIFEST.backOff 米；
    *   有人被吓到就加一个绕开圈（MANIFEST.avoidRadius 米、MANIFEST.avoidTime 秒），只有这一次被吓到的人绕它。
    *   圈先放、再结算受惊：恐惧值本来就高、当场吓跑的人，第一条逃跑路线是在 startleWith 里算的，圈要已经在，路线才绕得开
@@ -209,7 +222,7 @@ export function createWorld(opts: WorldOptions): World {
       manifestScared.clear();
       events.push({ type: 'manifest', phase: 'windup', pos: { ...at }, scared: [] });
       for (const n of npcs) {
-        if (!canBeScared(n) || Math.hypot(n.s.pos.x - at.x, n.s.pos.z - at.z) > MANIFEST.noticeRadius) continue;
+        if (!canBeScared(n) || !sensesManifest(grid, n.s, at)) continue;
         // 盯到落下的那一步还在察觉（多留一步），落下时看得见的人这时被吓到，那一拍跟着作废
         if (notice(n, ctx, 'manifest', at)) n.s.notice!.hold = Math.max(n.s.notice!.hold, MANIFEST.windup + SIM_DT);
       }
@@ -223,7 +236,7 @@ export function createWorld(opts: WorldOptions): World {
       }
       seen.forEach((n, k) => {
         manifestScared.add(n.s.id);
-        startleWith(n, ctx, GHOST_SOURCE, exposure(n, 'manifest', base[k], state.time), at);
+        startleWith(n, ctx, GHOST_SOURCE, boost(ctx, exposure(n, 'manifest', base[k], state.time)), at);
         retreat(n, ctx, at, MANIFEST.backOff);
       });
     } else if (phase === 'end') {
@@ -256,8 +269,8 @@ export function createWorld(opts: WorldOptions): World {
       o.pendingLure = false;
       for (const n of npcs) {
         if (!canBeScared(n) || !canHear(grid, n.s.pos, o.state.pos, o.spec.range)) continue;
-        const amount = exposure(n, o.state.type, o.spec.fear * o.fearMult, state.time);
-        hear(n, ctx, amount, o.state.pos, { type: 'heard', npc: n.s.id, object: o.state.id });
+        const amount = boost(ctx, exposure(n, o.state.type, o.spec.fear * o.fearMult, state.time));
+        hear(n, ctx, amount, o.state.pos, { type: 'heard', npc: n.s.id, object: o.state.id, amount });
       }
     }
     // 惊吓：蓄势期间（触发到 hitAt），看见它的人被定住盯着它（附身那一刻眼睛亮着的人在第一步就被定住，
@@ -378,6 +391,7 @@ export function createWorld(opts: WorldOptions): World {
       // 已经收夜了（close、dawn 调过，没 reopen 过）：什么都不做，不会又放一位
       if (closed) return;
       closed = true;
+      setLate(true);
       // 之后不再安排新访客，已经排上、还没进门的那一次取消（不管有没有自动生成）
       spawner?.close();
       // 调的那一刻屋里没人（都走了、都在逃跑）：最后再放一位进来，事件带 last；屋里有人就不放。屋里的人照常闹，没有时限。
@@ -386,14 +400,17 @@ export function createWorld(opts: WorldOptions): World {
     },
 
     reopen() {
-      // 没收夜时什么都不做（Spawner.reopen 也不会打乱已经排好的）；收夜后照常补人，和开局之后一样按 SPAWN.delay 一个一个来
+      // 没收夜时什么都不做（Spawner.reopen 也不会打乱已经排好的）；收夜后照常补人，和开局之后一样按 SPAWN.delay 一个一个来。
+      // 新的一夜从这一刻算起（结伴进门的「最后一批」按它算）；收夜以后更容易被吓的那一点撤掉
+      if (closed) setLate(false);
       closed = false;
-      spawner?.reopen();
+      spawner?.reopen(state.time);
     },
 
     dawn() {
       // 天亮 = 先收夜（不再进人、已排上的取消），但屋里没人也不补最后一位；之后 reopen() 照常补人，新进来的人照常闲逛
       closed = true;
+      setLate(true);
       spawner?.close();
       // 屋里不在逃跑的人（进门的、闲逛的、警觉的、受惊的）都放下手上的事，自己走出前门。逃跑的照旧；已经在走的不重来
       ctx.now = state.time; // 两次 step 之间调：寻路认的是现在，不是上一步开始时

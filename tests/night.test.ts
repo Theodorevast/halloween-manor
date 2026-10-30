@@ -1,5 +1,7 @@
 // 「一夜」的模拟（2026-10-30，路 NS）：开局间隔（WorldOptions.openingGaps）、收夜（World.close / reopen）、最后一位（spawn 事件的 last）、
 // 天亮（World.dawn：屋里的人变 leaving，自己走出前门，exit 带 calm）、一夜里不重名（pickName 避开最近进来的 RECENT_NAMES 个）。
+// 用户试玩以后（2026-10-30，路 GP）又加了三个开关（target、pairs、late），也只有正式游戏给（config/visitors.ts 的 nightWorld）：
+// 屋里最多几人、结伴进门（收夜前最后一批结伴）、收夜以后更容易被吓；不给时一样逐步对比原来的写法。
 // 这些开关默认关着：不给 openingGaps、不调 close / dawn 时，模拟和原来逐步相同——Spawner 对着原来算法的一份拷贝逐步对比，
 // 整个世界对着等价的另一种写法逐步对比；平衡数字由 tests/balance.test.ts 管（它不给这些开关，数字一个都不能变）
 import { describe, expect, test } from 'vitest';
@@ -10,7 +12,8 @@ import { pickName, pickPersonality, RECENT_NAMES, Spawner } from '../src/sim/spa
 import { Grid } from '../src/sim/grid';
 import { cellCenter, FRONT_DOOR, PROPS, propCenter, ROOMS } from '../src/config/house';
 import { NIGHT } from '../src/config/night';
-import { FEAR, NAMES, SPAWN, SPEED } from '../src/config/visitors';
+import { FEAR, NAMES, NIGHT_VISITS, nightWorld, PERSONALITIES, SPAWN, SPEED } from '../src/config/visitors';
+import { SCARES } from '../src/config/scares';
 import type { NpcState, SimEvent, Vec2, World, WorldOptions } from '../src/sim/types';
 
 const DT = 1 / 60;
@@ -117,16 +120,20 @@ describe('开局间隔（openingGaps）', () => {
     [SPAWN.first + 25, SPAWN.first + 50].forEach((at, k) => expect(t[k]).toBeCloseTo(at, 1));
   });
 
-  test('正式游戏的开局（NIGHT.openingGaps）：第一个人独自待满第一个间隔，之后按各自的间隔进第二、第三个', () => {
-    const [g0, g1] = NIGHT.openingGaps;
-    const w = createWorld({ seed: 9, openingGaps: NIGHT.openingGaps });
-    const ev = runTo(w, SPAWN.first + g0 - 0.2);
+  test('正式游戏的开局（NIGHT.openingGaps + nightWorld，2026-10-30 路 GP：20 → 12 秒、最多 4 人）：第一个人独自待满第一个间隔，之后按各自的间隔进到 4 个', () => {
+    const gaps = NIGHT.openingGaps;
+    expect(gaps).toEqual([12, 12, 12]);
+    const opts = { seed: 9, openingGaps: gaps, ...nightWorld(NIGHT.length) };
+    expect(opts.target).toBe(4);
+    const w = createWorld(opts);
+    const ev = runTo(w, SPAWN.first + gaps[0] - 0.2);
     expect(w.state.npcs.length).toBe(1);
-    ev.push(...runTo(w, SPAWN.first + g0 + g1 + 1));
-    expect(spawnTimes(ev).length).toBe(3);
-    [SPAWN.first, SPAWN.first + g0, SPAWN.first + g0 + g1].forEach((t, k) => expect(spawnTimes(ev)[k]).toBeCloseTo(t, 1));
-    // 第二个人比第一个人晚到的这一段，远远长过原来的 SPAWN.stagger
-    expect(g0).toBeGreaterThan(SPAWN.stagger);
+    ev.push(...runTo(w, SPAWN.first + gaps[0] + gaps[1] + gaps[2] + 1));
+    const want = [0, 1, 2, 3].map((k) => SPAWN.first + gaps.slice(0, k).reduce((a, b) => a + b, 0));
+    expect(spawnTimes(ev).length).toBe(4);
+    want.forEach((t, k) => expect(spawnTimes(ev)[k]).toBeCloseTo(t, 1));
+    // 第二个人比第一个人晚到的这一段，仍然长过原来的 SPAWN.stagger
+    expect(gaps[0]).toBeGreaterThan(SPAWN.stagger);
   });
 });
 
@@ -196,7 +203,8 @@ describe('不给 openingGaps、不调 close / dawn 时和原来一模一样', ()
   test('Spawner 对着原来算法的拷贝：逐步给出一样的结果，抽随机数的次数、顺序也一样', () => {
     for (const seed of [1, 2, 3, 4, 5]) {
       const rngA = createRng(seed), rngB = createRng(seed);
-      const now = new Spawner(rngA), old = new LegacySpawner(rngB);
+      // 不给开关、给和默认一样的 target 都和原来一样（结伴、最后一批都不给）
+      const now = seed % 2 ? new Spawner(rngA) : new Spawner(rngA, [], { target: SPAWN.target }), old = new LegacySpawner(rngB);
       const bot = createRng(seed + 1000);
       let inHouse = 0, t = 0, mismatches = 0, spawned = 0;
       for (let k = 0; k < 60 * 900; k++) {
@@ -223,6 +231,23 @@ describe('不给 openingGaps、不调 close / dawn 时和原来一模一样', ()
       expect(base.raw.length).toBeGreaterThan(100); // 脚本确实把各种事件都弄出来了
       for (const openingGaps of [undefined, [], [SPAWN.stagger, SPAWN.stagger]]) {
         const other = scripted({ seed, openingGaps }, 240);
+        expect(firstDiff(other.events, base.events)).toBeNull();
+        expect(firstDiff(other.state, base.state)).toBeNull();
+      }
+    }
+  });
+
+  test('路 GP 的三个开关（target、pairs、late）：不给、给 undefined、target 给 SPAWN.target、给了 late 但不收夜，事件和最后的状态逐个相同', () => {
+    for (const seed of [1, 2, 3]) {
+      const base = scripted({ seed }, 240);
+      const variants: WorldOptions[] = [
+        { seed, target: undefined, pairs: undefined, late: undefined },
+        { seed, target: SPAWN.target },
+        // late 只在收夜以后生效：脚本不收夜，就和不给一样
+        { seed, late: { gain: 2, decay: 0.1 } },
+      ];
+      for (const opts of variants) {
+        const other = scripted(opts, 240);
         expect(firstDiff(other.events, base.events)).toBeNull();
         expect(firstDiff(other.state, base.state)).toBeNull();
       }
@@ -993,6 +1018,249 @@ describe('一夜里不重名', () => {
       }
     }
     expect(again).toBe(20);
+  });
+});
+
+// ——————————————————————————————————————————————————————————————————
+// 正式游戏的一夜（2026-10-30 用户试玩以后，路 GP）：屋里最多几人、结伴进门、收夜前最后一批结伴、收夜以后更容易被吓
+// ——————————————————————————————————————————————————————————————————
+
+/**
+ * 只跑 Spawner（不跑整个世界）：每步之前屋里的人平均每 leaveEvery 秒走一个，返回每次进门的时刻、那一刻屋里有几人（不算这一位）；
+ * reopenAt：到这个时刻先 close 再 reopen(t)（新的一夜）
+ */
+function spawnerRun(seed: number, opts: ConstructorParameters<typeof Spawner>[2], seconds: number, leaveEvery = 8, reopenAt?: number) {
+  const sp = new Spawner(createRng(seed), [], opts);
+  const bot = createRng(seed + 500);
+  const arrivals: { t: number; inHouse: number }[] = [];
+  let inHouse = 0, t = 0, reopened = false;
+  for (let k = 0; k < Math.round(seconds / DT); k++) {
+    t += DT;
+    if (reopenAt !== undefined && !reopened && t >= reopenAt) {
+      sp.close();
+      sp.reopen(t);
+      reopened = true;
+    }
+    if (sp.update(t, inHouse)) {
+      arrivals.push({ t, inHouse });
+      inHouse++;
+    }
+    if (inHouse > 0 && bot.next() < DT / leaveEvery) inHouse--;
+  }
+  return arrivals;
+}
+
+/** 一串进门里哪些是结伴的第二个人：和前一个正好隔 gap 秒（容差一步） */
+const companions = (arrivals: { t: number }[], gap: number) =>
+  arrivals.map((a, k) => k > 0 && Math.abs(a.t - arrivals[k - 1].t - gap) < DT * 1.5);
+
+describe('屋里最多几人（WorldOptions.target，正式游戏 4）', () => {
+  test('给 4：开局按 openingGaps 进 4 个；之后屋里（不算逃跑的）一直不超过 4，有人被吓跑就照常补', () => {
+    const w = createWorld({ seed: 31, openingGaps: [12, 12, 12], target: 4 });
+    let most = 0;
+    const ev = runTo(w, 300, () => {
+      // 每 20 秒吓跑一个
+      if (Math.round(w.state.time * 60) % 1200 === 0) {
+        const n = w.state.npcs.find((x) => x.mode !== 'fleeing' && x.mode !== 'entering');
+        if (n) scareAway(n);
+      }
+      most = Math.max(most, w.state.npcs.filter((n) => n.mode !== 'fleeing').length);
+    });
+    expect(spawnTimes(ev).slice(0, 4).map((t) => Math.round(t))).toEqual([2, 14, 26, 38]);
+    expect(most).toBe(4);
+    expect(ofType(events(ev), 'exit').length).toBeGreaterThan(8);
+    expect(spawnTimes(ev).length).toBeGreaterThan(12); // 走了照常补
+  });
+});
+
+describe('结伴进门（WorldOptions.pairs）', () => {
+  const PAIRS = { chance: 1 / 3, gap: 2 };
+
+  test('开局以后，轮到有人进门、屋里容得下两个时约 chance 的机会结伴：第二个人隔 gap 秒跟进；容不下两个时不结伴；开局不结伴', () => {
+    let eligible = 0, paired = 0, tight = 0;
+    for (let seed = 1; seed <= 40; seed++) {
+      const arr = spawnerRun(seed, { target: 4, pairs: PAIRS }, 600);
+      const comp = companions(arr, PAIRS.gap);
+      for (let k = 0; k < arr.length; k++) {
+        if (comp[k]) {
+          // 第二个人：前一个进门时屋里容得下两个
+          expect(arr[k - 1].inHouse).toBeLessThanOrEqual(4 - 2);
+          continue;
+        }
+        if (k < 4 && arr[k].t < SPAWN.first + 3 * SPAWN.stagger + 0.1) continue; // 开局
+        if (arr[k].inHouse <= 2) {
+          eligible++;
+          if (comp[k + 1]) paired++;
+        } else {
+          tight++;
+          expect(comp[k + 1] ?? false).toBe(false);
+        }
+      }
+      // 开局（SPAWN.first 起每 SPAWN.stagger 秒一个）里没有结伴的
+      expect(comp.slice(0, 4).some(Boolean)).toBe(false);
+    }
+    expect(eligible).toBeGreaterThan(300);
+    expect(tight).toBeGreaterThan(50);
+    expect(paired / eligible).toBeGreaterThan(PAIRS.chance - 0.07);
+    expect(paired / eligible).toBeLessThan(PAIRS.chance + 0.07);
+  });
+
+  test('世界里：结伴的两个人隔 gap 秒进门，屋里（不算逃跑的）一直不超过 target', () => {
+    let pairs = 0;
+    for (const seed of [41, 42, 43, 44]) {
+      const w = createWorld({ seed, openingGaps: [12, 12, 12], target: 4, pairs: PAIRS });
+      let most = 0;
+      const ev = runTo(w, 400, () => {
+        if (Math.round(w.state.time * 60) % 600 === 0) {
+          const n = w.state.npcs.find((x) => x.mode !== 'fleeing' && x.mode !== 'entering');
+          if (n) scareAway(n);
+        }
+        most = Math.max(most, w.state.npcs.filter((n) => n.mode !== 'fleeing').length);
+      });
+      expect(most).toBeLessThanOrEqual(4);
+      const t = spawnTimes(ev);
+      pairs += t.filter((x, k) => k > 0 && Math.abs(x - t[k - 1] - PAIRS.gap) < 0.05).length;
+    }
+    expect(pairs).toBeGreaterThan(3);
+  });
+
+  test('收夜前最后一批（pairs.final）：这一夜过了 final 秒以后进门的都结伴、而且等屋里容得下两个才来；之前按 chance（这里给 0：一个都不结伴）', () => {
+    const FINAL = 150;
+    let late = 0;
+    for (let seed = 1; seed <= 20; seed++) {
+      const arr = spawnerRun(seed, { target: 4, pairs: { chance: 0, gap: 2, final: FINAL } }, 300);
+      const comp = companions(arr, 2);
+      for (let k = 0; k < arr.length; k++) {
+        if (comp[k]) continue;
+        if (arr[k].t < FINAL - 1e-6) {
+          expect(comp[k + 1] ?? false).toBe(false);
+          continue;
+        }
+        if (arr[k].t > 300 - 2 - 0.1) continue; // 跑完了，第二个人还没到点
+        late++;
+        expect(arr[k].inHouse).toBeLessThanOrEqual(2);
+        expect(comp[k + 1]).toBe(true);
+      }
+    }
+    expect(late).toBeGreaterThan(10);
+  });
+
+  test('reopen(at) 是新的一夜：最后一批从 at 起再过 final 秒才算，之前照常（chance 0 时一个都不结伴）', () => {
+    const FINAL = 150;
+    for (let seed = 1; seed <= 10; seed++) {
+      const arr = spawnerRun(seed, { target: 4, pairs: { chance: 0, gap: 2, final: FINAL } }, 500, 8, 200);
+      const comp = companions(arr, 2);
+      for (let k = 0; k < arr.length; k++) {
+        if (comp[k]) continue;
+        // 收夜（200 秒）前 2 秒内进门的：第二个人跟着收夜作废；跑完前 2 秒内进门的：还没到点
+        if ((arr[k].t > 198 - 0.1 && arr[k].t < 200) || arr[k].t > 500 - 2 - 0.1) continue;
+        const inFinal = (arr[k].t >= FINAL && arr[k].t < 200) || arr[k].t >= 200 + FINAL - 1e-6;
+        expect(comp[k + 1] ?? false).toBe(inFinal);
+      }
+      expect(arr.some((a) => a.t > 200 && a.t < 200 + FINAL)).toBe(true);
+    }
+  });
+
+  test('收夜（close）以后结伴的第二个人也不来了', () => {
+    const sp = new Spawner(createRng(5), [], { target: 4, pairs: { chance: 1, gap: 2 } });
+    let t = 0, inHouse = 0;
+    // 开局进满 4 个，走两个，等到下一次进门（chance 1：一定结伴）
+    for (let k = 0; k < 60 * 120 && inHouse < 4; k++) if (sp.update((t += DT), inHouse)) inHouse++;
+    expect(inHouse).toBe(4);
+    inHouse = 2;
+    let came = false;
+    for (let k = 0; k < 60 * 30 && !came; k++) came = sp.update((t += DT), inHouse);
+    expect(came).toBe(true);
+    inHouse = 3;
+    sp.close();
+    for (let k = 0; k < 60 * 30; k++) expect(sp.update((t += DT), inHouse)).toBe(false);
+  });
+});
+
+describe('nightWorld：正式游戏 createWorld 的开关', () => {
+  test('屋里最多 4 人、三分之一结伴、第二个人隔 2 秒；收夜前 finalPair 秒起最后一批结伴（?night 调短了也不早于开局）；收夜以后 late', () => {
+    const o = nightWorld(NIGHT.length);
+    expect(o.target).toBe(4);
+    expect(o.pairs).toEqual({ chance: 1 / 3, gap: 2, final: NIGHT.length - NIGHT_VISITS.finalPair });
+    expect(o.late).toEqual(NIGHT_VISITS.late);
+    expect(NIGHT_VISITS.late.gain).toBeGreaterThan(1);
+    expect(NIGHT_VISITS.late.decay).toBeLessThan(1);
+    expect(nightWorld(30).pairs!.final).toBe(0);
+    // 名字池够大：最近要避开的 + 屋里最多的人数
+    expect(NAMES.length).toBeGreaterThan(WINDOW + o.target!);
+  });
+});
+
+describe('收夜以后更容易被吓（WorldOptions.late）', () => {
+  const LATE = { gain: 1.25, decay: 0.5 };
+  /** 研究室里正对肖像站着的人；close：先收夜（屋里有人，不放最后一位） */
+  function setup(late: boolean, close: boolean) {
+    const w = createWorld({ seed: 61, autoSpawn: false, ...(late ? { late: LATE } : {}) });
+    const n = w.spawn({ pos: STUDY, personality: 'average', lookDir: bearing(STUDY, prop('portrait')) });
+    if (close) w.close();
+    return { w, n };
+  }
+  /** 附身肖像，等他被吓到；返回这一下涨了多少 */
+  function portrait(w: World, n: NpcState): number {
+    n.lookDir = bearing(n.pos, prop('portrait'));
+    expect(w.trigger('portrait')).toBe(true);
+    for (let k = 0; k < 120; k++) {
+      n.lookDir = bearing(n.pos, prop('portrait'));
+      const hit = ofType(w.step(DT), 'startle').find((e) => e.npc === n.id && e.object === 'portrait');
+      if (hit) return hit.amount;
+    }
+    throw new Error('没吓到');
+  }
+
+  test('收夜以后：同一下（肖像）涨 gain 倍，回落的速度 × decay；收夜之前、不给 late 时都和平常一样', () => {
+    const base = SCARES.portrait.fear * PERSONALITIES.average.fearMult;
+    const before = setup(true, false);
+    expect(portrait(before.w, before.n)).toBeCloseTo(base, 9);
+    const plain = setup(false, true);
+    expect(portrait(plain.w, plain.n)).toBeCloseTo(base, 9);
+    const late = setup(true, true);
+    expect(portrait(late.w, late.n)).toBeCloseTo(base * LATE.gain, 9);
+    // 回落：把两人都摆到 50，隔够 FEAR.decayDelay 以后再走 6 秒
+    for (const x of [plain, late]) {
+      x.n.fear = 50;
+      runFor(x.w, FEAR.decayDelay + 0.5);
+    }
+    const p0 = plain.n.fear, l0 = late.n.fear;
+    runFor(plain.w, 6);
+    runFor(late.w, 6);
+    expect(p0 - plain.n.fear).toBeCloseTo(FEAR.decayRate * 6, 1);
+    expect(l0 - late.n.fear).toBeCloseTo(FEAR.decayRate * LATE.decay * 6, 1);
+  });
+
+  test('引诱声、尖叫传染也一样涨 gain 倍；天亮（dawn）也算收夜；reopen 以后恢复原样', () => {
+    const door = () => {
+      const w = createWorld({ seed: 62, autoSpawn: false, late: LATE });
+      const a = w.spawn({ pos: { x: 13.25, z: 10.75 }, personality: 'timid' });
+      return { w, a };
+    };
+    const heardAmount = (w: World) => ofType(runFor(w, 0.1).map((x) => x.e), 'heard')[0].amount!;
+    const base = SCARES.door.fear * PERSONALITIES.timid.fearMult;
+    const day = door();
+    day.w.trigger('kitchen-door');
+    expect(heardAmount(day.w)).toBeCloseTo(base, 9);
+    const dusk = door();
+    dusk.w.dawn();
+    dusk.w.trigger('kitchen-door');
+    expect(heardAmount(dusk.w)).toBeCloseTo(base * LATE.gain, 9);
+    // 收夜以后 reopen：恢复原样（再等一个冷却，习惯化恢复到一样的程度再比）
+    const again = door();
+    again.w.close();
+    again.w.reopen();
+    again.w.trigger('kitchen-door');
+    expect(heardAmount(again.w)).toBeCloseTo(base, 9);
+    // 尖叫传染：书房里肖像吓到 a，b 听见尖叫
+    const w = createWorld({ seed: 63, autoSpawn: false, late: LATE });
+    w.spawn({ pos: STUDY, personality: 'average', lookDir: bearing(STUDY, prop('portrait')) });
+    const b = w.spawn({ pos: { x: 4.25, z: 2.25 }, personality: 'average', lookDir: 0 });
+    w.close();
+    w.trigger('portrait');
+    const ev = runFor(w, 1.5).map((x) => x.e);
+    expect(ofType(ev, 'startle').find((e) => e.npc === b.id && e.object === null)!.amount).toBeCloseTo(FEAR.contagion * LATE.gain, 9);
   });
 });
 

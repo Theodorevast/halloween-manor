@@ -4,14 +4,16 @@
 // - 惊吓类物件：就是 seenBy（world.ts 每步按结算的同一条规则算：光锥 + 视线 + min(range, VISION.range) + 正面）
 // - 引诱类：触发那一步结算，能被吓（canBeScared）、听得见（canHear，隔墙打折）的人
 // - 现身：鬼魂所在的格子挡视线（墙、窗）时模拟不让现身，空；否则落下时看得见那里（canSee，MANIFEST.range）的人，
-//   加上蓄力时会转过来的人：MANIFEST.noticeRadius 米内、有视线（蓄力察觉不看视线、隔墙也转头，但隔着墙落下时看不见）、
-//   此刻能察觉（npc.ts 的 canNotice，notice 自己也用它：受惊僵着的人手电还定在吓到他的东西上；天亮往外走的人只顾着出门）。
+//   加上蓄力时会转过来的人：manifest.ts 的 sensesManifest（2026-10-30 路 GP：手电照着那里的，或者已经紧张——恐惧值 ≥ FEAR.nervous——
+//   MANIFEST.noticeRadius 米内、有视线的；隔着墙的、不紧张又没照着那里的人不转过来），而且此刻能察觉（npc.ts 的 canNotice，
+//   notice 自己也用它：受惊僵着的人手电还定在吓到他的东西上；天亮往外走的人只顾着出门）。
 //   蓄力 0.6 秒里手电以 BEHAVIOR.turnRate × NOTICE.torchTurn = 10 弧度/秒转过来，转得到
 // 「能不能被吓」「能不能察觉」都直接用 npc.ts 的 canBeScared、canNotice（只看 NpcState），不另写一份
 import { cellOf } from '../config/house';
 import { SCARES } from '../config/scares';
 import { MANIFEST } from '../config/visitors';
 import type { Grid } from './grid';
+import { sensesManifest } from './manifest';
 import { canBeScared, canNotice } from './npc';
 import { canHear, canSee } from './perception';
 import type { NpcState, Vec2, WorldState } from './types';
@@ -37,12 +39,10 @@ export function reachOf(grid: Grid, s: Readonly<WorldState>, act: ReachAct): num
   }
   const at = act.at;
   if (grid.isOpaque(...cellOf(at.x, at.z))) return [];
-  const near = Math.min(MANIFEST.noticeRadius, MANIFEST.range);
   const out: number[] = [];
   for (const n of s.npcs) {
     if (!scareable(n)) continue;
-    const d = Math.hypot(n.pos.x - at.x, n.pos.z - at.z);
-    const turns = d <= near && turnsToward(n) && grid.lineOfSight(n.pos, at);
+    const turns = turnsToward(n) && sensesManifest(grid, n, at);
     if (turns || canSee(grid, n, at, MANIFEST.range)) out.push(n.id);
   }
   return out;

@@ -1,13 +1,17 @@
 // 数值平衡的回归测试：机器人（见 tests/bots.ts）在固定种子下玩，断言体验目标。
 // 第三人称改版加了鬼魂机器人（一直贴在最近的访客身后）：「鬼魂 1–3」锁定鬼魂贴近有帮助、但不能一边倒。
 // 2026-10-28 加了会现身的机器人（到人面前现身，冷却好了就来）：「现身」一条锁定只靠现身也能吓跑 brave，但比附身加现身慢。
+// 2026-10-30 用户试玩以后（路 GP，critic F-1「站在人旁边狂按 F 是唯一最优解」）改了现身和引诱的规则，加了「现身是收尾」一条：
+// 五种打法（只按现身：狂按 / 贴身狂按 / 照着光按；先引诱再附身：不现身 / 现身收尾）在默认世界和正式游戏的一夜里对照，
+// 先引诱再附身吓跑的人不能比只按现身的少。改规则前后的数字见 .superpowers/sdd/2026-10-30-player-feedback/lane-GP-report.md
 // 改 config 里的恐惧值、回落、习惯化、性格倍率之后跑这个文件；想看每局的明细：BALANCE_REPORT=1 ./node_modules/.bin/vitest run tests/balance.test.ts
 import { beforeAll, describe, expect, test } from 'vitest';
 import { lureCoverage, median, runBot } from './bots';
-import type { BotRun, LurePolicy, VisitorLog } from './bots';
+import type { BotRun, LurePolicy, RunOptions, VisitorLog } from './bots';
 import type { World } from '../src/sim/types';
 import { createWorld } from '../src/sim/world';
-import { FEAR, GHOST, PERSONALITIES, SPAWN } from '../src/config/visitors';
+import { NIGHT } from '../src/config/night';
+import { FEAR, GHOST, nightWorld, PERSONALITIES, SPAWN } from '../src/config/visitors';
 import { SCARES } from '../src/config/scares';
 import { PROPS } from '../src/config/house';
 
@@ -40,6 +44,20 @@ let planned: BotRun[], noLures: BotRun[], lonePlanned: BotRun[], loneNoLures: Bo
 let ghostLone: BotRun[], ghostOnly: BotRun[], loneGhost: BotRun[], skilledGhost: BotRun[], skilledReach: BotRun[];
 /** 现身：单独一个 brave，只靠现身（不附身）/ 附身加现身 */
 let manifestLone: BotRun[], skilledManifestLone: BotRun[];
+/**
+ * 「现身是收尾」（2026-10-30 路 GP）：五种打法 × 两种世界，各 STYLE_SEEDS 局 × GAME_SECONDS 秒（tests/bots.ts）：
+ * spamF 只按现身、跟着人冷却一好就按（critic 的狂按 F）；hugF 贴在人身后冷却一好就按（用户说的「站在人旁边狂按 F」）；
+ * aimedF 只按现身、飘到他手电照着的地方才按；
+ * lurer 先引诱再附身（第三人称，只能附身 4 米内的物件，不现身）；lurerF 再加上对已经紧张的人现身收尾。
+ * night = 正式游戏的一夜（NIGHT.openingGaps、nightWorld 的开关，NIGHT.length 收夜、NIGHT.dawn 天亮）
+ */
+const STYLE_SEEDS = Array.from({ length: 10 }, (_, i) => 1 + i);
+type Style = 'spamF' | 'hugF' | 'aimedF' | 'lurer' | 'lurerF';
+const STYLE_WORLDS = {
+  default: {} as RunOptions,
+  night: { world: { openingGaps: NIGHT.openingGaps, ...nightWorld(NIGHT.length) }, night: { close: NIGHT.length, dawn: NIGHT.dawn } } as RunOptions,
+};
+let styles: Record<keyof typeof STYLE_WORLDS, Record<Style, BotRun[]>>;
 const avgExits = (runs: BotRun[]) => runs.reduce((a, r) => a + r.exits, 0) / runs.length;
 const totalExits = (runs: BotRun[]) => runs.reduce((a, r) => a + r.exits, 0);
 const exitedWithin = (v: VisitorLog, s: number) => v.exitedAt !== null && v.exitedAt - v.spawnedAt <= s;
@@ -47,8 +65,8 @@ const fastLone = (runs: BotRun[]) => runs.filter((r) => r.lifetimes.length === 1
 /** 惊吓类物件的 id */
 const SIGHT_PROPS = PROPS.filter((p) => SCARES[p.type].kind === 'sight').map((p) => p.id);
 /**
- * beforeAll 把所有机器人局跑一遍，单独跑约 6 秒，和别的测试文件一起跑、机器忙的时候更久；
- * vitest 默认的钩子超时是 10 秒，到了整个文件算失败、11 条全跳过。给足余量
+ * beforeAll 把所有机器人局跑一遍，单独跑约 20 秒，和别的测试文件一起跑、机器忙的时候更久；
+ * vitest 默认的钩子超时是 10 秒，到了整个文件算失败、全部跳过。给足余量
  */
 const RUN_ALL_TIMEOUT = 120_000;
 /** 把几局的「附身次数 / 吓到人的次数」按物件加起来 */
@@ -86,6 +104,18 @@ beforeAll(() => {
   skilledReach = SEEDS.map((s) => runBot(s, 'skilled', { ghost: 'hover', reach: REACH, seconds: GAME_SECONDS }));
   manifestLone = LONE_SEEDS.map((s) => runBot(s, 'idle', { ghost: 'manifest', seconds: MANIFEST_SECONDS, autoSpawn: false, setup: brave }));
   skilledManifestLone = LONE_SEEDS.map((s) => runBot(s, 'skilled', { ghost: 'manifest', seconds: MANIFEST_SECONDS, autoSpawn: false, setup: brave }));
+  const styleRuns = (o: RunOptions): Record<Style, BotRun[]> => {
+    const all = (f: (seed: number) => BotRun) => STYLE_SEEDS.map(f);
+    const base = { ...o, seconds: GAME_SECONDS };
+    return {
+      spamF: all((s) => runBot(s, 'idle', { ...base, ghost: 'spam' })),
+      hugF: all((s) => runBot(s, 'idle', { ...base, ghost: 'hug' })),
+      aimedF: all((s) => runBot(s, 'idle', { ...base, ghost: 'manifest' })),
+      lurer: all((s) => runBot(s, 'lurer', base)),
+      lurerF: all((s) => runBot(s, 'lurer', { ...base, finisher: true })),
+    };
+  };
+  styles = { default: styleRuns(STYLE_WORLDS.default), night: styleRuns(STYLE_WORLDS.night) };
   // tsconfig 里没有 node 的类型，经 globalThis 取环境变量
   const env = (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env;
   if (env?.BALANCE_REPORT) console.log(report());
@@ -119,6 +149,13 @@ function report(): string {
     `games: skilled ${games(skilled)}; skilled + ghost ${games(skilledGhost)}; third person (ghost, reach ${REACH} m) ${games(skilledReach)}`,
     `manifest only, lone brave (s to exit, ${MANIFEST_SECONDS} s cap): ${times(manifestLone)} (drops that scared ${manifestLone.map((r) => `${r.manifestScares}/${r.manifests}`).join(' ')})`,
     `skilled + manifest, lone brave: ${times(skilledManifestLone)}`,
+    ...(['default', 'night'] as const).map(
+      (k) =>
+        `playstyles (${k === 'default' ? 'default world' : 'official night'}, ${STYLE_SEEDS.length} seeds): ` +
+        (Object.entries(styles[k]) as [Style, BotRun[]][])
+          .map(([name, runs]) => `${name} ${avgExits(runs).toFixed(1)} (came ${(runs.reduce((a, r) => a + r.visitors.length, 0) / runs.length).toFixed(1)})`)
+          .join(', '),
+    ),
     ...margins(),
   ].join('\n');
 }
@@ -147,6 +184,12 @@ function margins(): string[] {
     ['现身 只靠现身单个 brave 5 分钟内吓跑（局）', manifestLone.filter((r) => r.exits === 1).length, '≥', LONE_SEEDS.length],
     ['现身 只靠现身中位 > 附身加现身中位（s）', manifestLife(manifestLone), '>', manifestLife(skilledManifestLone)],
     ['现身 只靠现身中位 / 附身加现身中位（倍）', manifestLife(manifestLone) / manifestLife(skilledManifestLone), '>', 1],
+    ...(['default', 'night'] as const).flatMap((k): [string, number, string, number][] => [
+      [`收尾 ${k} 先引诱再附身 ≥ 狂按现身`, avgExits(styles[k].lurer), '≥', avgExits(styles[k].spamF)],
+      [`收尾 ${k} 先引诱再附身 ≥ 贴身狂按现身`, avgExits(styles[k].lurer), '≥', avgExits(styles[k].hugF)],
+      [`收尾 ${k} 先引诱再附身 ≥ 照着光现身`, avgExits(styles[k].lurer), '≥', avgExits(styles[k].aimedF)],
+      [`收尾 ${k} 加现身收尾 > 先引诱再附身`, avgExits(styles[k].lurerF), '>', avgExits(styles[k].lurer)],
+    ]),
   ];
   return [
     'margins:',
@@ -238,6 +281,26 @@ describe('数值平衡（固定种子，无界面）', () => {
       expect(r.exits).toBe(1);
     }
     expect(manifestLife(manifestLone)).toBeGreaterThan(manifestLife(skilledManifestLone));
+  });
+
+  test('现身是收尾（2026-10-30 路 GP，critic F-1）：先引诱再附身吓跑的人不比只按现身的少（狂按、贴身狂按、照着光按都算），再加现身收尾最多——默认世界、正式游戏的一夜都是；只按现身也不是没用', () => {
+    for (const k of ['default', 'night'] as const) {
+      const r = styles[k];
+      expect(avgExits(r.lurer)).toBeGreaterThanOrEqual(avgExits(r.spamF));
+      expect(avgExits(r.lurer)).toBeGreaterThanOrEqual(avgExits(r.hugF));
+      expect(avgExits(r.lurer)).toBeGreaterThanOrEqual(avgExits(r.aimedF));
+      expect(avgExits(r.lurerF)).toBeGreaterThan(avgExits(r.lurer));
+      // 现身被改成收尾，不是被削成没用：照着光按、跟着人按，每 5 分钟也吓跑好几个
+      expect(avgExits(r.spamF)).toBeGreaterThanOrEqual(3);
+      expect(avgExits(r.aimedF)).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  test('正式游戏的一夜（收夜以后恐惧值 × late.gain）：单独一下也吓不跑恐惧值为 0 的人（算式，加上机器人实测）', () => {
+    const maxMult = Math.max(...Object.values(PERSONALITIES).map((p) => p.fearMult));
+    const maxFear = Math.max(...Object.values(SCARES).map((s) => s.fear));
+    expect(maxFear * maxMult * STYLE_WORLDS.night.world!.late!.gain).toBeLessThan(FEAR.max);
+    for (const r of [...styles.night.lurer, ...styles.night.lurerF]) expect(r.maxSingleScare).toBeLessThan(FEAR.max);
   });
 
   test('鬼魂 3：但不能一边倒——鬼魂贴身 + 随便附身（上限）：中位存活不低于目标 1 下限的 2/3、吓跑的人不到 skilled 的 2 倍；第三人称（只能附身 4 米内）仍在目标 1 的范围', () => {
