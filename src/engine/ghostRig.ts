@@ -6,7 +6,8 @@
 // - 镜头：透视，在鬼魂右后上方一点（过肩：准星的视线擦着鬼魂右肩过去，不被身体挡住）。
 //   跟随用临界阻尼弹簧（不过冲、不来回晃），转向只做很短的一阶平滑；滚轮调远近（1–4 米）；
 //   吊臂碰到天花板或地板时（2026-10-30 eye S-3）：高度夹住、水平方向照原样往后，不再沿吊臂缩短——
-//   原来往下看 30° 时镜头被压到鬼魂背后 1.1 米，鬼魂糊住三分之一屏幕。镜头和鬼魂之间隔着的墙由墙体自己溶开，这里不做镜头碰撞
+//   原来往下看 30° 时镜头被压到鬼魂背后 1.1 米，鬼魂糊住三分之一屏幕。镜头和鬼魂之间隔着的墙由墙体自己溶开，这里不做常规的镜头碰撞；
+//   只管镜头本身不待在墙体里（2026-10-30 试玩 S1，见 WALL_SLIDE）：算出来的位置落在墙里才沿吊臂滑出来，碰到墙不缩，落在别的屋里不动
 // - 不做：呼吸、冲镜（设计文档「做减法」）；只留吓跑时很轻的一抖（juice.ts 调 shake）
 // - 吓跑那一刻（2026-10-30 严格玩家：三位都要「看得见回报」）：镜头轻轻偏向逃跑的人，偏航最多 10°、约 0.6 秒偏过去就停，
 //   之后照常归玩家（不回摆）；只在偏了能把他带进画面时才偏；玩家一动鼠标（或方向键）立刻停；减少动态、hold、没在操控时不偏。
@@ -68,7 +69,7 @@ const LOOK = {
 };
 
 /** 镜头 */
-const CAM = {
+export const CAM = {
   /** 竖直视角（度） */
   fov: 60,
   near: 0.05,
@@ -97,6 +98,7 @@ const CAM = {
   /**
    * 吊臂碰到天花板、地板（2026-10-30 eye S-3）：镜头高度夹住，水平方向照吊臂原来的位置往后（不再沿吊臂压近），
    * 而且离转动中心不近于吊臂长的这个比例（往下看得很陡时水平方向本来就收得很近，再往后让一点）。
+   * 量过（2026-10-30，playtest S1 的四局路线重放）：0.85 调到 0.55，隔着墙的时间几乎不变（最多差 0.5 个百分点，有一局还多了）：那几局很少往下看到碰天花板。所以不调
    * 原来沿吊臂缩短：默认吊臂往下看 30° 时镜头离转动中心只剩 1.1 米、48° 时 0.8 米，鬼魂糊住画面左边三分之一
    */
   keep: 0.85,
@@ -199,6 +201,101 @@ const INTRO = { extra: 0.9 };
  * 比娃娃屋镜头更轻、更慢：镜头就在鬼魂身后，同样的角度在近处更显眼
  */
 const SHAKE = { roll: 0.4 * DEG, yaw: 0.15 * DEG, pitch: 0.12 * DEG, hz: [5.3, 6.1, 4.7], decay: 1 };
+
+/**
+ * 镜头不进墙（2026-10-30 试玩 playtest.md S1：镜头落在墙体里的时间占 7–23%，第 14 秒就出现）。只管落在墙里的那一截：
+ * 算出来的镜头位置（吊臂的终点）在墙格、窗格里，或者在房子的格子外面，才沿连线往鬼魂那边滑到刚出墙。这不是常规的镜头碰撞：
+ * 吊臂碰到墙不缩；隔着墙、但落点在别的屋里时一点都不动（舷窗、剖面照旧）。
+ * - 墙按 0.5 米的格子算，比看得见的 0.2 米墙厚（WALL_T）宽：出了格子，镜头离墙面还有十几厘米，近裁剪面切不到墙
+ * - pad：出了墙格再多走这么多（米）。min：离转动中心（水平）最近这么多（米），再近鬼魂就糊在镜头上了；这么近还出不了墙就不滑
+ * - time：滑进来、滑回去的平滑时间（秒，临界阻尼弹簧）：不跳，0.5 米约 0.15 秒走完。
+ *   视角转得快时（spin 弧度/秒之间）平滑时间收到 fast：转到 3 弧度/秒以上画面本来就是糊的，落点每帧走十几厘米，跟不上就一直在墙里，滑快一点也看不出跳
+ * - ramp：至少这么快（米/秒）往目标走，比弹簧慢时按它走。落点从靠鬼魂这一面慢慢进墙时目标是连续的，这样镜头正好贴着墙面，一点不落后，也没有跳；
+ *   目标跳变时（从墙那边进墙、放开）是一段 6 米/秒的直线，一帧 10 厘米，不是瞬移
+ * - cap：最快这么快（米/秒，一帧 15 厘米）：吊臂要缩一大截时也是快速滑过去，不是跳；视角转得快时（spin）放开。转得快那几帧攒下的弹簧速度也按它封顶，转慢下来不会冲过头
+ * - pass：鬼魂自己带着落点穿墙（飞过墙、退过墙）时，按跟随点的速度这么多秒内就穿出去了：不滑，不缩一下又退回去。speed：快过这个速度（米/秒）才算；
+ *   视角在转（快过 spin[0]）时不算：那是转过来的，不是鬼魂带着穿的
+ * - hold：滑出来以后，落点要退到墙那边这么多（米）才放开：转视角时落点在墙边探进探出，镜头不来回穿墙
+ * - engaged：滑过这么多（米）才算已经滑了（pass 只管还没滑的、hold 只管已经滑了的）
+ * 量过（playtest S1 的四局路线重放，只按 F / 追眼睛 / 引诱后等 / WebGL2）：镜头在墙体里（S1 的算法：墙格、窗格或房子外面）23.9 / 21.8 / 7.1 / 11.4% → 6.8 / 3.2 / 0.3 / 2.7%，
+ * 隔着墙 56.1 / 41.4 / 25.1 / 27.7% → 40.2 / 24.8 / 18.7 / 21.7%。剩下的 6.8 和 3.2 里各有 4.0 和 1.3 是房子外面：鬼魂离外墙不到 min 米、吊臂朝外，
+ * 这时看到的是外墙上一个干净的剖面（不是在墙里），再往里拉鬼魂的兜帽就盖住准星了，所以不拉
+ */
+export const WALL_SLIDE = { pad: 0.04, min: 0.7, time: 0.07, fast: 0.003, spin: [1, 3] as [number, number], ramp: 6, cap: 9, pass: 0.3, speed: 0.5, hold: 0.2, engaged: 0.02 };
+/** 找出墙的点时沿连线走的步长（米） */
+const EXIT_STEP = 0.02;
+
+/** 布局只有一份，第一次用到时才算 */
+let camTiles: Uint8Array | null = null;
+/** 平面上这一点算不算「镜头不该待的地方」：墙格、窗格，或者房子的格子外面（和试玩量「镜头在墙体里」同一个判断） */
+export function camBlocked(x: number, z: number): boolean {
+  const tiles = (camTiles ??= buildTiles());
+  const [i, j] = cellOf(x, z);
+  return !inGrid(i, j) || wallish(tiles[idx(i, j)]);
+}
+
+/**
+ * 从 raw 沿连线往 pivot 走，走多远（米）才出墙，含 pad。from：从这么远开始看（hold 用）；那一点不在墙里是 0。
+ * 走到离 pivot 只剩 WALL_SLIDE.min 米还没出墙：null（滑了也没用，不滑）
+ */
+export function wallExit(raw: Vec2, pivot: Vec2, from = 0): number | null {
+  const dx = pivot.x - raw.x, dz = pivot.z - raw.z, L = Math.hypot(dx, dz);
+  if (L < 1e-6) return 0;
+  const ux = dx / L, uz = dz / L;
+  if (!camBlocked(raw.x + ux * from, raw.z + uz * from)) return 0;
+  const end = L - WALL_SLIDE.min;
+  for (let d = from + EXIT_STEP; d <= end; d += EXIT_STEP) {
+    if (!camBlocked(raw.x + ux * d, raw.z + uz * d)) return Math.min(d + WALL_SLIDE.pad, Math.max(d, end));
+  }
+  return null;
+}
+
+/**
+ * 这一刻该滑多少（米）。raw：吊臂的终点，pivot：转动中心（跟随点），s：现在滑了多少，pivotVel：跟随点的速度（米/秒）。
+ * 落点不在墙里：0（已经滑了、落点才探出墙那边不到 hold 米的，先留着）。落点在墙里：滑到刚出墙；
+ * 还没滑、鬼魂正带着它穿墙、WALL_SLIDE.pass 秒内就穿出去：0
+ */
+export function wallSlideTarget(raw: Vec2, pivot: Vec2, s: number, pivotVel: Vec2): number {
+  const W = WALL_SLIDE;
+  const engaged = s > W.engaged;
+  if (camBlocked(raw.x, raw.z)) {
+    if (!engaged && Math.hypot(pivotVel.x, pivotVel.z) > W.speed && !camBlocked(raw.x + pivotVel.x * W.pass, raw.z + pivotVel.z * W.pass)) return 0;
+    return wallExit(raw, pivot) ?? 0;
+  }
+  if (!engaged) return 0;
+  return wallExit(raw, pivot, W.hold) ?? 0;
+}
+
+/** 滑的量和它的速度（stepWallSlide 原地更新） */
+export interface WallSlideState {
+  s: number;
+  vel: number[];
+}
+export const newWallSlide = (): WallSlideState => ({ s: 0, vel: [0] });
+
+/**
+ * 往前走一帧：按 wallSlideTarget 平滑地滑（临界阻尼弹簧，不跳、不过冲），返回滑了多少。dt 是 0 时不动。
+ * spin：视角此刻转多快（弧度/秒），转得快时平滑时间收短（WALL_SLIDE.fast）
+ */
+export function stepWallSlide(st: WallSlideState, raw: Vec2, pivot: Vec2, pivotVel: Vec2, dt: number, spin = 0): number {
+  if (dt <= 0) return st.s;
+  const W = WALL_SLIDE;
+  const target = wallSlideTarget(raw, pivot, st.s, pivotVel);
+  const fast = smoothstep01((spin - W.spin[0]) / (W.spin[1] - W.spin[0]));
+  const time = W.time + (W.fast - W.time) * fast;
+  const prev = st.s;
+  const sprung = smoothDamp(prev, target, st.vel, 0, time, dt);
+  const floor = W.ramp * dt;
+  const next = target > prev ? Math.min(target, Math.max(sprung, prev + floor)) : Math.max(target, Math.min(sprung, prev - floor));
+  const most = (W.cap / Math.max(1 - fast, 1e-3)) * dt;
+  st.s = Math.max(0, clamp(next, prev - most, prev + most));
+  st.vel[0] = clamp(st.vel[0], -W.cap, W.cap);
+  if (target === 0 && st.s < 1e-3) {
+    st.s = 0;
+    st.vel[0] = 0;
+  }
+  return st.s;
+}
 
 /** 请求指针锁定后最多等多久（毫秒）没有回音就当没锁上 */
 const LOCK_WAIT_MS = 1500;
@@ -363,9 +460,9 @@ export function setGhostUi(patch: Partial<GhostUi>): void {
 export interface GhostRigDebug {
   /**
    * 视角的内部量：yaw / pitch（弧度，pitch 向下为正）、镜头距离（米，滚轮目标）、镜头位置（房屋米坐标）、
-   * back（吊臂此刻的水平长度，米）、leaning（吓跑时正在偏过去）
+   * back（吊臂此刻的水平长度，米，含滑出墙的那一截）、leaning（吓跑时正在偏过去）、slide（为了不待在墙里滑了多少米，见 WALL_SLIDE）、raw（吊臂的终点，还没滑）
    */
-  view(): { yaw: number; pitch: number; dist: number; cam: { x: number; y: number; z: number }; back: number; leaning: boolean };
+  view(): { yaw: number; pitch: number; dist: number; cam: { x: number; y: number; z: number }; back: number; leaning: boolean; slide: number; raw: Vec2 };
   /** 此刻规划「偏多少」用的镜头几何（planLean 的第一个参数） */
   leanView(): LeanView;
   /** 把鬼魂放到房屋坐标 (x, z)（限制在边界内），可选朝向、俯仰；速度清零，镜头立刻就位 */
@@ -382,6 +479,8 @@ const debugHandles = new WeakMap<GhostRig, GhostRigDebug>();
 export const ghostRigDebug = (rig: GhostRig): GhostRigDebug | null => debugHandles.get(rig) ?? null;
 
 // ── 镜头 ────────────────────────────────────────────────────
+
+const NO_VEL: Vec2 = { x: 0, z: 0 };
 
 export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   let width = Math.max(1, canvas.clientWidth);
@@ -415,8 +514,15 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   let intro: { t: number; dur: number } | null = null;
   /** 镜头位置（房屋米坐标），调试口和 viewDir 用 */
   const camAt = { x: 0, y: 0, z: 0 };
-  /** 吊臂此刻的水平长度（米，碰到天花板时也是实际的），规划吓跑时偏多少用 */
+  /** 吊臂此刻的水平长度（米，碰到天花板、滑出墙时也是实际的），规划吓跑时偏多少用；boomK：滑出墙时吊臂按这个比例缩（过肩一起缩） */
   let boomBack = CAM.dist;
+  let boomK = 1;
+  /** 为了不待在墙里滑了多少（WALL_SLIDE） */
+  const wallSlide = newWallSlide();
+  /** 上一次摆镜头时的朝向：算视角转多快 */
+  let lastYaw = yaw;
+  /** 吊臂的终点（还没滑），调试口看 */
+  const rawAt = { x: 0, z: 0 };
   const viewDir: Vec2 = { x: -Math.cos(yaw), z: -Math.sin(yaw) };
   const look = new THREE.Vector3();
   const v = new THREE.Vector3();
@@ -434,13 +540,13 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
   const leanView = (): LeanView => ({
     pivot: { x: followX, z: followZ },
     back: boomBack,
-    shoulder: CAM.shoulder,
+    shoulder: CAM.shoulder * boomK,
     yaw: yawT,
     halfH: Math.atan(Math.tan((CAM.fov / 2) * DEG) * camera.aspect),
   });
 
-  /** 按此刻的跟随点、朝向、俯仰摆镜头。len0 = 想要的吊臂长度 */
-  const placeCamera = (len0: number) => {
+  /** 按此刻的跟随点、朝向、俯仰摆镜头。len0 = 想要的吊臂长度；dt：这一帧多长，给了才平滑地滑出墙，不给（开场、调试口）立刻就位 */
+  const placeCamera = (len0: number, dt?: number) => {
     const cy = Math.cos(yaw), sy = Math.sin(yaw);
     // 吊臂：从转动中心往后、往上，仰角 = 俯仰 + 构图角。碰到天花板或地板：高度夹住，水平方向照原样往后，
     // 离转动中心不近于 keep × 吊臂长（CAM.keep；原来沿吊臂缩短，往下看时镜头被压到鬼魂背上）
@@ -455,11 +561,26 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
       const keep = CAM.keep * len0;
       if (back * back + up * up < keep * keep) back = Math.sqrt(keep * keep - up * up);
     }
-    boomBack = back;
     // 前 = (cos, sin)，右 = (−sin, cos)
-    camAt.x = followX - cy * back - sy * CAM.shoulder;
-    camAt.z = followZ - sy * back + cy * CAM.shoulder;
-    camAt.y = CAM.pivotY + up;
+    const ox = -cy * back - sy * CAM.shoulder, oz = -sy * back + cy * CAM.shoulder;
+    // 落在墙里才沿连线往转动中心滑（WALL_SLIDE）：吊臂整个按比例缩，鬼魂在画面上的方向不变，只是大一点
+    const raw = { x: followX + ox, z: followZ + oz }, pivot = { x: followX, z: followZ };
+    if (dt === undefined) {
+      wallSlide.s = wallSlideTarget(raw, pivot, 0, NO_VEL);
+      wallSlide.vel[0] = 0;
+    } else {
+      const spin = Math.abs(wrapAngle(yaw - lastYaw)) / Math.max(dt, 1e-3);
+      stepWallSlide(wallSlide, raw, pivot, spin > WALL_SLIDE.spin[0] ? NO_VEL : { x: followV[0], z: followV[1] }, dt, spin);
+    }
+    rawAt.x = raw.x;
+    rawAt.z = raw.z;
+    lastYaw = yaw;
+    const oLen = Math.hypot(ox, oz);
+    boomK = oLen > 1e-6 ? Math.max(oLen - wallSlide.s, Math.min(oLen, WALL_SLIDE.min)) / oLen : 1;
+    boomBack = back * boomK;
+    camAt.x = followX + ox * boomK;
+    camAt.z = followZ + oz * boomK;
+    camAt.y = CAM.pivotY + up * boomK;
     camera.position.set(camAt.x - HOUSE_W / 2, camAt.y, camAt.z - HOUSE_D / 2);
     ghostCamera.active = true;
     ghostCamera.x = camAt.x;
@@ -691,7 +812,7 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
         if (u >= 1) intro = null;
       }
       trauma = Math.max(0, trauma - dt * SHAKE.decay);
-      placeCamera(dist + extra);
+      placeCamera(dist + extra, dt);
     },
     resize(w, h) {
       width = Math.max(1, w);
@@ -756,7 +877,7 @@ export function createGhostRig(canvas: HTMLCanvasElement): GhostRig {
     leanAt = -Infinity;
   };
   debugHandles.set(rig, {
-    view: () => ({ yaw, pitch, dist: distT, cam: { ...camAt }, back: boomBack, leaning: lean !== null }),
+    view: () => ({ yaw, pitch, dist: distT, cam: { ...camAt }, back: boomBack, leaning: lean !== null, slide: wallSlide.s, raw: { ...rawAt } }),
     leanView,
     place(x, z, heading, p) {
       resetLean();
