@@ -1210,3 +1210,29 @@ describe('Rng', () => {
     expect(x).toBeLessThan(1);
   });
 });
+
+describe('画像的生效窗口（SCARES.portrait.active）跟上换脸的时长', () => {
+  /** 附身以后 at 秒才转头看画像的人：返回他有没有被画像吓到 */
+  function lookAt(at: number): boolean {
+    const P = { x: 2.75, z: 3.75 };
+    const portrait = prop('portrait');
+    const away = angleTo(portrait, P);
+    const w = createWorld({ seed: 71, autoSpawn: false });
+    const n = w.spawn({ pos: { ...P }, personality: 'brave', lookDir: away });
+    expect(w.trigger('portrait')).toBe(true);
+    let hit = false;
+    for (let k = 0; k < 60 * 3; k++) {
+      n.pos.x = P.x;
+      n.pos.z = P.z;
+      n.lookDir = k * DT < at ? away : angleTo(P, portrait);
+      hit ||= ofType(w.step(DT), 'startle').some((e) => e.npc === n.id && e.object === 'portrait');
+    }
+    return hit;
+  }
+
+  test('换脸挂到约 2.4 秒：2.2 秒才转头看过来的人照样被吓到（原来 1.8 秒就关了，看见脸却没反应）；窗口过了（2.6 秒）再看不吓', () => {
+    expect(SCARES.portrait.active).toBeGreaterThanOrEqual(2.3);
+    expect(lookAt(2.2)).toBe(true);
+    expect(lookAt(2.6)).toBe(false);
+  });
+});
