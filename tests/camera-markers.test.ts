@@ -308,13 +308,13 @@ describe('吓跑那一刻镜头轻轻偏向逃跑的人（鬼魂镜头）', () =
 });
 
 describe('往下看时吊臂不再被天花板沿着自己压短（eye S-3）', () => {
-  /** 鬼魂在客厅朝西，俯仰 pitch、吊臂 dist：镜头离转动中心（不算过肩那 0.32 米）多远、多高 */
+  /** 鬼魂在走廊里朝西（吊臂往东，一路没有墙），俯仰 pitch、吊臂 dist：镜头离转动中心（不算过肩那 0.32 米）多远、多高 */
   const boom = (pitch: number, dist: number) => {
     const e = rigEnv();
-    e.dbg.place(9.0, 2.6, Math.PI, pitch);
+    e.dbg.place(6.0, 6.0, Math.PI, pitch);
     e.dbg.setDist(dist);
     const c = e.dbg.view().cam;
-    return { back: c.x - 9.0, y: c.y, len: Math.hypot(c.x - 9.0, c.y - 1.65) };
+    return { back: c.x - 6.0, y: c.y, len: Math.hypot(c.x - 6.0, c.y - 1.65) };
   };
 
   it('往下看 30°、48°（吊臂 2.4 / 4 / 1 米）：镜头贴着天花板，离转动中心不近于吊臂长的 0.85', () => {
