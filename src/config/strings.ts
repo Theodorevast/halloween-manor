@@ -60,6 +60,10 @@ export const STRINGS = {
     seen: (name: string) => `${name} saw you in the dark`,
     flee: (name: string) => `${name} fled screaming!`,
     exit: (name: string) => `${name} is gone. Who's next?`,
+    /** 收夜以后（不再有人来）出门的那一行：不再问 Who's next?（2026-10-30 试玩 P2-1；hud.ts 按收夜状态选） */
+    exitClosed: (name: string) => `${name} is gone.`,
+    /** 机关设下以后一直没人来、到时间自己解除（trap expired，2026-10-30 试玩 P2-4）：安静的一行，物件名用显示名 */
+    trapExpired: (prop: string) => `The ${prop.toLowerCase()} stopped waiting.`,
     /** 一夜（2026-10-30）：收夜那一刻；收夜时屋里没人、最后再来的那一位 */
     lastCall: 'No one else is coming tonight.',
     lastArrival: (name: string) => `${name} is the last to arrive.`,
@@ -83,10 +87,13 @@ export const STRINGS = {
     /** 只出现一次的情境提示（每种第一次碰到时） */
     hints: {
       firstAim: 'Click to possess · Hold to set a trap',
-      firstMiss: 'Scares only work when someone is watching. Look for the eye.',
+      /** 2026-10-30 试玩 P1-1：把「先引诱、人转过来看、再附身」的套路说出来（原来只说找眼睛，眼睛又是一闪一闪的） */
+      firstMiss: 'Scares only work when someone is watching. Make a sound first, or wait for the eye.',
       firstLure: "They'll come to look. Wait until they see something.",
       firstRevealed: 'They see you only in their light. Right-click or F to appear.',
     },
+    /** firstAim 的后半句：玩家已经附身过（会点了）时只说这半句（2026-10-30 试玩 P2-3，见 ui/hints.ts 的 textOf） */
+    aimTrapOnly: 'Hold to set a trap',
     /** 做不到时的一句回应（每次都有，但很轻） */
     refused: {
       manifestCooldown: 'Not yet.',

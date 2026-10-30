@@ -10,7 +10,7 @@ import { SCARES } from '../src/config/scares';
 import { STRINGS } from '../src/config/strings';
 import { angleOf } from '../src/lib/angle';
 import { createWorld } from '../src/sim/world';
-import { OUTCOME, createOutcomeWatch, pendingAct, tipState } from '../src/view/overlays';
+import { OUTCOME, WATCH_LINGER, createOutcomeWatch, createWatchLinger, holdOn, pendingAct, tipState } from '../src/view/overlays';
 import type { ManifestState, NpcMode, NpcState, ScareObjectState, ScareType, Vec2, World } from '../src/sim/types';
 
 // tsconfig 的 types 里只有 vite/client、没有 node 的类型，也不为一个测试把 node 类型加进整个工程：用变量当模块名取 node:fs。
@@ -328,5 +328,95 @@ describe('结果的记录（createOutcomeWatch，FEEL-3）：跟着真的模拟�
     watch.onEvent({ type: 'trigger', object: 'bed', scareType: 'bed' }, s, 0);
     watch.settle(s, 4); // active 是 0：窗口已经结束
     expect(watch.current('bed', 4)).toBeNull();
+  });
+});
+
+// ── 试玩之后的打磨（2026-10-30 第一轮试玩 P1-1 建议 3）：眼睛灭的时候淡掉、标签的「X is watching」留一会儿再换 ─────────────
+
+describe('物件上的眼睛灭的时候慢慢淡掉（P1-1 建议 3）', () => {
+  it(`亮起照旧（0.16 秒睁开）；灭的时候 opacity 用 WATCH_LINGER（${WATCH_LINGER} 秒）淡掉，淡完才收回去，不一帧开一帧关`, () => {
+    expect(WATCH_LINGER).toBeGreaterThanOrEqual(0.4);
+    expect(WATCH_LINGER).toBeLessThanOrEqual(0.5);
+    const base = rule('.ov-eye')?.body ?? '';
+    expect(base).toMatch(/opacity:\s*0\s*;/);
+    // 灭的时候（回到 .ov-eye 本身的样式）：透明度淡 WATCH_LINGER 秒，眼睛的开合等淡完再收（延迟 WATCH_LINGER 秒）
+    expect(base).toMatch(new RegExp(`opacity ${WATCH_LINGER}s`));
+    expect(base).toMatch(new RegExp(`transform 0s linear ${WATCH_LINGER}s`));
+    // 亮起：睁开照旧 0.16 秒
+    const seen = rule('.ov-mark.is-seen .ov-eye')?.body ?? '';
+    expect(seen).toMatch(/opacity:\s*1\s*;/);
+    expect(seen).toMatch(/transform 0\.16s ease-out/);
+    // 设了机关的空心眼睛一直睁着：也要不透明
+    expect(rule('.ov-mark.is-armed .ov-eye')?.body ?? '').toMatch(/opacity:\s*1\s*;/);
+  });
+});
+
+describe('标签第二行的「X is watching」灭的时候留一会儿再换（createWatchLinger，P1-1 建议 3）', () => {
+  const watching = { text: 'Theo is watching', tone: 'ready' as const };
+  const none = { text: STRINGS.onboarding.noOneWatching, tone: 'unseen' as const };
+
+  it(`有人看着 → 没人看着：先留 WATCH_LINGER 秒还写 Theo is watching，过了才换成 No one is watching`, () => {
+    const linger = createWatchLinger();
+    expect(linger('lamp', watching, 0)).toEqual(watching);
+    expect(linger('lamp', none, 0.1)).toEqual(watching);
+    expect(linger('lamp', none, WATCH_LINGER - 0.01)).toEqual(watching);
+    expect(linger('lamp', none, WATCH_LINGER + 0.01)).toEqual(none);
+    // 过了以后不回头
+    expect(linger('lamp', none, WATCH_LINGER + 0.02)).toEqual(none);
+  });
+
+  it('留着的时候又有人看着：马上写新的（名字跟着换），从那一刻重新算', () => {
+    const linger = createWatchLinger();
+    linger('lamp', watching, 0);
+    expect(linger('lamp', none, 0.2)).toEqual(watching);
+    const mia = { text: 'Mia is watching', tone: 'ready' as const };
+    expect(linger('lamp', mia, 0.3)).toEqual(mia);
+    expect(linger('lamp', none, 0.3 + WATCH_LINGER - 0.01)).toEqual(mia);
+  });
+
+  it('结果、够不着、机关、冷却这几种的优先级不变：马上换，不留', () => {
+    for (const st of [
+      { text: 'Theo jumped', tone: 'outcome' as const },
+      { text: 'No one saw it', tone: 'unseen' as const },
+      { text: STRINGS.onboarding.refused.tooFar, tone: 'far' as const },
+      { text: STRINGS.trapSet, tone: 'armed' as const },
+      { text: '6s', tone: 'cooling' as const },
+    ]) {
+      const linger = createWatchLinger();
+      linger('lamp', watching, 0);
+      expect(linger('lamp', st, 0.05)).toEqual(st);
+      // 之后变成没人看着：也不再拿出很早以前那个名字
+      expect(linger('lamp', none, 0.1)).toEqual(none);
+    }
+  });
+
+  it('换了物件不留（标签说的是这一个物件）；引诱类的 Ready 不算「有人看着」', () => {
+    const linger = createWatchLinger();
+    linger('lamp', watching, 0);
+    expect(linger('mirror', none, 0.1)).toEqual(none);
+    const l2 = createWatchLinger();
+    l2('music-box', { text: STRINGS.ready, tone: 'ready' }, 0);
+    expect(l2('music-box', none, 0.1)).toEqual(none);
+  });
+});
+
+describe('名牌上的小眼睛灭的时候留一会儿（holdOn，整体审查 AF#6）', () => {
+  it(`亮起照旧（马上亮）；灭的时候先留 WATCH_LINGER 秒，留着的时候又该亮就不灭、从那一刻重新算`, () => {
+    const st = { at: -Infinity };
+    expect(holdOn(false, 0, st)).toBe(false);
+    expect(holdOn(true, 1, st)).toBe(true);
+    expect(holdOn(false, 1.1, st)).toBe(true);
+    expect(holdOn(false, 1 + WATCH_LINGER - 0.01, st)).toBe(true);
+    expect(holdOn(false, 1 + WATCH_LINGER + 0.01, st)).toBe(false);
+    // 留着的时候又亮：不灭，从那一刻重新算
+    expect(holdOn(true, 3, st)).toBe(true);
+    expect(holdOn(false, 3.3, st)).toBe(true);
+    expect(holdOn(true, 3.4, st)).toBe(true);
+    expect(holdOn(false, 3.4 + WATCH_LINGER - 0.01, st)).toBe(true);
+    expect(holdOn(false, 3.4 + WATCH_LINGER + 0.01, st)).toBe(false);
+  });
+
+  it('overlays.ts 的名牌用它：is-reach 按 holdOn 给，不直接按这一刻算出来的 reachIds', () => {
+    expect(overlays).toMatch(/holdOn\(reachIds\.has\(n\.id\)/);
   });
 });

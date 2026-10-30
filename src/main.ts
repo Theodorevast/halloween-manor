@@ -250,7 +250,8 @@ async function boot() {
     ...(ghostFx && isGhostRig(r) ? [createGhostView(c, r, ghostFx), ghostFx.lights, ghostFx.frost] : []),
     createJuice(r, c), cine, audio, overlays, hud, hints, registerView,
     // 一夜只在开场之后走（开场前模拟没动；图形设备丢了以后也不再往下走，免得登记簿翻在错误界面上）
-    { onEvent: (e, s) => night.onEvent(e, s), update: (ctx) => { if (started) night.update(ctx); } },
+    // 收夜以后出门那一行不问 Who's next?、光收回时准星和冷却环淡掉（2026-10-30 试玩 P2-1）：HUD 每帧问一次段落（只在变化时动 DOM）
+    { onEvent: (e, s) => night.onEvent(e, s), update: (ctx) => { if (started) night.update(ctx); hud.setNightPhase(night.phase); } },
   );
 
   // 登记簿：翻开时把鼠标还给玩家（第三人称要点得到按钮）；合上时不自动锁回，HUD 自己提示「Click to resume」，点一下画布就继续
@@ -298,7 +299,7 @@ async function boot() {
       endNight: () => night.endNight(),
       dawn: () => night.dawnNow(),
       keepHaunting: () => night.keepHaunting(),
-      snapshot: () => ({ ...night.snapshot(), register: registerView.isOpen, door: frontDoor.openness }),
+      snapshot: () => ({ ...night.snapshot(), register: registerView.isOpen, door: frontDoor.openness, otherShadow: otherShadow.appeared }),
     },
   });
 

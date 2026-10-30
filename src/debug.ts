@@ -29,8 +29,8 @@ export interface NightHooks {
   endNight(): void;
   dawn(): void;
   keepHaunting(): void;
-  /** 控制器的状态，加上登记簿开着没有、前门开着多少（0..1） */
-  snapshot(): NightSnapshot & { register: boolean; door: number };
+  /** 控制器的状态，加上登记簿开着没有、前门开着多少（0..1）、墙上多一个影子这一页出现过几次（2026-10-30 试玩 P1-2） */
+  snapshot(): NightSnapshot & { register: boolean; door: number; otherShadow: number };
 }
 
 /**
@@ -66,8 +66,12 @@ export interface HauntDebug {
   dawn(): void;
   /** 一夜：收夜那一页上点 Keep haunting（冒烟测试优先点真的按钮） */
   keepHaunting(): void;
-  /** 一夜此刻的状态：phase（night / closed / silence / retreat / register）、这一夜的时刻、登记簿开着没有、前门开着多少；没接时为 null */
-  night(): (NightSnapshot & { register: boolean; door: number }) | null;
+  /**
+   * 一夜此刻的状态：phase（night / closed / silence / retreat / register）、这一夜的时刻、登记簿开着没有、前门开着多少、
+   * 墙上多一个影子这一夜出现过几次（otherShadow；Keep haunting 时要调 OtherShadow.newNight 才清零，冒烟测试可以断言机器人的一夜至少一次）；
+   * 没接时为 null
+   */
+  night(): (NightSnapshot & { register: boolean; door: number; otherShadow: number }) | null;
 }
 
 const f1 = (n: number) => n.toFixed(1);

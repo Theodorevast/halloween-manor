@@ -14,9 +14,15 @@
 // 瞄准和反馈（2026-10-30 手感分析）：
 // - FEEL-6 播报不让尖叫传染把正事挤掉：同一阵的传染并成一行（Hugo and Iris flinched at a scream），满了先挤安静的行（pushLine）
 // - FEEL-7 准星对着够不着的物件（GhostUi.aimFar）：外圈变虚线
+// 试玩之后的打磨（2026-10-30 第一轮试玩 qa-playtest.md）：
+// - P2-1 收夜以后（一夜不在 night，main.ts 每帧 setNightPhase）出门写 {name} is gone.，不再问 Who's next?；
+//   光收回前门那几秒（retreat、登记簿）准星和冷却环慢慢淡掉（.hud-play.is-closing）
+// - P2-2 收夜、天亮那两句（sayLine）用 exit 那一档的亮度（骨白）、停 TICKER.night 秒，不加灯、不闪
+// - P2-4 机关设下以后没人来、到时间自己解除（trap expired）：播报一行安静的 The bed stopped waiting.
 import { STRINGS } from '../config/strings';
 import { watchGhostUi } from '../engine/ghostRig';
 import type { FrameCtx, Module, Quality } from '../engine/types';
+import type { NightPhase } from '../night';
 import type { SimEvent, WorldState } from '../sim/types';
 import { bottomLine, createMissWatch, markLineEnds, setSegments } from './hints';
 
@@ -39,13 +45,15 @@ export interface Hud extends Module {
   setReady(ready: boolean): void;
   /** 播报一行（不是模拟事件带出来的那种，比如收夜的 "No one else is coming tonight."）。quiet = 次要的灰字 */
   say(text: string, tone?: 'quiet' | 'scare'): void;
+  /** 一夜此刻在哪一段（main.ts 每帧给，只在变化时动 DOM）：收夜以后出门那一行不再问 Who's next?；光收回、登记簿时准星和冷却环淡掉 */
+  setNightPhase(phase: NightPhase): void;
 }
 
 /**
  * 播报最多几条（max）、每条停留多久（life）、淡出多久（fade，秒）——计划 Task 7；
  * 尖叫传染在 merge 秒内并成一行（2026-10-30 手感分析 FEEL-6，见 pushLine）
  */
-export const TICKER = { max: 4, life: 6, fade: 1.2, merge: 1.2 };
+export const TICKER = { max: 4, life: 6, fade: 1.2, merge: 1.2, night: 10 };
 /** 开场遮罩淡出（秒），和 styles.css 里 .hud-start 的 transition 一致 */
 const START_FADE = 0.8;
 /**
@@ -86,10 +94,10 @@ const TEMPLATE = `
     <h1 class="hud-title" id="hud-title"></h1>
     ${RULE}
     <p class="hud-headphones"></p>
+    <p class="hud-hint"><span class="hud-hint-text"></span><span class="hud-turn"></span></p>
     <button type="button" class="hud-begin"></button>
     <p class="hud-error" role="alert" hidden></p>
   </div>
-  <p class="hud-hint"><span class="hud-hint-text"></span><span class="hud-turn"></span></p>
   <div class="hud-start-light" aria-hidden="true"></div>
 </section>
 <div class="hud-play" hidden>
@@ -107,7 +115,11 @@ const TEMPLATE = `
   </div>
 </div>`;
 
-export type Tone = 'quiet' | 'scare' | 'flee' | 'exit';
+/** night：收夜、天亮那两句（sayLine）：exit 那一档的亮度、停 TICKER.night 秒 */
+export type Tone = 'quiet' | 'scare' | 'flee' | 'exit' | 'night';
+
+/** 这一口气的行停多久（秒，不算淡出）：收夜、天亮那两句 TICKER.night（2026-10-30 试玩 P2-2：6 秒就淡、灰色斜体，很容易错过），别的 TICKER.life */
+export const lifeOf = (tone: Tone): number => (tone === 'night' ? TICKER.night : TICKER.life);
 
 /** 播报的一行：文字、口气；尖叫传染那一行另带被传染的人的名字（scream），播报栏据此把同一阵的传染并成一行 */
 export interface TickerLine {
@@ -116,8 +128,17 @@ export interface TickerLine {
   scream?: string;
 }
 
-/** 播报文案：名字从 state.npcs 里按 id 找（exit 自带名字），物件名用 STRINGS.propName */
-function tickerLine(e: SimEvent, s: WorldState): TickerLine | null {
+/**
+ * HUD 的 say 播的一行（不是模拟事件带出来的那种）：收夜、天亮那两句是 night 口气（亮度和 exit 一档、停得久），
+ * 别的（最后一位进门、平常的 say）照给的口气。按文案认：这两句由 src/night.ts 经 main.ts 的 say 播，不带口气
+ */
+export function sayLine(text: string, tone: 'quiet' | 'scare' = 'quiet'): TickerLine {
+  if (text === STRINGS.ticker.lastCall || text === STRINGS.ticker.dawn) return { text, tone: 'night' };
+  return { text, tone };
+}
+
+/** 播报文案：名字从 state.npcs 里按 id 找（exit 自带名字），物件名用 STRINGS.propName；closed = 收夜以后（不再有人来） */
+function tickerLine(e: SimEvent, s: WorldState, closed: boolean): TickerLine | null {
   const who = (id: number) => s.npcs.find((n) => n.id === id)?.name;
   const prop = (id: string) => {
     const o = s.objects.find((x) => x.id === id);
@@ -153,7 +174,15 @@ function tickerLine(e: SimEvent, s: WorldState): TickerLine | null {
     }
     case 'exit':
       // 天亮自己走的（calm）：不是被吓跑的，安静的一行，不写讣告的短剑号
-      return e.calm ? { text: STRINGS.ticker.leftCalm(e.name), tone: 'quiet' } : { text: STRINGS.ticker.exit(e.name), tone: 'exit' };
+      if (e.calm) return { text: STRINGS.ticker.leftCalm(e.name), tone: 'quiet' };
+      // 收夜以后不会再有人来：不问 Who's next?（试玩 P2-1：它原来是登记簿前黑屏上的最后一行）
+      return { text: closed ? STRINGS.ticker.exitClosed(e.name) : STRINGS.ticker.exit(e.name), tone: 'exit' };
+    case 'trap': {
+      // 机关没人来、到时间自己解除（试玩 P2-4：原来悄悄失效，标签自己回到 No one is watching）。设下、发作不播（发作有惊吓那一行）
+      if (e.phase !== 'expired') return null;
+      const p = prop(e.object);
+      return p ? { text: STRINGS.ticker.trapExpired(p), tone: 'quiet' } : null;
+    }
     default:
       return null;
   }
@@ -164,7 +193,7 @@ function tickerLine(e: SimEvent, s: WorldState): TickerLine | null {
  * 现身落下：被吓到的每人一行（同一步的 startle 是 object = 'ghost'，tickerLine 不播）；
  * 出门：被吓跑的计数跳到 total、数字压印一下；天亮自己走的（calm）不算吓跑，计数不动
  */
-export function hudLines(e: SimEvent, s: WorldState): { lines: TickerLine[]; count: number | null } {
+export function hudLines(e: SimEvent, s: WorldState, opts: { closed?: boolean } = {}): { lines: TickerLine[]; count: number | null } {
   if (e.type === 'manifest') {
     if (e.phase !== 'drop') return { lines: [], count: null };
     const lines: TickerLine[] = [];
@@ -174,7 +203,7 @@ export function hudLines(e: SimEvent, s: WorldState): { lines: TickerLine[]; cou
     }
     return { lines, count: null };
   }
-  const l = tickerLine(e, s);
+  const l = tickerLine(e, s, opts.closed ?? false);
   return { lines: l ? [l] : [], count: e.type === 'exit' && !e.calm ? e.total : null };
 }
 
@@ -303,6 +332,9 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
   /** 附身落空：判断见 hints.ts 的 createMissWatch；播报过几次 */
   const misses = createMissWatch();
   let missedSaid = 0;
+  /** 一夜在哪一段（setNightPhase）：收夜以后（不在 night）出门不问 Who's next?；closing = 光收回前门、登记簿翻开 */
+  let nightClosed = false;
+  let closing = false;
 
   // ── 开场 ────────────────────────────────────────────
   // 烛光：一圈暖光跟着指针走，照亮印在黑底上的字；减弱动态时固定在中间
@@ -560,7 +592,15 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     },
     setQuality: setQualityUi,
     say(text, tone = 'quiet') {
-      push({ text, tone });
+      push(sayLine(text, tone));
+    },
+    setNightPhase(phase) {
+      nightClosed = phase !== 'night';
+      const c = phase === 'retreat' || phase === 'register';
+      if (c === closing) return;
+      closing = c;
+      // 光收回前门那几秒：准星和冷却环慢慢淡掉（styles.css 的 .hud-play.is-closing），Keep haunting 以后回来
+      play.classList.toggle('is-closing', c);
     },
     setReady(r) {
       ready = r;
@@ -572,7 +612,7 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     },
     onEvent(e, state) {
       misses.onEvent(e);
-      const { lines: out, count: n } = hudLines(e, state);
+      const { lines: out, count: n } = hudLines(e, state, { closed: nightClosed });
       for (const l of out) push(l);
       if (n !== null) setCount(n, true);
     },
@@ -590,11 +630,12 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
       for (let i = rows.length - 1; i >= 0; i--) {
         const r = rows[i];
         const age = now - r.born;
-        if (!r.fading && age > TICKER.life) {
+        const life = lifeOf(r.tone);
+        if (!r.fading && age > life) {
           r.fading = true;
           liOf.get(r)?.classList.add('is-fading');
         }
-        if (age > TICKER.life + TICKER.fade) {
+        if (age > life + TICKER.fade) {
           liOf.get(r)?.remove();
           liOf.delete(r);
           rows.splice(i, 1);

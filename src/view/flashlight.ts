@@ -175,7 +175,11 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality, seed 
   const lens = new THREE.Mesh(parts.lens, parts.lensMat);
   lens.name = 'torch-lens';
   // 镜片此刻的颜色（共用材质每画这一个镜片前读它）：和亮芯那盏灯同一个颜色 × torchDim，见下面 update
-  const lensColor = new THREE.Color(PALETTE.torchCore).multiplyScalar(3); // ×3：亮度约 2.7，在泛光阈值（BLOOM.threshold 2.2）上面，镜片还晕一点（ART-7，update 里同）
+  // ×2.5（2026-10-30 试玩 P2-8：×3 时访客正对镜头、约 2 米处镜片的泛光是一团约 70 像素的橙色软球）：亮度约 2.23，
+  // 刚过泛光阈值（BLOOM.threshold 2.2，软过渡到 3.4 才全量）和 AO 保护上限（2.0），镜片本身不被压暗，泛光只剩很淡的一点
+  // （×3 时过阈值的那份约 35%，×2.5 约 0.2%）。简报写的是 ×2，但 ×2 的亮度约 1.79，掉到泛光阈值和 AO 保护区间下面，
+  // tests/postfx-ao.test.ts（ART-7 配 ART-4）钉着这条，所以取 ×2.5；update 里同
+  const lensColor = new THREE.Color(PALETTE.torchCore).multiplyScalar(2.5);
   lens.userData.lensColor = lensColor;
   const strength = uniform(0);
   const beamMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
@@ -253,7 +257,7 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality, seed 
         const w = Math.max(0, 1 - dim) * TORCH.dimWarmK;
         halo.color.copy(haloColor).lerp(warm, w);
         core.color.copy(coreColor).lerp(warm, w);
-        lensColor.copy(core.color).multiplyScalar(dim * 3);
+        lensColor.copy(core.color).multiplyScalar(dim * 2.5);
       }
       halo.intensity = TORCH.halo.intensity * p.power * flick * dim;
       core.intensity = TORCH.core.intensity * p.power * flick * dim;
