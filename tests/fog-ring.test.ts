@@ -19,6 +19,7 @@ import type { CameraRig, RenderCore } from '../src/engine/types';
 import type { SimEvent, WorldState } from '../src/sim/types';
 import { DRAFT, FOG, createFogView, topDownDim, waveAt, waveDensity, type WaveParams } from '../src/view/fog';
 import { manifestLights } from '../src/view/ghost';
+import { TORCH, nervousWave } from '../src/view/flashlight';
 import { countDips, createLightFx, dipStarts } from '../src/view/lightfx';
 import { VIEWS, fogAlpha } from './fogField';
 
@@ -32,8 +33,8 @@ afterEach(() => {
 });
 
 describe('DRAFT.manifest：参数', () => {
-  it('一圈气浪：几何照美术总监定的（2.6 米、1.1 秒、起点 0.25、扩散 1.0）；幅度按修复第 1 轮重新定（不变薄、挤浓 0.25、推 0.06 米、撕成缕 0.3、半宽 0.7）', () => {
-    expect(DRAFT.manifest).toEqual({ reach: 2.6, time: 1.1, width: 0.7, spread: 1.0, compress: 0.25, trough: 0, push: 0.06, start: 0.25, stir: 0.3 });
+  it('一圈气浪：几何照美术总监定的（2.6 米、1.1 秒、起点 0.25、扩散 1.0）；幅度按修复第 1 轮重新定（不变薄、推 0.06 米、撕成缕 0.3、半宽 0.7），挤浓按整体审查 I-2 压到 0.15', () => {
+    expect(DRAFT.manifest).toEqual({ reach: 2.6, time: 1.1, width: 0.7, spread: 1.0, compress: 0.15, trough: 0, push: 0.06, start: 0.25, stir: 0.3 });
   });
   it('厨房门撞上的那一圈（slam）没改：照原来的数', () => {
     expect(DRAFT.slam).toEqual({ reach: 4.2, time: 1.8, width: 0.45, spread: 1.3, compress: 1.6, trough: 0.6, push: 0.45, start: 0.35, stir: 0.8 });
@@ -114,9 +115,9 @@ describe('waveAt：波前怎么走', () => {
 });
 
 describe('waveDensity：推开的是什么样子', () => {
-  it('落下后 0.4 秒：波前上浓一点（> 1.1）、里面不薄（没有 trough，≥ 1）、前面没动，鬼魂周围一圈约 2 米半径', () => {
+  it('落下后 0.4 秒：波前上浓一点（> 1.05）、里面不薄（没有 trough，≥ 1）、前面没动，鬼魂周围一圈约 2 米半径', () => {
     const w = waveAt(L, 0.4, MIN_W.high);
-    expect(waveDensity(w, L, w.radius)).toBeGreaterThan(1.1); // 波前上
+    expect(waveDensity(w, L, w.radius)).toBeGreaterThan(1.05); // 波前上（挤浓按整体审查 I-2 压到 0.15）
     expect(waveDensity(w, L, w.radius * 0.45)).toBeGreaterThanOrEqual(1 - 1e-9); // 里面
     expect(waveDensity(w, L, w.radius + 4 * w.halfWidth)).toBeCloseTo(1, 3); // 前面没动
     expect(w.radius).toBeGreaterThan(1.5);
@@ -142,8 +143,8 @@ describe('waveDensity：推开的是什么样子', () => {
       for (let r = 0; r <= 5; r += 0.1) expect(waveDensity(w, L, r, 0.2)).toBeGreaterThanOrEqual(0);
     }
   });
-  it('圈还在（防止为了数得过去把它关掉）：波前上至少浓两成（compress ≥ 0.2）、花纹至少被推 5 厘米（push ≥ 0.05）、波前至少 0.5 米半宽', () => {
-    expect(L.compress).toBeGreaterThanOrEqual(0.2);
+  it('圈还在（防止为了数得过去把它关掉）：波前上至少浓一成半（compress ≥ 0.15）、花纹至少被推 5 厘米（push ≥ 0.05）、波前至少 0.5 米半宽', () => {
+    expect(L.compress).toBeGreaterThanOrEqual(0.15);
     expect(L.push).toBeGreaterThanOrEqual(0.05);
     expect(waveAt(L, 0.06, MIN_W.high).shove).toBeGreaterThanOrEqual(0.05 * 0.99);
     expect(waveAt(L, 0.1, MIN_W.high).halfWidth).toBeGreaterThanOrEqual(0.5);
@@ -199,15 +200,29 @@ const LAMP = lampSeries();
 const fogCurve = (n: number, drop: number, r: number, wisp: number, p: WaveParams = L, hz = HZ, minW = MIN_W.high) =>
   Array.from({ length: n }, (_, k) => (k < drop * (hz / HZ) ? 1 : waveDensity(waveAt(p, k / hz - drop / HZ, minW), p, r, wisp)));
 
-/** 第一种算法（只看密度倍数）：最严口径下所有点的最大下数。半径 0 到 reach + 3 个半宽（每 5 厘米）、缕系数 0.2–1.7（每 0.1），高档和低档的网格宽度 */
-function worstByMultiplier(p: WaveParams, stopAt = Infinity): number {
+/**
+ * 灯再乘上访客手电的紧张闪烁（整体审查 I-2）：雾的散射算了手电，手电照着的雾亮度是「手电 × 雾圈」，手电自己带着 TORCH.nervous.flicker 的闪烁
+ * （flashlight.ts：1 − flicker × nervousWave(时间, 种子)）。种子照 tests/flicker.test.ts 的取法，现身落在闪烁的不同相位上（t0）
+ */
+const TORCH_SEEDS = Array.from({ length: 12 }, (_, k) => k * 0.9731 + 0.13);
+const TORCH_T0 = [0, 1.37, 4.9, 11.3, 23.7];
+const nervousLamps = (): number[][] =>
+  TORCH_SEEDS.flatMap((seed) => TORCH_T0.map((t0) => LAMP.lamp.map((v, i) => v * (1 - TORCH.nervous.flicker * nervousWave(t0 + i / HZ, seed)))));
+
+/**
+ * 第一种算法（只看密度倍数）：所有点的最大下数。半径 0 到 reach + 3 个半宽（每 5 厘米）、缕系数 0.2–1.7（每 0.1），高档和低档的网格宽度。
+ * lamps：灯的亮度序列（默认只有现身这一串灯）；drop：数的门槛（默认 STRICT）
+ */
+function worstByMultiplier(p: WaveParams, stopAt = Infinity, lamps: number[][] = [LAMP.lamp], drop = STRICT): number {
   let worst = 0;
   for (const q of ['high', 'low'] as const) {
     for (let r = 0; r <= p.reach + 3 * p.width * (1 + p.spread); r += 0.05) {
       for (let w = DRAFT.wisp[0]; w <= DRAFT.wisp[1] + 1e-9; w += 0.1) {
         const fog = fogCurve(LAMP.lamp.length, LAMP.drop, r, w, p, HZ, MIN_W[q]);
-        worst = Math.max(worst, countDips(LAMP.lamp.map((v, k) => v * fog[k]), HZ, STRICT));
-        if (worst >= stopAt) return worst;
+        for (const lamp of lamps) {
+          worst = Math.max(worst, countDips(lamp.map((v, k) => v * fog[k]), HZ, drop));
+          if (worst >= stopAt) return worst;
+        }
       }
     }
   }
@@ -219,7 +234,7 @@ function worstByMultiplier(p: WaveParams, stopAt = Infinity): number {
  * 噪声时间、静态密度（空地 1、墙根堆积 1.8）、镜头（第三人称、娃娃屋）各取几种；每个点一条曲线：灯 × （α / α0），α0 是稳态不透明度，
  * 只看 α0 ≥ 0.05 的点。返回最大下数和数过的曲线条数；stopAt 给了就在数到这么多下时收工（找反例用，不用数完）
  */
-function worstByField(p: WaveParams, stopAt = Infinity): { worst: number; curves: number } {
+function worstByField(p: WaveParams, stopAt = Infinity, lamps: number[][] = [LAMP.lamp], drop = STRICT): { worst: number; curves: number } {
   const C = { x: 8, z: 6 };
   let worst = 0, curves = 0;
   for (const q of ['high', 'low'] as const) {
@@ -232,13 +247,15 @@ function worstByField(p: WaveParams, stopAt = Infinity): { worst: number; curves
               const sx = C.x + r * Math.cos(phi), sz = C.z + r * Math.sin(phi);
               const a0 = fogAlpha(sx, sz, T0, null, VIEWS[vk], dens);
               if (a0 < 0.05) continue;
-              const P = LAMP.lamp.map((l, k) => {
+              const fog = LAMP.lamp.map((_, k) => {
                 const age = (k - LAMP.drop) / HZ;
-                return age < 0 ? l : (l * fogAlpha(sx, sz, T0, { cx: C.x, cz: C.z, age, L: p, minW: MIN_W[q] }, VIEWS[vk], dens)) / a0;
+                return age < 0 ? 1 : fogAlpha(sx, sz, T0, { cx: C.x, cz: C.z, age, L: p, minW: MIN_W[q] }, VIEWS[vk], dens) / a0;
               });
-              worst = Math.max(worst, countDips(P, HZ, STRICT));
-              curves++;
-              if (worst >= stopAt) return { worst, curves };
+              for (const lamp of lamps) {
+                worst = Math.max(worst, countDips(lamp.map((l, k) => l * fog[k]), HZ, drop));
+                curves++;
+                if (worst >= stopAt) return { worst, curves };
+              }
             }
           }
         }
@@ -266,15 +283,35 @@ describe('灯闪：这一圈不能让任何一点的亮度多暗一下（灯 × 
     expect(r.worst).toBeLessThanOrEqual(3);
   }, 60_000);
 
+  it('再乘上访客手电的紧张闪烁（按种子、现身落在闪烁的不同相位上）：门槛 0.1 和留 0.02 余量的 0.08 上，两种算法每一条任意 1 秒最多 3 下（整体审查 I-2）', () => {
+    const lamps = nervousLamps();
+    expect(lamps.length).toBe(TORCH_SEEDS.length * TORCH_T0.length);
+    // 前提：灯 × 紧张闪烁自己（没有雾圈）在两个门槛上都是 3 下
+    for (const lamp of lamps) {
+      expect(countDips(lamp, HZ)).toBe(3);
+      expect(countDips(lamp, HZ, STRICT)).toBe(3);
+    }
+    for (const drop of [0.1, STRICT]) {
+      expect(worstByMultiplier(L, 4, lamps, drop)).toBeLessThanOrEqual(3);
+      expect(worstByField(L, 4, lamps, drop).worst).toBeLessThanOrEqual(3);
+    }
+  }, 120_000);
+
+  it('这个扫法数得出来：挤浓 0.25（整体审查之前的数）乘上紧张闪烁，在 0.08 的门槛上有曲线多出一下（4 下）', () => {
+    const lamps = nervousLamps();
+    expect(worstByMultiplier({ ...L, compress: 0.25 }, 4, lamps, STRICT)).toBeGreaterThanOrEqual(4);
+  }, 120_000);
+
   it('这个口径数得出来：美术总监原定的数（compress 1.35 / trough 0.5 / push 0.3 / stir 0.6 / 半宽 0.35）在同样的口径下会多出一下（4 下）', () => {
     const original: WaveParams = { ...L, width: 0.35, compress: 1.35, trough: 0.5, push: 0.3, stir: 0.6 };
     expect(worstByMultiplier(original, 4)).toBeGreaterThanOrEqual(4);
     expect(worstByField(original, 4).worst).toBeGreaterThanOrEqual(4);
   }, 60_000);
 
-  it('push 不能再大：0.15 米（现在的 2.5 倍）就有云边上的点多出一下；compress 0.4（现在的 1.6 倍）也有', () => {
-    expect(worstByField({ ...L, push: 0.15 }, 4).worst).toBeGreaterThanOrEqual(4);
-    expect(worstByField({ ...L, compress: 0.4 }, 4).worst).toBeGreaterThanOrEqual(4);
+  it('push 不能再大：0.15 米（现在的 2.5 倍）就有云边上的点多出一下；compress 0.4 也有（乘上紧张闪烁、门槛 0.08 数）', () => {
+    const lamps = nervousLamps();
+    expect(worstByField({ ...L, push: 0.15 }, 4, lamps).worst).toBeGreaterThanOrEqual(4);
+    expect(worstByField({ ...L, compress: 0.4 }, 4, lamps).worst).toBeGreaterThanOrEqual(4);
   }, 60_000);
 
   it('曲线只有「涨 → 落回 1」两段，每一段都是单向的，不过冲、不来回（只看密度倍数，缕系数 1）', () => {

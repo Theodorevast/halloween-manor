@@ -864,7 +864,8 @@ function glassMaterial(hU: FloatU[], dissolve?: DissolveUniforms) {
     // 鬼魂贴近窗户：玻璃跟着墙溶开，洞边的玻璃上一层霜（加法混合，霜就是玻璃上多出来的一点冷光）
     const d = dissolveAt(dissolve, varying(pos), attribute('normal', 'vec3'), 1, true);
     m.maskNode = d.keep;
-    m.colorNode = base.add(v3(DISSOLVE.frostGlow).mul(d.frost.mul(2.5))).add(v3(DISSOLVE.rimGlow).mul(d.rim)).mul(skyGlass);
+    // 天亮的倍数（skyGlass，天亮时到 3.2）只乘玻璃本身：洞边的霜和冷光边照旧，不跟着天亮变成三倍亮的一圈「发光描边」（LT#M-3）
+    m.colorNode = base.mul(skyGlass).add(v3(DISSOLVE.frostGlow).mul(d.frost.mul(2.5))).add(v3(DISSOLVE.rimGlow).mul(d.rim));
   } else m.colorNode = base.mul(skyGlass);
   return m;
 }

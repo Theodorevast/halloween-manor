@@ -225,10 +225,12 @@ async function boot() {
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   // 地上的范围霜线（手感 FEEL-2、FEEL-11）：准星 / 手指对上物件时画出它的范围，现身蓄力时跑到 5 米，冷却好了往外呼一次。
   // 网格标了 deferCompile，要在下面开场的预编译收集之前建好。
-  // 收夜的静、光收回、登记簿那一页（一夜不在 night / closed），或者登记簿翻着：安静，不画（night 在下面才建，调到的时候早建好了）
+  // 收夜的静、光收回、登记簿那一页（night.quiet），或者登记簿翻着：安静，不画（night 在下面才建，调到的时候早建好了）。
+  // 现身、设机关、附身也看这一个（整体审查 M-1：收尾这几秒屋里已经空了，画面在收回前门）
+  const hushed = () => registerView.isOpen || night.quiet;
   const rangeFrost = createRangeFrost(c, r, {
     reduced: () => reducedMotion.matches,
-    quiet: () => registerView.isOpen || (night.phase !== 'night' && night.phase !== 'closed'),
+    quiet: hushed,
   });
   // 一夜的收尾（src/night.ts）：到点收夜、天亮，屋里没人、前门关上以后静一会儿、光收回前门、翻开登记簿；?night=<分钟> 改夜长
   const night = createNight({
@@ -243,15 +245,30 @@ async function boot() {
     openRegister: () => registerView.open({ closing: true }),
     closeRegister: () => registerView.close(),
     reload: () => location.reload(),
+    // Keep haunting 是新的一夜（整体审查 I-3）：登记簿换一页、钟点从这一刻算；墙上多一个影子「一晚最多几次」重新数
+    newNight: (t0) => {
+      registerView.newNight(t0);
+      otherShadow.newNight();
+    },
     reduced: () => reducedMotion.matches,
   }, nightTiming());
+  /** 场景叠层收起着没有（收尾时收起，Keep haunting 以后放开；只在变化时动 DOM） */
+  let overlaysHidden = false;
   modules.push(
     house, createFogView(c, r), props, rangeFrost, characters, frontDoor, otherShadow, createParticlesView(c),
     ...(ghostFx && isGhostRig(r) ? [createGhostView(c, r, ghostFx), ghostFx.lights, ghostFx.frost] : []),
     createJuice(r, c), cine, audio, overlays, hud, hints, registerView,
     // 一夜只在开场之后走（开场前模拟没动；图形设备丢了以后也不再往下走，免得登记簿翻在错误界面上）
     // 收夜以后出门那一行不问 Who's next?、光收回时准星和冷却环淡掉（2026-10-30 试玩 P2-1）：HUD 每帧问一次段落（只在变化时动 DOM）
-    { onEvent: (e, s) => night.onEvent(e, s), update: (ctx) => { if (started) night.update(ctx); hud.setNightPhase(night.phase); } },
+    // 收尾（静、光收回、收夜那一页）时名牌、眼睛、悬停标签整层淡出，不在全黑的画面上亮着（整体审查 M-1）
+    {
+      onEvent: (e, s) => night.onEvent(e, s),
+      update: (ctx) => {
+        if (started) night.update(ctx);
+        hud.setNightPhase(night.phase);
+        if (night.quiet !== overlaysHidden) overlays.setHidden((overlaysHidden = night.quiet));
+      },
+    },
   );
 
   // 登记簿：翻开时把鼠标还给玩家（第三人称要点得到按钮）；合上时不自动锁回，HUD 自己提示「Click to resume」，点一下画布就继续
@@ -275,20 +292,21 @@ async function boot() {
     // 只画够得着的物件的范围：靠的是 onHover 只发够得着的（第三人称 4 米内、看得见；够不着的走 onTooFar，不经过这里）。
     // 以后谁让 onHover 也发够不着的，这里要先判断够不够得着再 show
     rangeFrost.show(id);
-    if (id) hints.aimed(id);
+    if (id && !hushed()) hints.aimed(id);
   });
-  // 登记簿翻开着时不附身、不设机关：它自己的底子盖着画面，这里再保险一下（俯视模式点到底下的物件）
-  picker.onPick((id) => { if (started && !registerView.isOpen) world.trigger(id); });
+  // 登记簿翻开着时不附身、不设机关：它自己的底子盖着画面，这里再保险一下（俯视模式点到底下的物件）；
+  // 收尾的静、光收回这几秒也不（hushed，整体审查 M-1）
+  picker.onPick((id) => { if (started && !hushed()) world.trigger(id); });
   // 第三人称：按住设机关；右键或 F 现身（冷却中、正在现身、鬼魂在墙格里时模拟自己不理）。
   // 做不到时回应一句（hints.refused，判断在 ui/hints.ts）：机关满了（这个物件自己没设着）；
   // 现身被拒：冷却中说 Not yet，就绪却被拒是在墙里，正在现身（蓄力、停留）时再按不回应。
   // 够不着不在这里回应：准星一对准，悬停标签就写着 Too far away.（手感分析 FEEL-7，view/overlays.ts），点下去再说一句是重复
   picker.onArm((id) => {
-    if (!started || registerView.isOpen || world.arm(id)) return;
+    if (!started || hushed() || world.arm(id)) return;
     if (trapsFull(world.state.objects, id)) hints.refused('trapsFull');
   });
   if (isGhostRig(r)) r.onManifest(() => {
-    if (!started || world.manifest()) return;
+    if (!started || hushed() || world.manifest()) return;
     const why = manifestRefusal(world.state.manifest.phase);
     if (why) hints.refused(why);
   });

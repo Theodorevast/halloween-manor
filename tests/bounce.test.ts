@@ -163,8 +163,8 @@ const lamp = createFlashlight(new THREE.Group(), 'high', 1.7);
 type P3 = { x: number; y: number; z: number };
 interface Probe { P: P3; N: P3 }
 interface Run {
-  /** 手电的位置（房屋坐标，高 0.8 米）、照向（方向角）；一直紧张 */
-  pose: { x: number; z: number; dir: number };
+  /** 手电的位置（房屋坐标，高 0.8 米）、照向（方向角，可以随时间转：访客转身）；一直紧张 */
+  pose: { x: number; z: number; dir: number | ((time: number) => number) };
   /** 镜头（房屋坐标），可以随时间动 */
   cam: (time: number) => P3;
   probes: Probe[];
@@ -197,7 +197,8 @@ function record(s: Run): { probes: number[][]; power: number[]; peak: number[] }
         manifestLights(fx, 'end', at);
       }
       // 主循环里的顺序：访客（手电）先写登记表，灯闪后写 torchDim（手电下一帧才乘上），渲染前算反弹
-      lamp.update({ x: s.pose.x, y: 0.8, z: s.pose.z, dir: s.pose.dir, power: 1, nervous: true }, DT, time);
+      const dir = typeof s.pose.dir === 'function' ? s.pose.dir(time) : s.pose.dir;
+      lamp.update({ x: s.pose.x, y: 0.8, z: s.pose.z, dir, power: 1, nervous: true }, DT, time);
       if (slot < 0) slot = torches.findIndex((t) => t.x === s.pose.x && t.z === s.pose.z && t.power > 0);
       fx?.update({ dt: DT, time, state: {} as WorldState });
       updateBounce(s.cam(time), DT);
@@ -301,6 +302,31 @@ describe('反弹光不跟着手电以外的东西开关（countDips 按 60 Hz �
         expect(n).toBeLessThanOrEqual(3);
         expect(n).toBeLessThanOrEqual(own);
       });
+    }
+  });
+
+  it('现身落下后访客转身、光轴扫过门洞照进隔壁（落下后 0–0.6 秒逐帧起步）：旧房间墙上那一点任意 1 秒最多 3 下，压暗松开以后才淡出（整体审查 I-1）', () => {
+    // 走廊里站在门洞正南，斜着照北墙（门洞西边），落下以后转过去、穿过门洞照客厅地板。蓄力两下 + 落下一下已经是 3 下：
+    // 旧房间那一组要是在落下后那一秒里淡出，就是第 4 下
+    const pose = { x: 8.0, z: 6.4 };
+    const from = Math.atan2(2.9 - pose.z, 6.4 - pose.x), to = -Math.PI / 2;
+    const warm = 1.5, at = 0.3, turn = 0.15;
+    const dropAt = (Math.round((warm + at) * HZ) + Math.round(MANIFEST.windup * HZ)) / HZ;
+    const probe = { P: { x: 6.9, y: 1.0, z: 4.85 }, N: { x: 0, y: 0, z: 1 } }; // 走廊北墙，门框西边
+    for (let f = 0; f <= Math.round(MANIFEST.windup * HZ); f++) {
+      const t0 = dropAt + f / HZ;
+      const r = record({
+        pose: { ...pose, dir: (time) => from + (to - from) * Math.min(1, Math.max(0, (time - t0) / turn)) },
+        cam: () => ({ x: 8.5, y: 1.9, z: 7.0 }),
+        probes: [probe],
+        warm,
+        seconds: 4.5,
+        manifest: at,
+      });
+      expect(lit(r.peak[0])).toBe(true);
+      expect(countDips(r.probes[0], HZ)).toBeLessThanOrEqual(3);
+      // 压暗松开以后照样换过去：旧房间最后淡完
+      expect(r.probes[0].at(-1)).toBeLessThan(0.01);
     }
   });
 

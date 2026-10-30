@@ -8,6 +8,7 @@
 //   现身落下、后颈一凉同一步还有一个 object = GHOST_SOURCE 的 startle：是同一笔恐惧值，不改上面记下的
 // 天亮自己走的（exit 带 calm）写 leftAtDawn，不算吓跑；还在屋里的写 stillInside。
 // 钟点：模拟时间 0 是 NIGHT.clock.start 点，NIGHT.dawn 是 NIGHT.clock.end 点，中间线性，过了天亮照样往后走。
+// Keep haunting 以后是新的一夜（newNight，整体审查 I-3）：换一页（上一夜的人、墙上多一个影子那一句不再带），钟点从这一夜开始的时刻算。
 // 页脚两三句，数字用英文单词写在句子里。不做大号数字、表格、打分、评级
 import { VISITOR_SPECS } from '../config/character';
 import { NIGHT } from '../config/night';
@@ -123,6 +124,8 @@ export interface Register {
   noteOtherOne(): void;
   /** 翻开这一页。now：此刻的模拟时间（还在屋里的人算到这一刻）；maxLines 默认 REGISTER.maxLines */
   page(now: number, maxLines?: number): RegisterPage;
+  /** 新的一夜从模拟时间 t0 开始（Keep haunting）：换一页，名单、墙上多一个影子那一句清掉，钟点按 t − t0 算（第二夜也是 9 pm 起） */
+  newNight(t0: number): void;
 }
 
 /** outfitOf：访客编号 → 造型 id（正式游戏是 view/characters.ts 的 outfitOf；测试、开发页给假的） */
@@ -134,6 +137,9 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
   /** 刚发作、还没等到 trigger 的机关 */
   let sprung: string | null = null;
   let otherOne = false;
+  /** 这一夜从模拟时间几秒开始（开局 0；Keep haunting 以后是点下去的那一刻）：钟点按离它多久算 */
+  let origin = 0;
+  const clock = (t: number, meridiem = true) => clockAt(t - origin, meridiem);
 
   /** 找这个访客；没记过就从 state.npcs 里记下（cameAt：spawn 那一刻，别的事件先到时为 null）。state 里也没有就记不下 */
   const ensure = (id: number, state: Readonly<WorldState>, cameAt: number | null = null): Visitor | null => {
@@ -166,9 +172,9 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
   /** 第二行：几点进来、怎么走的。第二个钟点和进门那个同在上午或下午时不再写 am / pm（"came in at 9:12 pm; ran from the wardrobe at 9:18"） */
   const story = (v: Visitor): string => {
     const came = v.cameAt;
-    const at = (t: number) => clockAt(t, came === null || !sameHalf(came, t));
+    const at = (t: number) => clock(t, came === null || !sameHalf(came - origin, t - origin));
     const parts: string[] = [];
-    if (came !== null) parts.push(R.cameIn(clockAt(came)));
+    if (came !== null) parts.push(R.cameIn(clock(came)));
     if (v.ranAt !== null) {
       const time = at(v.ranAt);
       const c = v.cause;
@@ -230,7 +236,7 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
     if (seen > 0) picks.push(F.someSaw(inWords(seen, true)));
     if (calm > 0) picks.push(F.neverRan(inWords(calm, true)));
     const stay = longest(now);
-    if (stay) picks.push(F.stayedLongest(stay.name, clockAt(stay.until)));
+    if (stay) picks.push(F.stayedLongest(stay.name, clock(stay.until)));
     if (list.length > 0 && seen === 0) picks.push(F.noneSaw);
     out.push(...picks.slice(0, Math.max(0, REGISTER.footer - out.length - (otherOne ? 1 : 0))));
     return { footer: out, postscript: otherOne ? F.oneMore : '' };
@@ -292,6 +298,13 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
     },
     noteOtherOne() {
       otherOne = true;
+    },
+    newNight(t0) {
+      list.length = 0;
+      byId.clear();
+      sprung = null;
+      otherOne = false;
+      origin = t0;
     },
     page(now, maxLines = REGISTER.maxLines) {
       const shown = list.length > maxLines + 1 ? list.slice(0, maxLines) : list;

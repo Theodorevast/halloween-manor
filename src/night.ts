@@ -75,6 +75,11 @@ export interface NightDeps {
   closeRegister(): void;
   /** Another night：重新载入 */
   reload(): void;
+  /**
+   * Keep haunting：新的一夜从模拟时间 t0 开始（整体审查 I-3）。main.ts 接到登记簿（换一页：上一夜的不再累计，钟点从 t0 算，第二夜也是 9 pm 起）
+   * 和墙上多一个影子（一晚最多几次按这一夜重新算）
+   */
+  newNight(t0: number): void;
   /** 此刻是不是「减少动态效果」（每次用到时问：玩家可能中途改系统设置） */
   reduced(): boolean;
 }
@@ -93,6 +98,11 @@ export interface NightSnapshot {
 
 export interface Night extends Module {
   readonly phase: NightPhase;
+  /**
+   * 收尾（静、光收回、收夜那一页）：屋里已经空了、画面在收回前门（整体审查 M-1）。main.ts 这时不收现身、设机关、附身，
+   * 场景叠层（名牌、悬停标签）收起，范围霜线也不画；Keep haunting 以后（回到 night）放开
+   */
+  readonly quiet: boolean;
   onEvent(e: SimEvent, state: Readonly<WorldState>): void;
   update(ctx: FrameCtx): void;
   /** 收夜那一页上点了 Keep haunting（只认登记簿翻开着的那一段；连着调、重入都只算一次） */
@@ -171,6 +181,10 @@ export function createNight(deps: NightDeps, timing: NightTiming = { length: NIG
       return phase;
     },
 
+    get quiet() {
+      return phase === 'silence' || phase === 'retreat' || phase === 'register';
+    },
+
     onEvent(e, state) {
       // 收夜那一刻屋里没人，模拟最后放进来的那一位：HUD 照常播他进门，这里再补一句「最后一位」
       if (e.type !== 'spawn' || !e.last) return;
@@ -221,9 +235,12 @@ export function createNight(deps: NightDeps, timing: NightTiming = { length: NIG
     keepHaunting() {
       if (phase !== 'register') return;
       // 先换阶段再做事：合上登记簿会回调 onToggle(false)，main.ts 又接回这里（重入时上面那一句挡住）
-      restart(deps.world.state.time);
+      const t = deps.world.state.time;
+      restart(t);
       const r = deps.reduced();
       deps.closeRegister();
+      // 新的一夜：登记簿换一页、墙上多一个影子重新计数（合上之后再换：淡出的那一页还是上一夜的）
+      deps.newNight(t);
       deps.spread(r ? 0 : NIGHT_FX.spread);
       deps.porch(1, r ? 0 : NIGHT.porchFade.seconds);
       deps.ambience(1, NIGHT_FX.ambienceBack);

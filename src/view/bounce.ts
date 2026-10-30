@@ -22,7 +22,7 @@ import { Fn, If, clamp, dot, float, length, max, smoothstep, uniform, vec3 } fro
 import { CELL, ROOMS, WALL_T, inGrid, roomAt, type Rect, type RoomId } from '../config/house';
 import { wallDistance } from './flashlight';
 import { PALETTE } from './palette';
-import { TORCH_COUNT, torches, type TorchSample } from './torches';
+import { TORCH_COUNT, torchDim, torches, type TorchSample } from './torches';
 
 /**
  * gain：总的倍数；d0：光衰到一半的距离；reach：最远照多远（reach / 2 起慢慢收到 0）；wrap：侧对反弹点的面也亮一点；
@@ -171,14 +171,16 @@ export function updateBounce(cam: P3, dt: number) {
         now.z += (now.mz - now.z) * kPoint;
         tr.pendT = Math.max(0, tr.pendT - dt);
       } else {
-        // 落点跑到别的房间（或者没有落点了）：先不跟，在那边连着占上风 hold 秒才换
+        // 落点跑到别的房间（或者没有落点了）：先不跟，在那边连着占上风 hold 秒才换。
+        // 现身的灯闪正压着这支手电（torchDim < 1）时只攒着（最多攒满 hold）、不换（整体审查 I-1）：旧房间那一组淡出是实打实的一下暗，
+        // 现身自己已经用满了任意 1 秒 3 下，落在落下后那一秒里就是第 4 下。压暗松开（torchDim 回到 1）再换；新房间那一组淡入是变亮，不算
         const r = h ? h.room : null;
-        if (r === tr.pend) tr.pendT += dt;
+        if (r === tr.pend) tr.pendT = Math.min(B.hold, tr.pendT + dt);
         else {
           tr.pend = r;
           tr.pendT = dt;
         }
-        if (tr.pendT >= B.hold - 1e-9) {
+        if (tr.pendT >= B.hold - 1e-9 && torchDim[i] >= 1) {
           if (h && tr.old.room === h.room && tr.old.k > 0) {
             // 换回刚换下来、还没淡完的那个房间：两组对调，各自接着现在的亮度走
             tr.now = tr.old;

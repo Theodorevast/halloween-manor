@@ -14,6 +14,7 @@ import { NIGHT_FX, createNight, type NightDeps, type NightTiming } from '../src/
 import type { NpcMode, NpcState, SimEvent, WorldState } from '../src/sim/types';
 import { manifestLights } from '../src/view/ghost';
 import { DAWN, MOON, PORCH_FADE, createPorchDimmer, dawnLights, porchFlicker, smoothRamp } from '../src/view/house';
+import { REGISTER, clockAt, createRegister, inWords } from '../src/ui/register';
 import { countDips, createLightFx, dipStarts } from '../src/view/lightfx';
 import { PALETTE } from '../src/view/palette';
 
@@ -38,6 +39,8 @@ interface SetupOpts {
   lastOnClose?: boolean;
   /** 合上登记簿时（main.ts 把收夜那一页的 onToggle(false) 接到 keepHaunting：会重入） */
   onShut?: () => void;
+  /** Keep haunting 开新的一夜时（main.ts 接到登记簿、墙上多一个影子的 newNight） */
+  onNewNight?: (t0: number) => void;
 }
 
 function setup(o: SetupOpts = {}) {
@@ -86,6 +89,10 @@ function setup(o: SetupOpts = {}) {
     reload() {
       n.reload++;
       log.push('reload');
+    },
+    newNight(t0) {
+      log.push(`newNight ${t0}`);
+      o.onNewNight?.(t0);
     },
     reduced: () => reduced,
   };
@@ -246,7 +253,7 @@ describe('一夜的状态机（src/night.ts）', () => {
     const T = t.state.time;
     t.night.keepHaunting();
     expect(t.take()).toEqual([
-      'closeRegister', `spread ${NIGHT_FX.spread}`, `porch 1 ${NIGHT.porchFade.seconds}`, BACK, `dawnLight 0 ${NIGHT_FX.dawnBack}`, 'reopen',
+      'closeRegister', `newNight ${T}`, `spread ${NIGHT_FX.spread}`, `porch 1 ${NIGHT.porchFade.seconds}`, BACK, `dawnLight 0 ${NIGHT_FX.dawnBack}`, 'reopen',
     ]);
     expect(t.night.phase).toBe('night');
     expect(t.night.snapshot()).toMatchObject({ phase: 'night', start: T, closeAt: T + NIGHT.length, dawnAt: T + NIGHT.dawn, dawned: false });
@@ -280,6 +287,72 @@ describe('一夜的状态机（src/night.ts）', () => {
     expect(t.n.dawn).toBe(1);
   });
 
+  it('Keep haunting 以后是新的一夜（整体审查 I-3）：登记簿换一页——上一夜的人、墙上多一个影子那一句都不带，钟点从这一夜的 9 pm 起', () => {
+    const reg = createRegister();
+    const t = setup({ onNewNight: (t0) => reg.newNight(t0) });
+    const at = (time: number, e: SimEvent) => {
+      t.until(time);
+      reg.onEvent(e, t.ws);
+    };
+    /** 晚 9 点以后第 m 分钟（钟点）对应这一夜开始以后的模拟秒数 */
+    const min = (m: number) => (NIGHT.dawn * m) / 540;
+    // 第一夜：Mia 进来、被吓跑出门；墙上多一个影子出现过
+    t.state.npcs.push(visitor(1, 'Mia'));
+    at(min(10), { type: 'spawn', npc: 1 });
+    at(min(40), { type: 'startle', npc: 1, object: null, amount: 40, scream: true });
+    reg.onEvent({ type: 'flee', npc: 1 }, t.ws);
+    t.state.npcs.length = 0;
+    reg.onEvent({ type: 'exit', npc: 1, name: 'Mia', total: 1 }, t.ws);
+    reg.noteOtherOne();
+    t.until(NIGHT.length + 0.1);
+    t.toRegister();
+    const first = reg.page(t.state.time);
+    expect(first.lines.map((l) => l.name)).toEqual(['Mia']);
+    expect(first.postscript).toBe(STRINGS.register.footer.oneMore);
+    // 在登记簿上看了一会儿，点 Keep haunting
+    t.run(7.5);
+    const T = t.state.time;
+    expect(T).toBeGreaterThan(NIGHT.length);
+    t.night.keepHaunting();
+    expect(t.take()).toContain(`newNight ${T}`);
+    // 第二夜：Theo 在这一夜的 9:12 pm 进来，9:30 被吓跑
+    t.state.npcs.push(visitor(2, 'Theo'));
+    at(T + min(12), { type: 'spawn', npc: 2 });
+    at(T + min(30), { type: 'startle', npc: 2, object: null, amount: 40, scream: true });
+    reg.onEvent({ type: 'flee', npc: 2 }, t.ws);
+    const second = reg.page(t.state.time);
+    expect(second.lines.map((l) => l.name)).toEqual(['Theo']);
+    expect(clockAt(min(12))).toMatch(/^9:12 /);
+    expect(second.lines[0].story).toBe(`${STRINGS.register.cameIn(clockAt(min(12)))}; ${STRINGS.register.scream(clockAt(min(30), false))}`);
+    // 页脚只数这一夜的：一个进来、一个跑了；不带上一夜墙上多一个影子那一句
+    expect(second.footer[0]).toBe(STRINGS.register.footer.cameRan(inWords(1, true), inWords(1, true)));
+    expect(second.footer.length).toBeLessThanOrEqual(REGISTER.footer);
+    expect(second.postscript).toBe('');
+    expect(second.footer.join(' ')).not.toContain('Mia');
+  });
+
+  it('收尾（静、光收回、登记簿那一页）是 quiet：main.ts 这时不收现身、设机关、附身，场景叠层收起；夜里、收夜后等人走时、Keep haunting 以后不是（整体审查 M-1）', () => {
+    const t = setup();
+    t.state.npcs.push(visitor(1, 'Mia'));
+    expect(t.night.quiet).toBe(false);
+    t.until(NIGHT.length + 0.1);
+    expect(t.night.phase).toBe('closed');
+    expect(t.night.quiet).toBe(false);
+    t.state.npcs.length = 0;
+    t.frame();
+    expect(t.night.phase).toBe('silence');
+    expect(t.night.quiet).toBe(true);
+    while (t.night.phase === 'silence') t.frame();
+    expect(t.night.phase).toBe('retreat');
+    expect(t.night.quiet).toBe(true);
+    while (t.night.phase === 'retreat') t.frame();
+    expect(t.night.phase).toBe('register');
+    expect(t.night.quiet).toBe(true);
+    t.night.keepHaunting();
+    expect(t.night.phase).toBe('night');
+    expect(t.night.quiet).toBe(false);
+  });
+
   it('Another night：重新载入', () => {
     const t = setup();
     t.night.anotherNight();
@@ -298,8 +371,9 @@ describe('一夜的状态机（src/night.ts）', () => {
     expect(Math.abs(framesIn(t, 'silence') - silence * HZ)).toBeLessThanOrEqual(1);
     expect(t.take()).toEqual(['retreat 0', 'openRegister']);
     expect(t.night.phase).toBe('register');
+    const T = t.state.time;
     t.night.keepHaunting();
-    expect(t.take()).toEqual(['closeRegister', 'spread 0', 'porch 1 0', BACK, 'dawnLight 0 0', 'reopen']);
+    expect(t.take()).toEqual(['closeRegister', `newNight ${T}`, 'spread 0', 'porch 1 0', BACK, 'dawnLight 0 0', 'reopen']);
   });
 
   it('静、光收回的这几秒里屋里又有人了（调试放的人、模拟晚一步才放进来的最后一位）：作罢，环境层回来（光收回过的话再铺开），接着等', () => {

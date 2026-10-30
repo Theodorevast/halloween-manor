@@ -464,7 +464,7 @@ export interface OtherShadow extends Module {
   onAppear(cb: () => void): void;
   /**
    * 新的一夜（Keep haunting 时调，整体审查 I-3）：这一夜出现过的次数、用过的站位清零，after、afterScared、widenAt 从此刻（上一帧的模拟时间、
-   * 吓跑数）重新算；放着的马上撤掉。还没接进 main.ts（收尾那一路接）
+   * 吓跑数）重新算；放着的马上撤掉。main.ts 接在 night.ts 的 newNight 上
    */
   newNight(): void;
 }

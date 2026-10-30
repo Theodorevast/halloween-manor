@@ -30,6 +30,8 @@ export interface RegisterView extends Module {
   onToggle(cb: (open: boolean) => void): void;
   /** 墙上多一个影子出现过（页脚多一句 "And one more, who did not sign."） */
   noteOtherOne(): void;
+  /** Keep haunting：新的一夜从模拟时间 t0 开始，换一页（register.ts 的 newNight）；下次翻开就是新的这一页 */
+  newNight(t0: number): void;
   onEvent(e: SimEvent, state: Readonly<WorldState>): void;
   update(ctx: FrameCtx): void;
 }
@@ -299,6 +301,9 @@ export function createRegisterView(root: HTMLElement, opts: RegisterViewOptions 
     },
     noteOtherOne() {
       reg.noteOtherOne();
+    },
+    newNight(t0) {
+      reg.newNight(t0);
     },
     onEvent(e, state) {
       now = state.time;
