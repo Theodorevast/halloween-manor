@@ -1,10 +1,15 @@
 // 地上的范围霜线（2026-10-30，手感 FEEL-2、FEEL-11）：试玩时「不知道在什么范围内可以吓到他」。
 // - 准星（触屏是手指）对上物件时，地上用极淡的一道霜画出这个物件的范围：被墙、门洞切开的真形状（惊吓类：看得见它、站在正面；
 //   引诱类：听得见它）。移开就退掉；冷却中的物件也画，整体减半（告诉你范围，但不是出手的时候）
-// - 现身蓄力时，霜线从鬼魂脚下往外跑到 5 米（蓄力时就转过来、落下时被吓到的那一圈），停到收回，再化掉；
-//   冷却好了的那一刻（没瞄着物件时），脚下的霜往外轻轻呼一次，到 5 米为止，比蓄力时淡
-// 「鬼的寒气到这里为止」：和墙上溶开的霜、现身脚下的霜（frost.ts）是同一种东西。受光、不发光，只带墙霜那一点点自发光
-// （DISSOLVE.frostGlow，暗处隐约看得出），线上略提光泽（手电扫过有一点反光）。不是霓虹圈，不是界面
+// - 现身蓄力时，霜线从鬼魂脚下往外跑到 MANIFEST.range（6 米：落下时看得见就被吓到的那一圈，和结算同一个数），停到收回，再化掉；
+//   冷却好了的那一刻（没瞄着物件时），脚下的霜往外轻轻呼一次，到同一个半径为止，比蓄力时淡。
+//   （2026-10-30 critic G-1：原来画的是察觉半径 5 米，结算是 6 米，5.2、5.3 米外的人照样被吓到，线画错了地方）
+// 「鬼的寒气到这里为止」：和墙上溶开的霜、现身脚下的霜（frost.ts）是同一种东西。受光（冷白的底色，台灯、手电照着的地板上比地板亮），
+// 线上自己带一点冷光（暗处看得出），略提光泽（手电扫过有一点反光）。不是霓虹圈，不是界面。
+// 2026-10-30 eye S-5（地上的霜线在所有瞄物件的截图里都看不到，看得到的又像撒了一地盐）：线改成按屏幕像素算宽（几个像素，远近一样细），
+// 浓一点、自己带一点冷光；边上只留很轻的起伏，不再碎成冰晶；第三人称离镜头 1–2 米以内淡掉（原来那一段在屏幕上几十像素宽，是一条白带）
+// 吓跑的人（flee 事件）也从这里转给鬼魂镜头（engine/ghostRig.ts 的 requestLean）：镜头不在 main.ts 的模块表里，
+// 这一路的文件里只有这个模块既收事件、又拿得到镜头
 //
 // 范围怎么算：和模拟结算同一套规则，直接调模拟的 canSee / canHear / facesToward（见 inRange），不另写一份。
 // 地面按 0.125 米一格（128 × 96，盖满 16 × 12 米），每格的格心问一次「站在这里、看着它的访客会不会被这一下影响」，得到二值图；
@@ -17,13 +22,15 @@
 //
 // 画法：一块贴地的方片（高过地毯和现身的霜），只盖住正在画的范围的外接框；不用的时候整个藏起来，一点都不画。
 // 两张物件的范围（换着瞄时一张退、一张进）和现身那一张各占纹理的一个通道，片元里取一次纹理、算一两次噪声。
+// 线宽按屏幕像素：片元里 fwidth(有符号距离) 是这一处一个像素有多少米，有符号距离除以它就是离边界几个像素，娃娃屋、第三人称一个算法。
 // 高档、低档各一份材质（低档不叠冰晶），切画质只换显示哪一份，不重编；两份都标 deferCompile，开场按钮可用之后由 main.ts 预编译，
 // 第一次瞄准不现编。不加灯、不碰任何灯（没有明暗变化，和防光敏的「暗一下」无关）
 import * as THREE from 'three/webgpu';
-import { float, length, max, min, mix, mx_noise_float, positionWorld, smoothstep, texture, uniform, vec2, vec3 } from 'three/tsl';
+import { cameraPosition, float, fwidth, length, max, min, mix, mx_noise_float, positionWorld, smoothstep, texture, uniform, vec2, vec3 } from 'three/tsl';
 import { CELL, GRID_H, GRID_W, HOUSE_D, HOUSE_W, PROPS, cellOf, propCenter } from '../config/house';
 import { SCARES } from '../config/scares';
 import { MANIFEST, VISION } from '../config/visitors';
+import { requestLean } from '../engine/ghostRig';
 import { isGhostRig, type CameraRig, type FrameCtx, type Module, type Quality, type RenderCore } from '../engine/types';
 import { angleOf } from '../lib/angle';
 import { Grid } from '../sim/grid';
@@ -31,9 +38,9 @@ import { canHear, canSee } from '../sim/perception';
 import { facesToward } from '../sim/scares';
 import type { ScareObjectState, SimEvent, Vec2, WorldState } from '../sim/types';
 import { FROST } from './frost';
-import { DISSOLVE, v3 } from './walls';
 
 type F = THREE.Node<'float'>;
+const v3 = (c: THREE.Color) => vec3(c.r, c.g, c.b);
 
 export const RANGE_FROST = {
   /** 离地高度（米）：地毯、走廊长毯 0.016，现身的霜 FROST.y 0.02，高过它们 */
@@ -41,32 +48,38 @@ export const RANGE_FROST = {
   /** 画在现身的霜（FROST.renderOrder 1.2）之后、地面薄雾（1.5）之前 */
   renderOrder: 1.25,
   /**
-   * 线宽（米）：第三人称固定 ghost；娃娃屋按屏幕上约 px 像素宽换算（每米像素数 = 画布宽 ÷ 正交相机左右宽），夹在 [min, max]：
-   * 桌面娃娃屋约 56 像素 / 米，手机横屏 27、竖屏 18
+   * 线宽（CSS 像素，乘渲染的像素比换成物理像素）：边界往里这么宽，两边各一个像素的抗锯齿；远近、斜着看都一样细（片元里用 fwidth 换算）。
+   * 2026-10-30 eye S-5：原来第三人称固定 0.16 米（贴着镜头的那一段在屏幕上几十像素宽，是一条白带，远处又只剩一两个像素），
+   * 娃娃屋按屏幕约 6 像素换算成米
    */
-  width: { ghost: 0.16, px: 6, min: 0.12, max: 0.35 },
-  /** 线、片的浓度（不透明度的系数）：第三人称；娃娃屋远看要浓一点 */
-  weights: { ghost: { line: 0.3, film: 0.045 }, doll: { line: 0.38, film: 0.06 } },
+  width: { ghost: 2.5, doll: 4 },
+  /** 线离边界最远多少米：极斜地看地板（一个像素盖住好几厘米）时线也不往里漫开；范围里离边界更远的地方只有极淡的片 */
+  bandMax: 0.2,
+  /** 线、片的浓度（不透明度的系数）：线细了、浓一点（原来第三人称 0.3、娃娃屋 0.38，暗处看不出来）；片照旧很淡 */
+  weights: { ghost: { line: 0.75, film: 0.045 }, doll: { line: 0.85, film: 0.06 } },
   /**
-   * 线的边：两层噪声（freq 每米几个起伏，amp 米）把边推得不齐。粗的一层同墙上溶洞边的 DISSOLVE.noise[0]；
-   * 幅度比溶洞边小得多：线只有十几厘米宽，推 6 厘米时远看是一条蛇形的细线，像画上去的，不像霜。细的一层是霜边上的毛刺
+   * 线的边：一层很轻的噪声（freq 每米几个起伏，amp 米），边不像尺子画的就够了。原来两层、推 3 + 1.8 厘米，高档再碎成冰晶：
+   * 远看是蛇形的线，近看像撒了一地盐（eye S-5）。要的是一条干净、细、连续的线
    */
-  noise: [{ freq: DISSOLVE.noise[0].freq, amp: 0.03 }, { freq: 7.3, amp: 0.018 }] as const,
-  /**
-   * 高档再叠一层冰晶（频率同 FROST.crystal）：边界上是连着的霜，往里渐渐碎成冰晶（浓淡在 [lo, hi] 之间）——
-   * 像 frost.ts 长到的那条边，寒气在边上堆得最厚
-   */
-  crystal: { lo: 0.35, hi: 1 },
+  noise: { freq: 2.3, amp: 0.012 },
+  /** 高档：线上的冰晶只让亮度有一点起伏（lo..hi，频率同 FROST.crystal），不把线碎开 */
+  crystal: { lo: 0.8, hi: 1 },
   /** 有符号距离的高斯平滑：σ（米）、窗口半径（格），见 smoothField */
   smooth: 0.2,
   smoothR: 4,
-  /** 线：从边界往里 0..soft 米渐浓，线宽的 0.6 倍到 1 倍之间渐淡；片：从边界往里 film 米渐到满 */
-  soft: 0.03,
+  /** 片：从边界往里 film 米渐到满 */
   film: 0.3,
-  /** 自发光 = DISSOLVE.frostGlow × (线 × line + 片 × film) */
-  glow: { line: 2, film: 0.5 },
+  /**
+   * 颜色（线性）：底色冷白（受光：台灯、手电照着的地板上比地板亮）；glow 是线自己的一点冷光，没有灯也看得出（eye S-5「暗处的细线提亮」）；
+   * 片的自发光是线的 glowFilm 倍。不再借墙上溶洞的霜光（DISSOLVE.frostGlow）：那是洞边的，画面那一路在收
+   */
+  albedo: new THREE.Color(0.62, 0.68, 0.76),
+  glow: new THREE.Color(0.042, 0.055, 0.072),
+  glowFilm: 0.2,
   /** 粗糙度：片上 rough，线上降到 FROST.roughness（略提光泽，手电扫过有一点反光；不发光） */
   rough: 0.85,
+  /** 第三人称：离镜头 near[0] 米以内不画、near[1] 米以外画满（贴着镜头那一段不再是一条白带）；娃娃屋处处画满 */
+  near: [0.8, 2.0] as [number, number],
   /**
    * 对准：fadeIn 秒 ease-out 浮现，同一段时间里边界从里面 push 米处推到实际位置（读起来是寒气往外漫到边上停住）；
    * 移开、换了物件：fadeOut 秒线性退掉
@@ -76,12 +89,12 @@ export const RANGE_FROST = {
   cooling: 0.5,
   coolTime: 0.2,
   /**
-   * 现身：蓄力 MANIFEST.windup 秒里前沿从 0 长到 MANIFEST.noticeRadius（1 − (1 − t)²，和 frost.ts 的霜同一条曲线，正好跟蓄力时
+   * 现身：蓄力 MANIFEST.windup 秒里前沿从 0 长到 MANIFEST.range（1 − (1 − t)²，和 frost.ts 的霜同一条曲线，正好跟蓄力时
    * 附近的灯暗那两下同步），停到收回（end 事件；没收到就 fallback 秒后），再 melt 秒化掉
    */
   manifest: { melt: 1.2, fallback: 1 },
-  /** 冷却好了往外呼一次（FEEL-11）：grow 秒长到 MANIFEST.noticeRadius（ease-out），线、片乘 line、film（比蓄力时淡），再 melt 秒化掉 */
-  exhale: { grow: 0.9, line: 0.22, film: 0.03, melt: 1.2 },
+  /** 冷却好了往外呼一次（FEEL-11）：grow 秒长到 MANIFEST.range（ease-out），线、片乘 line、film（比蓄力时淡），再 melt 秒化掉 */
+  exhale: { grow: 0.9, line: 0.5, film: 0.03, melt: 1.2 },
   /**
    * 空闲预算（9 个物件的范围趁空闲先算好，一次一个）：这一段空闲剩不到 need 毫秒就等下一段（等了 timeout 毫秒还没空就照算一个，
    * 一直忙的页面也算得完）；没有 requestIdleCallback（Safari / iOS）时退成 setTimeout，隔 gap 毫秒算一个
@@ -108,13 +121,14 @@ export const texelCenter = (k: number): Vec2 => ({ x: ((k % FIELD.w) + 0.5) * FI
  * 站在 p、转过来看着它的访客，会不会被这一下影响。规则就是结算用的那几个函数：
  * - 惊吓类（world.ts 的惊吓结算、seenBy）：facesToward（肖像、镜子只算正面）+ canSee（光锥对着它、距离 ≤ min(range, VISION.range)、格子视线）
  * - 引诱类（world.ts 的引诱结算）：canHear（有视线 ≤ range，隔墙 ≤ range × WALL_HEARING_FACTOR）
- * - 现身（world.ts 的 stepManifest）：察觉半径内的人蓄力时就转过来了，落下时看得见就被吓到：canSee（距离 ≤ min(noticeRadius, range)、视线）
+ * - 现身（world.ts 的 stepManifest）：落下时看得见那里就被吓到：canSee（距离 ≤ MANIFEST.range、视线）。原来画的是 min(察觉半径 5, range 6)，
+ *   结算按 6 米，差的那一圈里的人照样被吓到（critic G-1）；现在和结算同一个数
  * 访客的手电朝哪儿是站位以外的事，这里按「看着它」算：范围线回答的是「站在哪里会被吓到」
  */
 export function inRange(grid: Grid, act: RangeAct, p: Vec2): boolean {
   const t = act.kind === 'object' ? act.object.pos : act.at;
   const look = { pos: p, lookDir: angleOf(t.x - p.x, t.z - p.z) };
-  if (act.kind === 'manifest') return canSee(grid, look, t, Math.min(MANIFEST.noticeRadius, MANIFEST.range));
+  if (act.kind === 'manifest') return canSee(grid, look, t, MANIFEST.range);
   const spec = SCARES[act.object.type];
   if (spec.kind === 'lure') return canHear(grid, p, t, spec.range);
   return facesToward(act.object, p) && canSee(grid, look, t, Math.min(spec.range, VISION.range));
@@ -126,7 +140,7 @@ export function inRange(grid: Grid, act: RangeAct, p: Vec2): boolean {
  */
 export function rangeMask(grid: Grid, act: RangeAct, out = new Uint8Array(N)): Uint8Array {
   const c = act.kind === 'object' ? act.object.pos : act.at;
-  const reach = (act.kind === 'object' ? SCARES[act.object.type].range : MANIFEST.noticeRadius) + FIELD.cell;
+  const reach = (act.kind === 'object' ? SCARES[act.object.type].range : MANIFEST.range) + FIELD.cell;
   for (let k = 0; k < N; k++) {
     const p = texelCenter(k);
     out[k] = (p.x - c.x) ** 2 + (p.z - c.z) ** 2 <= reach * reach && inRange(grid, act, p) ? 1 : 0;
@@ -302,7 +316,7 @@ function encode(field: Float32Array): Encoded {
   const bytes = new Uint8Array(N);
   let u0 = FIELD.w, v0 = FIELD.h, u1 = -1, v1 = -1;
   // 线画在 s + 噪声 > 0 的地方：s 比 −噪声幅度再往外一点的格子都可能画到
-  const reach = -(RANGE_FROST.noise[0].amp + RANGE_FROST.noise[1].amp + 0.01);
+  const reach = -(RANGE_FROST.noise.amp + 0.01);
   for (let k = 0; k < N; k++) {
     const s = field[k];
     bytes[k] = Math.round((Math.max(-1, Math.min(1, s / FIELD.clamp)) * 0.5 + 0.5) * 255);
@@ -363,7 +377,7 @@ export interface RangeFrostDebug {
   visible: boolean;
   slots: { id: string | null; level: number; target: number; shift: number; cool: number }[];
   manifest: { kind: 'manifest' | 'exhale' | null; level: number; front: number; center: Vec2 | null; line: number; film: number };
-  /** 线宽（米） */
+  /** 线宽（物理像素） */
   width: number;
   /** 正在画的外接框（房屋米坐标） */
   box: Box | null;
@@ -437,8 +451,10 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
   const uMan = uniform(new THREE.Vector4());
   /** 物件的线、片系数 x、y；现身那张的线、片系数 z、w */
   const uK = uniform(new THREE.Vector4());
-  /** 线宽（米） */
-  const uW = uniform(RANGE_FROST.width.ghost);
+  /** 线宽（物理像素）：每帧按画质的像素比换算 */
+  const uPx = uniform(RANGE_FROST.width.ghost);
+  /** 离镜头多近淡掉（米）：第三人称 RANGE_FROST.near；娃娃屋（正交，镜头在 40 米外）给负数，处处画满 */
+  const uNear = uniform(ghostMode ? new THREE.Vector2(...RANGE_FROST.near) : new THREE.Vector2(-2, -1));
 
   const makeMaterial = (crystal: boolean) => {
     const R = RANGE_FROST;
@@ -455,27 +471,30 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
     const sG = s(t.g).sub(uObj.w);
     // 现身那张再和前沿的圆取交（前沿还没长到的地方算外面）
     const sB = min(s(t.b), uMan.z.sub(length(h.sub(uMan.xy))));
-    // 边上的噪声（米）：线不是一条整齐的带子，是长到这里为止的一道霜边。低档只用粗的那一层
-    const [n0, n1] = R.noise;
-    const coarse = mx_noise_float(vec3(P.x, P.z, 0.37).mul(n0.freq)).mul(n0.amp);
-    const n = crystal ? coarse.add(mx_noise_float(vec3(P.x, P.z, 4.1).mul(n1.freq)).mul(n1.amp)) : coarse;
-    // 高档：冰晶（同 frost.ts 的颗粒）。边界上连成一片，往里（线宽的 0.25 到 1 倍）渐渐碎开
-    const ice = crystal ? smoothstep(0.15, 0.7, mx_noise_float(vec3(P.x, P.z, 1.7).mul(FROST.crystal)).mul(0.5).add(0.5)) : null;
+    // 边上一层很轻的噪声（米）：不像尺子画的就够了
+    const n = mx_noise_float(vec3(P.x, P.z, 0.37).mul(R.noise.freq)).mul(R.noise.amp);
+    // 线：离边界（往里）几个像素 = 有符号距离 ÷ 这一处一个像素有多少米（fwidth）；uPx 个像素宽，两边各一个像素的抗锯齿
     const lineOf = (v: F) => {
       const e = v.add(n);
-      const band = smoothstep(0, R.soft, e).mul(float(1).sub(smoothstep(uW.mul(0.6), uW, e)));
-      return ice ? band.mul(mix(float(1), mix(float(R.crystal.lo), float(R.crystal.hi), ice), smoothstep(uW.mul(0.25), uW, e))) : band;
+      const px = e.div(max(fwidth(e), float(1e-6)));
+      return smoothstep(0, 1, px).mul(float(1).sub(smoothstep(uPx.sub(1), uPx, px))).mul(float(1).sub(smoothstep(R.bandMax * 0.7, R.bandMax, e)));
     };
     const filmOf = (v: F) => smoothstep(0, R.film, v);
     const lR = lineOf(sR).mul(uObj.x), lG = lineOf(sG).mul(uObj.y), lB = lineOf(sB).mul(uMan.w);
     const fR = filmOf(sR).mul(uObj.x), fG = filmOf(sG).mul(uObj.y), fB = filmOf(sB).mul(uMan.w);
-    const line = max(max(lR, lG).mul(uK.x), lB.mul(uK.z));
-    const film = max(max(fR, fG).mul(uK.y), fB.mul(uK.w));
+    // 第三人称：离镜头 near 米以内淡掉（贴着镜头那一段不再是一条白带）
+    const nearK = smoothstep(uNear.x, uNear.y, length(P.sub(cameraPosition)));
+    const line = max(max(lR, lG).mul(uK.x), lB.mul(uK.z)).mul(nearK);
+    const film = max(max(fR, fG).mul(uK.y), fB.mul(uK.w)).mul(nearK);
     const lineN = max(max(lR, lG), lB);
     const filmN = max(max(fR, fG), fB);
-    mat.colorNode = ice ? v3(DISSOLVE.frostAlbedo).mul(ice.mul(0.25).add(0.75)) : v3(DISSOLVE.frostAlbedo);
+    // 高档：冰晶只让亮度有一点起伏（同 frost.ts 的颗粒频率），线不碎开
+    const ice = crystal
+      ? mix(float(R.crystal.lo), float(R.crystal.hi), smoothstep(0.15, 0.7, mx_noise_float(vec3(P.x, P.z, 1.7).mul(FROST.crystal)).mul(0.5).add(0.5)))
+      : float(1);
+    mat.colorNode = v3(R.albedo).mul(ice);
     mat.roughnessNode = mix(float(R.rough), float(FROST.roughness), lineN);
-    mat.emissiveNode = v3(DISSOLVE.frostGlow).mul(lineN.mul(R.glow.line).add(filmN.mul(R.glow.film)));
+    mat.emissiveNode = v3(R.glow).mul(lineN.add(filmN.mul(R.glowFilm))).mul(ice);
     mat.opacityNode = line.add(film);
     return mat;
   };
@@ -551,7 +570,7 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
     const enc = compute({ kind: 'manifest', at: center });
     if (!enc.box) return false;
     writeChannel(2, enc.bytes);
-    const R = MANIFEST.noticeRadius;
+    const R = MANIFEST.range;
     const circle = { x0: center.x - R - 0.2, z0: center.z - R - 0.2, x1: center.x + R + 0.2, z1: center.z + R + 0.2 };
     man.box = { x0: Math.max(enc.box.x0, circle.x0), z0: Math.max(enc.box.z0, circle.z0), x1: Math.min(enc.box.x1, circle.x1), z1: Math.min(enc.box.z1, circle.z1) };
     man.kind = kind;
@@ -649,12 +668,18 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
       visible,
       slots: objSlots.map((s) => ({ id: s.id, level: s.level, target: s.target, shift: s.shift, cool: s.cool })),
       manifest: { kind: man.kind, level: man.level, front: man.front, center: man.kind ? { ...man.center } : null, line: man.line, film: man.film },
-      width: uW.value,
+      width: uPx.value,
       box: drawBox ? { ...drawBox } : null,
       lastComputeMs,
       cached: cache.size,
     }),
-    onEvent(e) {
+    onEvent(e, ws) {
+      if (e.type === 'flee') {
+        // 吓跑那一刻镜头轻轻偏向逃跑的人（engine/ghostRig.ts 的 LEAN）：镜头不在 main.ts 的模块表里，从这里转过去；娃娃屋什么都不做
+        const n = ws.npcs.find((x) => x.id === e.npc);
+        if (n) requestLean(rig, n.pos);
+        return;
+      }
       if (e.type !== 'manifest') return;
       if (e.phase === 'windup') {
         // 安静时不画这一圈（也不白算一张距离场）
@@ -689,7 +714,7 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
         // 变安静了：正在长、正停着的这一圈照平常的化法化掉，不等收回
         if (man.melt === null && quiet()) man.meltPending = true;
         const g = Math.min(1, man.t / man.grow);
-        const R = MANIFEST.noticeRadius;
+        const R = MANIFEST.range;
         // 减少动态：不往外跑，整圈一起淡入
         man.front = reduced ? R : R * easeOut(g);
         let level = reduced ? g : 1;
@@ -759,17 +784,9 @@ export function createRangeFrost(core: RenderCore, rig: CameraRig, opts: RangeFr
       core.houseRoot.updateWorldMatrix(true, false);
       const m = core.houseRoot.matrixWorld.elements;
       uOrigin.value.set(m[12], m[14]);
-      // 线宽：第三人称固定；娃娃屋按屏幕像素换算
-      const cam = rig.camera;
-      const canvasW = core.renderer?.domElement?.clientWidth ?? 0;
-      if (!ghostMode && (cam as THREE.OrthographicCamera).isOrthographicCamera && canvasW > 0) {
-        const o = cam as THREE.OrthographicCamera;
-        const pxPerM = canvasW / Math.max(1e-6, (o.right - o.left) / o.zoom);
-        const W = RANGE_FROST.width;
-        uW.value = Math.min(W.max, Math.max(W.min, W.px / pxPerM));
-      } else {
-        uW.value = RANGE_FROST.width.ghost;
-      }
+      // 线宽（物理像素）：CSS 像素 × 渲染的像素比（画质档不同，像素比不同）
+      const ratio = core.renderer?.getPixelRatio?.() ?? 1;
+      uPx.value = (ghostMode ? RANGE_FROST.width.ghost : RANGE_FROST.width.doll) * ratio;
     },
     setQuality(q) {
       quality = q;

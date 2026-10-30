@@ -33,6 +33,7 @@ import { PROP_TEXTURES, createPaintings, loadPaintings } from './view/paintings'
 import { createParticlesView } from './view/particles';
 import { createPropsView } from './view/props';
 import { createRangeFrost } from './view/rangeFrost';
+import { COMPILE_STREAMS, bootProgress, compileInStreams, compileWhole, createSettleGate, drawNothing, type BootStage } from './warmup';
 
 const stage = document.getElementById('stage')!;
 const canvas = document.createElement('canvas');
@@ -44,30 +45,42 @@ let rig: CameraRig | undefined;
 let cinematic: Cinematic | undefined;
 let quality: Quality = 'high';
 let qualityPicked = false;
-/** boot 全部完成（第一套访客造型等模型加载完、开场前那次预编译编完）才算 ready；开场点击可能早于 ready，先记下 wantBegin */
+/**
+ * 一切都准备好了：整栋房子编好、真画过、GPU 也缓过来了（WebGL2 上其余几套造型也有了着落），点了开始就开场、不再等
+ * （2026-10-30 开局不空等：原来按钮在一半的时候就亮，点了开始还要再等后台预编译 8 秒，见 boot 里「开场前的预热」）。
+ * 开场按钮在这之前写 Lighting the candles…、下面一条细线显示进度；加载中就点了的（wantBegin）记下来，好了自动开场
+ */
 let ready = false;
 let wantBegin = false;
 let started = false;
-/** 开场按钮可用之后的后台预编译编完了没有（没编完时点开始，要等它，见 begin） */
+/** begin 的那次点击里锁过指针没有（渲染器还没起来时点的，那时没有镜头，锁不了；start 再补一次） */
+let lockAsked = false;
+/** 整栋房子的后台预编译编完了没有 */
 let bgDone = false;
 /**
- * 其余几套访客造型都有了着落（加入轮换、加载失败、放弃）没有。WebGL2 上点了开始要等它（见 begin）：那里加新造型要在主线程上
- * 同步传贴图，开局以后加会卡，所以趁开场遮罩还挡着加完（2026-10-29 用户定的「点了开始等它们加完」）。WebGPU 开局以后照样能加，一开始就算好了
+ * 其余几套访客造型都有了着落（加入轮换、加载失败、放弃）没有。WebGL2 上准备好之前要等它：那里加新造型要在主线程上
+ * 同步传贴图，开局以后加会卡，所以趁开场遮罩还挡着加完（2026-10-29 用户定的「等它们加完」）。WebGPU 开局以后照样能加，一开始就算好了
  */
 let outfitsSettled = false;
-/** WebGL2：点了开始以后最多再等其余几套造型这么多秒，到时候还没加完就带着已经加好的几套开场（某一套下载卡住时遮罩不会一直挂着） */
+/** WebGL2：别的都好了以后，最多再等其余几套造型这么多秒，到时候还没加完就带着已经加好的几套开场（某一套下载卡住时按钮不会一直不亮） */
 const OUTFIT_WAIT = 30;
 /**
- * OUTFIT_WAIT 只停得住下载：已经在解析、编管线的那一套要等它自己做完。再过这么多秒（秒）无论如何都开场，
+ * OUTFIT_WAIT 只停得住下载：已经在解析、编管线的那一套要等它自己做完。再过这么多秒（秒）无论如何都算准备好，
  * 遮罩不会因为某一步挂住而永远不收起（2026-10-29 加载路复审 N1）
  */
 const OUTFIT_GRACE = 10;
-/** 图形设备丢了：不再开场（动画循环的开场条件也看它），错误界面留着，点一下重新加载 */
+/** 图形设备丢了：不再开场（准备好的判断也看它），错误界面留着，点一下重新加载 */
 let lost = false;
 /** 不等其余几套了（boot 里设）：没下载完的停掉、还没开始加的不加了；正在编的那一套编完照样加，所有造型都有了着落才开场 */
 let stopOutfits: (() => void) | null = null;
 /** 收走后台预编译用的临时访客（boot 里设） */
 let releaseStaged: (() => void) | null = null;
+/** 开场按钮那条细线（src/warmup.ts 的 bootProgress）：各段走到哪儿了 */
+const stage0: BootStage = { renderer: false, scene: false, compile: 0, drawn: false, gpu: false, settled: false };
+const progress = (patch: Partial<BootStage>) => {
+  Object.assign(stage0, patch);
+  hud.setProgress(bootProgress(stage0));
+};
 const modules: Module[] = [];
 
 // 音频最先建：开场点击时必须在手势里同步 unlock，不能等渲染器和模型加载完。
@@ -90,6 +103,10 @@ const setQuality = (q: Quality) => {
   hud.setQuality(q);
 };
 
+// 有鼠标和键盘的设备用第三人称操控鬼魂；触屏设备（没有精确指针）继续用娃娃屋俯视。?dollhouse 强制俯视。
+// 标题页的三步说明也按它挑（有没有 F），所以在建 HUD 之前就定下来
+const ghostMode = matchMedia('(pointer: fine)').matches && !new URLSearchParams(location.search).has('dollhouse');
+
 // HUD 最先建：渲染器起不来时也要能显示说明
 const hud = createHud(document.getElementById('hud')!, {
   onBegin: () => begin(),
@@ -103,9 +120,10 @@ const hud = createHud(document.getElementById('hud')!, {
     setQuality(quality === 'high' ? 'low' : 'high');
     return quality;
   },
-});
+}, { ghost: ghostMode });
 hud.showStart();
 hud.setReady(false);
+progress({});
 
 // 一夜（2026-10-30）：正式游戏给开局间隔（第一个人独自进来，过一会儿才有第二个敲门）。机器人、平衡测试不给，数字不变
 const world = createWorld({ seed: Date.now() % 2147483647, openingGaps: NIGHT.openingGaps });
@@ -118,35 +136,33 @@ const manifestLeft = (m: ManifestState) =>
   m.phase === 'windup' || m.phase === 'hold' ? 1 : m.phase === 'cooldown' ? Math.ceil((m.cooldown / MANIFEST.cooldown) * 100) / 100 : 0;
 
 function begin(): boolean {
-  if (wantBegin) return true;
+  if (wantBegin) return started;
   wantBegin = true;
   void audio.unlock();
-  // 指针锁定也必须在这次点击的调用栈里
+  // 指针锁定也必须在这次点击的调用栈里（渲染器还没起来时没有镜头，锁不了：start 再补一次）
   if (rig && isGhostRig(rig)) {
     rig.lockPointer();
-    // 开场遮罩还挂着的这段（等预编译、等造型）不收输入：指针已经锁上了，随手一动鼠标就把开场镜头转走（试玩 P1-1）。
+    lockAsked = true;
+    // 还没准备好的这段不收输入：指针已经锁上了，随手一动鼠标就把开场镜头转走（试玩 P1-1）。
     // 真正开场时放开（start）；下面马上就开场的话也是一样，hold 一下就放
     rig.hold(true);
   }
-  if (ready && !lost && bgDone && outfitsSettled) {
+  if (ready && !lost) {
     start();
     return true;
   }
-  // 后台还在编整栋房子：这时开场，镜头一动就要画还没编的东西，会卡死好几秒（2026-10-28 实测 2.5 秒）。
-  // WebGL2 上其余几套访客造型还没加完：开局以后再加会卡（见 outfitsSettled）。
-  // 两种都是开场遮罩先留着、按钮写回「Lighting the candles…」，都好了（再整栋真画一帧）就收起遮罩开场，见动画循环。
-  // 造型最多等 OUTFIT_WAIT 秒，从这次点击算起
-  hud.setReady(false);
-  if (!outfitsSettled) {
-    setTimeout(() => { if (!outfitsSettled) stopOutfits?.(); }, OUTFIT_WAIT * 1000);
-    setTimeout(() => { outfitsSettled = true; }, (OUTFIT_WAIT + OUTFIT_GRACE) * 1000);
-  }
+  // 还在点蜡烛（2026-10-30 newbie G5：原来加载中点了没反应、也不记）：记下来，准备好了自动开场（boot 里的 becomeReady）
   return false;
 }
 
 function start() {
   started = true;
-  if (rig && isGhostRig(rig)) rig.hold(false);
+  if (rig && isGhostRig(rig)) {
+    // 渲染器还没起来时就点了开始：那一下没有镜头、锁不了指针，这里补一次。不在点击的调用栈里，浏览器多半不认，
+    // 那就是「Click to resume」，点一下就锁上（不补的话鬼魂一直不算开场，点画布也不会去锁）
+    if (!lockAsked) rig.lockPointer();
+    rig.hold(false);
+  }
   // 后台预编译用的临时访客（站在地板下面）：开始了就收走，不再白画
   releaseStaged?.();
   cinematic?.intro(2.5);
@@ -156,13 +172,11 @@ function start() {
 const bootMark = (what: string) => { if (new URLSearchParams(location.search).has('debug')) console.info(`[boot] ${what} ${Math.round(performance.now())} ms`); };
 
 async function boot() {
-  // 有鼠标和键盘的设备用第三人称操控鬼魂；触屏设备（没有精确指针）继续用娃娃屋俯视。?dollhouse 强制俯视
-  const ghostMode = matchMedia('(pointer: fine)').matches && !new URLSearchParams(location.search).has('dollhouse');
   // 开场按钮要等的模型最先开始下载，和下面建渲染器、搭房子同时进行（解析、摆正都不用渲染器）：
   // 第一个访客穿的那套造型（其余几套开场按钮可用之后才下载，见 ready 之后的 streamOutfits）；第三人称时还有鬼魂的模型
   // （config/ghost.ts 的 url 为 null 时用程序化的人形，不下载）
   const firstOutfit = loadFirstOutfit();
-  // 恐怖画的贴图（view/paintings.ts）：现在就开始下载（低优先级，让第一套造型先下）。开场按钮不等它；真正开场（bgDone）等它，见文件末尾。
+  // 恐怖画的贴图（view/paintings.ts）：现在就开始下载（低优先级，让第一套造型先下），和预编译同时进行。开场按钮等它，一般早就下完了（见下面的 warmAll）。
   // 第三人称 9 张约 0.89 MB；娃娃屋没有墙上那六幅，只下画像两张、镜中人脸（约 0.24 MB）
   const paintingsLoaded = loadPaintings(ghostMode ? {} : { ids: PROP_TEXTURES });
   void paintingsLoaded.then((p) => bootMark(`恐怖画的贴图：${p.ready.length} 张好了，${p.failed.length} 张失败，${p.late.length} 张没等到`));
@@ -208,6 +222,7 @@ async function boot() {
   const props = createPropsView(c, { dissolve: isGhostRig(r) && !new URLSearchParams(location.search).has('noghostfx') });
   const overlays = createOverlays(document.getElementById('overlay')!, r);
   bootMark('渲染器就绪');
+  progress({ renderer: true });
   const characters = await createCharactersView(c, firstOutfit);
   bootMark('第一套访客造型加载完');
   const cine = (cinematic = createCinematic(r, c));
@@ -329,32 +344,74 @@ async function boot() {
     },
   });
 
-  // 先把场景里所有材质的渲染管线异步编好，再开始渲染。不预编译的话，管线是第一次画到时同步编译的，
-  // 开局头几秒会连着卡好几下（实测单帧最长 0.5–0.7 秒），正好撞上开场镜头下降。
-  // 访客的材质要等第一个人进门才出现，所以先放一个临时访客一起编（prewarm 内部各编一次不透明、半透明）。
-  // compileAsync 只编主相机那一遍，阴影那几遍（狐狸投到月光和手电的阴影图里）不管，所以再真画一帧：
-  // 这时开场遮罩还写着「Lighting the candles…」，多花的这点时间玩家看不见
-  // compileAsync 只编镜头视锥里的物体（r186 的 _projectObject 做了视锥剔除）：别的房间里的那些，ready 之后在后台编（见文件末尾）
-  const compile = async () => {
-    await c.renderer.compileAsync(c.scene, r.camera);
-    c.render(r.camera);
-  };
-  // 不常用的物件（镜中人脸、肖像的地上印子、粒子）不进这次阻塞的预编译，开场按钮可用之后再编（见下面 ready 之后）。
-  // 它们一起会让冷启动多等 1 秒左右（实测：粒子约 0.5 秒，镜子和肖像的新材质约 0.6 秒）
+  // ── 开场前的预热（2026-10-30 开局不空等，src/warmup.ts）────────────────────────────
+  // 原来：先编镜头看得见的那部分（约 5 秒）→ 开场按钮可用 → 整栋房子的后台预编译这时才开始（约 10 秒）→ 点了开始要等它编完。
+  // 现在都挪到点之前，开场按钮写 Lighting the candles…、下面一条细线显示进度，全好了才亮；点了就开场，不再等：
+  //   1. 空画一帧（drawNothing）：后处理链这时才 setup，场景 pass 的 renderTarget.samples 才定下来，不先画的话下面按 1 倍采样编，编出来的真画时全用不上
+  //   2. 整栋房子分 COMPILE_STREAMS 路异步编（别的房间里的物件、家具也编：不编的话第三人称第一次飞到肖像、摇椅、八音盒、镜子跟前各卡 0.2–0.7 秒）。
+  //      延后编译的物件（镜中人脸、肖像的地上印子、粒子）也一起；这一下就收集完了，收完马上藏回去
+  //   3. 第一套访客（characters.prewarm，不透明、半透明各一遍）真画两帧：阴影、后处理、蒙皮这些预编译编不到的，在这里现编
+  //   4. 动画循环开始：延后的物件画几帧（warmFrames）、整栋不剔除地真画一帧（warmAll），再等 GPU 把这些活干完、帧间隔稳下来（见动画循环末尾）
+  // 本机实测（2026-10-30，一能点就点）：打开网页到能动约 16.5 秒 → 约 10 秒；4 Mbps 约 22 秒 → 约 14.5 秒；点了以后约 30 ms。
+  // 新的网格、材质要在这里之前就在场景里（第 2 步那一下就收集完要编的物体）；?nobgcompile：不做第 2 步（对比卡顿用）
+  progress({ scene: true });
   const deferred: Object3D[] = [];
   c.scene.traverse((o) => { if (o.userData.deferCompile) deferred.push(o); });
   const deferredWasVisible = deferred.map((o) => o.visible);
-  for (const o of deferred) o.visible = false;
-  bootMark('场景建好，开始阻塞的预编译');
-  await characters.prewarm(compile).catch((err) => console.warn('预编译着色器失败，改为边画边编', err));
-  bootMark('阻塞的预编译完');
-  for (const [i, o] of deferred.entries()) o.visible = deferredWasVisible[i];
-
-  /** ready 之后还要把延后编译的物件临时画进去的帧数 */
+  /** 延后编译的物件要在正常渲染里临时画进去的帧数 */
   const DEFERRED_WARM_FRAMES = 3;
   let warmFrames = 0;
-  /** 后台预编译编完后，整栋房子真画一帧（见动画循环） */
+  /** 整栋房子编完以后，不剔除地真画一帧（见动画循环） */
   let warmAll = false;
+  /** 第 3 步做完了没有 */
+  let prewarmed = false;
+  /** 整栋真画过以后等帧间隔稳下来，见 src/warmup.ts */
+  const settle = createSettleGate();
+  /**
+   * 整栋真画过以后，GPU 把交上去的活都干完了没有（WebGPU：queue.onSubmittedWorkDone。那几帧同步新建的管线 GPU 要编好几秒，
+   * 而主线程还能接着出几帧才被挡住，所以只看帧间隔不够：实测「稳了」之后 1.5 秒又停 4 秒，正好落在点了开始以后。WebGL2 没有这一步，直接算干完）。
+   * 干完了才开始数平稳的帧
+   */
+  let gpuAsked = false;
+  const askGpu = () => {
+    gpuAsked = true;
+    const device = (c.renderer.backend as { device?: { queue?: { onSubmittedWorkDone?: () => Promise<unknown> } } }).device;
+    const done = device?.queue?.onSubmittedWorkDone?.() ?? Promise.resolve();
+    void done.then(() => progress({ gpu: true }), () => progress({ gpu: true }));
+  };
+  drawNothing(c.scene, () => c.render(r.camera));
+  const t0 = performance.now();
+  for (const o of deferred) o.visible = true;
+  const precompiled = new URLSearchParams(location.search).has('nobgcompile')
+    ? Promise.resolve()
+    : compileInStreams(c.scene, COMPILE_STREAMS, (p) => compileWhole(c, r.camera, engine.post?.sceneTarget(r.camera) ?? null, p), (f) => progress({ compile: f }));
+  for (const o of deferred) o.visible = false;
+  // 整栋真画的那一帧（warmAll）也等恐怖画的贴图：那一帧把它们都传上 GPU，开局以后第一次看到时不卡。下载卡住最多等 PAINTING_WAIT_MS（view/paintings.ts）
+  Promise.all([precompiled, paintingsLoaded]).then(
+    () => {
+      bgDone = true;
+      warmAll = true;
+      progress({ compile: 1 });
+      bootMark(`整栋房子预编译完（${COMPILE_STREAMS} 路，用了 ${Math.round(performance.now() - t0)} ms）`);
+    },
+    (err) => {
+      // 编不成也照样往下走：大不了真画的时候现编（遮罩挡着）
+      bgDone = true;
+      warmAll = true;
+      progress({ compile: 1 });
+      console.warn('[boot] 整栋房子预编译失败，改为边画边编', err);
+    },
+  );
+  bootMark('场景建好，开始预编译');
+  // 等整栋编完再真画：编好的就不用现编，真画时同步新建的管线从约 65 条降到约 36 条（后处理、阴影、蒙皮这些本来就编不到的）
+  await characters.prewarm(async () => {
+    await precompiled.catch(() => undefined);
+    c.render(r.camera);
+  }).catch((err) => console.warn('预热访客失败，改为边画边编', err));
+  prewarmed = true;
+  bootMark('第一套访客真画过');
+  for (const [i, o] of deferred.entries()) o.visible = deferredWasVisible[i];
+
   /** 关掉整个场景的视锥剔除，返回被关掉的那些（画完再开回来） */
   const cullOff = () => {
     const out: Object3D[] = [];
@@ -366,13 +423,35 @@ async function boot() {
     });
     return out;
   };
+  /** WebGL2：别的都好了还在等其余几套造型时，最多再等 OUTFIT_WAIT 秒（只起一次表） */
+  let outfitTimers = false;
+  /** 都好了：开场按钮亮起来；加载中就点了开始的，直接开场 */
+  const becomeReady = () => {
+    if (ready || lost || !prewarmed || !bgDone || warmAll || warmFrames > 0 || !stage0.settled) return;
+    if (!outfitsSettled) {
+      if (!outfitTimers) {
+        outfitTimers = true;
+        setTimeout(() => { if (!outfitsSettled) stopOutfits?.(); }, OUTFIT_WAIT * 1000);
+        setTimeout(() => { outfitsSettled = true; }, (OUTFIT_WAIT + OUTFIT_GRACE) * 1000);
+      }
+      return;
+    }
+    ready = true;
+    bootMark('准备好了，开场按钮亮');
+    hud.setReady(true);
+    if (wantBegin) {
+      hud.hideStart();
+      start();
+    }
+  };
   const frameWatch = watchFrameTime(() => { if (quality === 'high' && !qualityPicked) setQuality('low'); });
   let last = performance.now();
   let time = 0;
   c.renderer.setAnimationLoop(() => {
     const now = performance.now();
+    const gap = now - last;
     // 切回标签页时 dt 可能很大：限制在 0.1 秒以内，模拟不会一下跳过很多
-    const dt = Math.min(0.1, (now - last) / 1000);
+    const dt = Math.min(0.1, gap / 1000);
     last = now;
     time += dt;
     // 鬼魂位置先交给模拟（贴近发毛、手电照到、穿墙声），再推进模拟
@@ -397,12 +476,12 @@ async function boot() {
     }
     for (const m of modules) m.update?.(ctx);
     if (started) frameWatch(dt);
-    // 延后编译的物件：ready 之后的头几帧在正常渲染里临时显示（各模块 update 之后、渲染之前），画完恢复
+    // 延后编译的物件：头几帧在正常渲染里临时显示（各模块 update 之后、渲染之前），画完恢复
     const warm = warmFrames > 0;
     const was = warm ? deferred.map((o) => o.visible) : null;
     if (warm) for (const o of deferred) o.visible = true;
-    // 后台预编译编完、玩家还停在开场画面：整栋房子不剔除地真画一帧，补上 compileAsync 管不到的那些（阴影 pass 等）。
-    // 开场遮罩挡着，多花的这一帧看不见；玩家已经开始了就不画（会卡一下）
+    // 整栋房子编完、玩家还停在开场画面：整栋房子不剔除地真画一帧，补上 compileAsync 管不到的那些（阴影 pass 等）。
+    // 开场遮罩挡着，多花的这一帧看不见
     const all = warmAll && !started ? cullOff() : null;
     c.render(r.camera);
     if (all) {
@@ -410,71 +489,44 @@ async function boot() {
       warmAll = false;
       releaseStaged?.();
     }
-    // 点了开始、在等后台预编译（WebGL2 上还在等其余几套造型）：都好了、整栋真画过一帧了，收起开场遮罩开场
-    // 设备丢了不再开场：不然下一帧 hideStart 会收起错误界面、把游戏又「开始」起来（2026-10-29 加载路复审发现，原来就有）
-    if (wantBegin && !started && !lost && bgDone && !warmAll && outfitsSettled) {
-      hud.hideStart();
-      start();
-    }
     if (was) {
       for (const [i, o] of deferred.entries()) o.visible = was[i];
       warmFrames--;
     }
+    // 还没准备好：整栋真画过、延后的也画过，就等 GPU 把活干完、帧间隔稳下来，稳了就准备好。时间用真实时间（time 每帧最多走 0.1 秒，慢机器上会多等好几倍）
+    if (!ready && !lost) {
+      if (!settle.started) {
+        if (bgDone && !warmAll && warmFrames === 0) {
+          if (!gpuAsked) {
+            progress({ drawn: true });
+            askGpu();
+          }
+          if (stage0.gpu) settle.start(now / 1000);
+        }
+      } else if (!stage0.settled && settle.frame(gap, now / 1000)) {
+        progress({ settled: true });
+        bootMark('GPU 缓过来了');
+      }
+      becomeReady();
+    }
   });
-
-  ready = true;
-  hud.setReady(true);
-  if (wantBegin && !lost && bgDone && outfitsSettled) start();
-
-  // 开场按钮已经可用：趁玩家读标题，把延后的物件编好。compileAsync 编的是渲染器默认的渲染目标，
-  // 而场景是后处理管线自己的 pass 画的（格式、多重采样都不一样），编出来的管线用不上，所以和预热一样真画一帧。
-  // 这一帧画在开场遮罩后面，玩家看不见；这些物件这时都是透明 / 缩成 0 的，下一帧各模块的 update 再按需要藏起来
+  // 动画循环开始：延后编译的物件先在正常渲染里画几帧（玩家看不见：开场遮罩挡着；这些物件这时都是透明 / 缩成 0 的，下一帧各模块的 update 再按需要藏起来）
   warmFrames = DEFERRED_WARM_FRAMES;
 
-  // 镜头视锥外的物体（别的房间里的物件、家具）也在后台编好：不编的话第三人称第一次飞到肖像、摇椅、八音盒、镜子跟前
-  // 各卡 0.2–0.7 秒（2026-10-28 实测）。不放进上面那次阻塞的预编译：整栋房子一起编，冷启动从约 4 秒变成约 9 秒。
-  // 编给后处理的场景 pass；compileAsync 逐个物体让出主线程，开场画面照常动，玩家读标题、看开场镜头的这几秒里编完
-  // 延后编译的物件（镜中人脸、肖像的地上印子、粒子）也一起：上面那几帧暖机只画得到视锥里的，别的房间的照样会卡。
-  // precompileAll 在调用的这一下就把要编的物体收集完了，调用一返回就能把它们藏回去
-  const t0 = performance.now();
-  const deferredVisible = deferred.map((o) => o.visible);
-  for (const o of deferred) o.visible = true;
-  // ?nobgcompile：不做后台预编译（对比卡顿用）
-  const precompiled = new URLSearchParams(location.search).has('nobgcompile') ? Promise.resolve() : c.precompileAll(r.camera);
-  for (const [i, o] of deferred.entries()) o.visible = deferredVisible[i];
-  // 第一套访客造型（开场前只编了镜头看得见的部分）：上面收集完物体之后放临时访客（站在地板下面），
-  // 留到下面那一帧整栋真画时把阴影图、手电这些编好再收走（见动画循环）；玩家在那之前就开始了，开始时收走
-  const outfitsDone = characters.stageOutfits();
-  releaseStaged = outfitsDone;
-  // 其余几套访客造型现在才开始下载（开场按钮只等第一套）：一套一套下载，下载好一套、异步编好管线，才放进轮换，
-  // 在那之前进门的人只穿已经能用的（见 characters.ts 的 streamOutfits）。编要等上面整栋房子的后台预编译编完：点了开始要等它，别跟它抢。
-  // WebGL2 上（outfitsBeforeStart）要在开局之前加完：点了开始以后遮罩留着，等这里都有了着落（最多 OUTFIT_WAIT 秒）再开场
+  // 第一套访客造型（阻塞的那次只编了镜头看得见的部分）：整栋房子的预编译收集完之后放临时访客（站在地板下面），
+  // 留到整栋真画的那一帧把阴影图、手电这些编好再收走（见动画循环）；玩家在那之前就开始了，开始时收走
+  releaseStaged = characters.stageOutfits();
+  // 其余几套访客造型现在开始下载：一套一套下载，下载好一套、异步编好管线，才放进轮换，在那之前进门的人只穿已经能用的（见 characters.ts 的 streamOutfits）。
+  // WebGPU：编要等整栋房子的预编译编完（别跟它抢），之后在标题页后面、开局以后都照样加（不卡，点了开始不等它们）。
+  // WebGL2（outfitsBeforeStart）：要在开局之前加完，不等预编译；准备好要等这里都有了着落（最多 OUTFIT_WAIT 秒，见 becomeReady）
   const outfitsStream = characters.streamOutfits({ camera: r.camera, sceneTarget: () => engine.post?.sceneTarget(r.camera) ?? null, hidden: () => !started }, precompiled);
+  void outfitsStream.finally(() => bootMark('其余造型都有了着落'));
   if (characters.outfitsBeforeStart) {
     stopOutfits = () => void characters.stopStreaming();
-    void outfitsStream.finally(() => {
-      outfitsSettled = true;
-      if (new URLSearchParams(location.search).has('debug')) console.info(`[boot] 其余造型都有了着落 ${Math.round(performance.now())} ms`);
-    });
+    void outfitsStream.finally(() => { outfitsSettled = true; });
   } else {
     outfitsSettled = true;
   }
-  // 开场（bgDone）也等恐怖画的贴图：下面整栋真画的那一帧（warmAll）把它们都传上 GPU，开局以后第一次看到时不卡。下载卡住最多等 PAINTING_WAIT_MS
-  Promise.all([precompiled, paintingsLoaded]).then(
-    () => {
-      bgDone = true;
-      warmAll = true;
-      // 玩家已经开始了就不会有整栋房子真画的那一帧（见动画循环），临时访客这时收走
-      if (started) releaseStaged?.();
-      if (new URLSearchParams(location.search).has('debug')) console.info(`[boot] 后台预编译完成 ${Math.round(performance.now() - t0)} ms`);
-    },
-    (err) => {
-      // 编不成也照样收走临时访客、照样开场：大不了画到的时候现编、卡一下
-      releaseStaged?.();
-      bgDone = true;
-      console.warn('[boot] 后台预编译失败，改为边画边编', err);
-    },
-  );
 }
 
 // 渲染器建好之后的任何一步抛错（某些浏览器 / 显卡不支持某个节点等），都要告诉玩家，而不是让开场按钮永远停在加载中

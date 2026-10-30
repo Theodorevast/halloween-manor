@@ -4,7 +4,8 @@
 // 只投影的全高墙在 layer 1：任何要被墙挡住的投影灯都要 shadow.camera.layers.enable(1)（不能用 set(1)，那样会丢掉 layer 0）。
 //
 // 第三人称模式（rig 是 GhostRig，2026-10-28 改版）：墙全高、不降；多一块天花板（+1 个网格）；月光方向固定；
-// 墙、玻璃、家具、天花板在鬼魂周围和「镜头 → 鬼魂」视线上溶开、洞边结霜，鬼魂附近的表面带一点冷光（walls.ts 的 DISSOLVE）。
+// 墙、玻璃、家具、天花板在鬼魂周围和「镜头 → 鬼魂」视线上溶开（洞边不发光、不结霜，只压暗一圈截面），鬼魂附近的表面带一点冷光（walls.ts 的 DISSOLVE）；
+// 墙、地板、家具、天花板带一层很暗的底光（walls.ts 的 ROOM_FILL），墙角、墙根留暗。
 // 每帧把鬼魂和镜头的位置写进 uniform，不重建材质。墙和家具各有挖洞 / 不挖洞两份网格（同一份几何体），
 // 每帧按 HOLE_TEST 只显示一份：附近不会有洞时不带 discard，开销和没有溶解时一样。
 // ?noghostfx 关掉溶解和冷光（量开销的对照），?noceiling 不要天花板。
@@ -25,8 +26,8 @@ import { fogSky } from './fog';
 import { createFurniture } from './furniture';
 import { PALETTE } from './palette';
 import {
-  GeoBuilder, HEAD_H, OUTWARD, SILL_H, Side, TRANSOM_Y, applyDissolve, createWalls, ghostDissolve, ghostGlowAt, holeBoxes, holesNear,
-  skyGlass, v3, writeDissolve, type DissolveUniforms, type V3, type WindowRun,
+  GeoBuilder, HEAD_H, OUTWARD, ROOM_FILL, SILL_H, Side, TRANSOM_Y, applyDissolve, createWalls, ghostDissolve, ghostGlowAt, holeBoxes,
+  holesNear, roomFill, roomFillAt, skyGlass, v3, writeDissolve, type DissolveUniforms, type V3, type WindowRun,
 } from './walls';
 
 /** 墙体之外、墙格之内的那一条（地板伸进墙格这么多，正好接到墙面） */
@@ -40,6 +41,11 @@ export const MOON = {
   /** low 档没有阴影，整屋都被照到，强度要压低 */
   intensityLow: 0.9,
   hemi: 0.55,
+  /**
+   * 第三人称的半球光（第二波 VX，eye F-1）：墙、地板、家具的底光主要是 walls.ts 的 ROOM_FILL，访客、物件、前门不走那层，
+   * 只靠这盏灯有一点轮廓（访客是亮一点的墙前面的剪影，走进手电、台灯的光里才看得清）。娃娃屋（俯视，本来就看得清）还是 hemi
+   */
+  hemiGhost: 1.4,
   /** 窗下光斑的亮度（high 档有真阴影，光斑淡一些） */
   patch: 0.4,
   patchLow: 0.7,
@@ -168,25 +174,32 @@ export function createPorchDimmer(): PorchDimmer {
 }
 
 /**
- * 天亮（2026-10-30「一夜」：模拟时间到 NIGHT.dawn，屋里没被吓走的人自己出门）：现有的月光、半球光慢慢从月夜的冷蓝往灰白偏一点
- * （颜色往同样亮度的灰白偏，亮多少只由强度的乘数管）；月亮落下去、直射弱了，天光变散：月光暗一点、半球光亮一些，窗下的光斑淡下去。
- * 玩家看得见的「天」只有窗玻璃和屋外的底色，它们跟着亮起来、偏灰白；地面雾的环境色也跟着亮（晨雾被天光照亮，fog.ts 的 fogSky）。
- * 不加灯，只改已有灯的颜色、强度、底色和 uniform（都不重编）。克制：不是日出，没有暖色，不闪；月光的方向不转
- * （转了窗下的光斑会在几十秒里扫过地板，像延时摄影）
- * - moonGrey / skyGrey：月光、天空色往灰白偏多少（0..1）；moonGain / hemiGain：强度乘多少；patch：窗下光斑乘多少
+ * 天亮（2026-10-30「一夜」：模拟时间到 NIGHT.dawn，屋里没被吓走的人自己出门）：现有的月光、半球光慢慢从月夜的冷蓝往冷白偏
+ * （颜色往同样亮度的冷白偏，亮多少只由强度的乘数管）。
+ * 第二波（路 VX，eye G-7「天亮画面上看不出来：屋里还是 72% 近黑，只有一道斜光柱」）：原来月光还暗一点（×0.9）、窗下的光斑淡下去，
+ * 只有半球光亮一些（×1.5），屋里几乎没变。现在天光从窗户照进来：已有的月光（方向光，带阴影，只从窗洞照进来）变成冷白、强度往上推，
+ * 窗下地板上的光斑跟着亮，地上、对面墙上是几块看得见的冷白窗光；半球光、屋里的底光（walls.ts 的 ROOM_FILL）一起往上，屋里明显亮起来。
+ * 玩家看得见的「天」——窗玻璃、屋外的底色——跟着亮、偏灰白；地面雾的环境色也跟着亮（晨雾被天光照亮，fog.ts 的 fogSky）。
+ * 不加灯，只改已有灯的颜色、强度、底色和 uniform（都不重编）。克制：冷白不发黄（不是日出），不闪，慢慢起来（night.ts 的 NIGHT_FX.dawnLight 秒）；
+ * 月光的方向不转（转了窗下的光斑会在几十秒里扫过地板，像延时摄影）
+ * - rise：往上走（夜 → 天亮）的时候，setDawn 给的秒数乘这个。天亮到翻开登记簿只有二十来秒（一夜：4:30 天亮、4:45 光开始收回前门），
+ *   按 NIGHT_FX.dawnLight 的 30 秒 smoothstep 走，4:37 才走到 14%，正是 eye 量到「天亮看不出来」的那一帧；乘完 12 秒走完，退回夜里（Keep haunting）不乘
+ * - moonGrey / skyGrey：月光、天空色往冷白偏多少（0..1）；moonGain / hemiGain：强度乘多少；patch：窗下光斑乘多少；fill：屋里的底光乘多少
  * - glass：窗玻璃乘多少（r, g, b，见 walls.ts 的 skyGlass）；background：屋外的底色（夜里是 PALETTE.night）；fog：雾的环境色走到天亮的程度
- * - white：灰白带的那一点点暖（r, g, b 的乘数，不是纯灰；亮度不变）
+ * - white：冷白（r, g, b 的乘数，亮度不变）：天亮前的天光是冷的
  */
 export const DAWN = {
-  moonGrey: 0.45,
-  moonGain: 0.9,
-  skyGrey: 0.5,
-  hemiGain: 1.5,
-  patch: 0.55,
-  glass: [3.2, 3.2, 3.0] as [number, number, number],
-  background: 0x1a2030,
+  rise: 0.4,
+  moonGrey: 0.6,
+  moonGain: 3.4,
+  skyGrey: 0.55,
+  hemiGain: 2.5,
+  patch: 3,
+  fill: 2.2,
+  glass: [6.5, 6.5, 6.2] as [number, number, number],
+  background: 0x3a4658,
   fog: 1,
-  white: [1, 0.985, 0.96] as [number, number, number],
+  white: [0.93, 0.98, 1.06] as [number, number, number],
 };
 
 /** c 往同样亮度（线性 Rec.709 亮度）的灰白偏 m（0..1） */
@@ -208,7 +221,7 @@ const BG_DAWN = new THREE.Color(DAWN.background);
 
 /** 天亮到 k（0 夜里、1 天亮）时月光、天空色、窗玻璃、屋外底色、雾和几个乘数；给了 out 就写进去（每帧用，不新建颜色） */
 export function dawnLights(k: number, out = {
-  moon: new THREE.Color(), sky: new THREE.Color(), moonGain: 1, hemiGain: 1, patch: 1,
+  moon: new THREE.Color(), sky: new THREE.Color(), moonGain: 1, hemiGain: 1, patch: 1, fill: 1,
   glass: new THREE.Vector3(), background: new THREE.Color(), fog: 0,
 }) {
   const x = Math.min(1, Math.max(0, k));
@@ -217,6 +230,7 @@ export function dawnLights(k: number, out = {
   out.moonGain = 1 + (DAWN.moonGain - 1) * x;
   out.hemiGain = 1 + (DAWN.hemiGain - 1) * x;
   out.patch = 1 + (DAWN.patch - 1) * x;
+  out.fill = 1 + (DAWN.fill - 1) * x;
   out.glass.lerpVectors(GLASS_NIGHT, GLASS_DAWN, x);
   out.background.lerpColors(BG_NIGHT, BG_DAWN, x);
   out.fog = DAWN.fog * x;
@@ -339,11 +353,11 @@ function buildFloors(glow?: DissolveUniforms) {
 
   if (glow) {
     // 底色 = colorNode × 顶点色（材质开着 vertexColors，three 会自己乘；自发光要的底色这里再乘一遍）。
-    // 自发光：鬼魂的微光 + 手电的反弹光（bounce.ts）
+    // 自发光：鬼魂的微光 + 手电的反弹光（bounce.ts）+ 屋里的底光（walls.ts 的 ROOM_FILL）
     const upN = vec3(0, 1, 0);
     for (const m of [woodMat, tileMat]) {
       const albedo = (m.colorNode as THREE.Node<'vec3'>).mul(attribute('color', 'vec3'));
-      m.emissiveNode = albedo.mul(ghostGlowAt(glow, positionLocal, upN).add(torchBounceAt(positionLocal, upN)));
+      m.emissiveNode = albedo.mul(ghostGlowAt(glow, positionLocal, upN).add(torchBounceAt(positionLocal, upN)).add(roomFillAt(positionLocal, ROOM_FILL.floor, 'flat')));
     }
   }
 
@@ -553,7 +567,8 @@ function buildMoonPatches(runs: WindowRun[]) {
  * 不投影（挡月光的是 walls.ts 那块只投影的屋顶，月光只从窗进来）。
  * 不受光照：朝下的面只拿得到半球光的地面色（几乎是黑的），月光照不到，手电往下照、几乎照不到它；受光的话它占画面上方
  * 一大片，每个像素都要算一遍十几盏灯和阴影（2026-10-28 实测 GPU +16%）。所以这里直接按「环境光下的亮度」画底色，
- * 再加鬼魂的冷光和溶解的霜（ambient：底色乘这个 ≈ 半球光地面色照在朝下的面上的亮度）。
+ * 再加手电的反弹光和屋里的底光（walls.ts 的 ROOM_FILL；ambient：底色乘这个 ≈ 半球光地面色照在朝下的面上的亮度）。
+ * 不接鬼魂的冷光（第二波 VX，eye G-3）：鬼魂头顶总有一块灰色椭圆，跟着镜头走，永远钉在画面上方同一个地方，像镜头上的污渍。
  * 墙顶的顶面和它在同一高度，但朝上、从下面看是背面，被剔掉，不会互相闪
  */
 const CEILING = {
@@ -578,8 +593,9 @@ function buildCeiling(dissolve?: DissolveUniforms) {
   const p = positionLocal;
   const n = mx_noise_float(vec3(p.x.mul(CEILING.stainFreq), p.z.mul(CEILING.stainFreq), 3.1)).mul(0.5).add(0.5);
   const albedo = v3(CEILING.color).mul(n.mul(CEILING.stain).add(1 - CEILING.stain));
-  // 不写深度，挖洞（discard）也就不影响深度剔除：一直用挖洞的那份（镜头升到天花板底下时它也溶开）
-  if (dissolve) applyDissolve(mat, dissolve, p, vec3(0, -1, 0), albedo, { unlitAmbient: CEILING.ambient, nearCut: true });
+  // 不写深度，挖洞（discard）也就不影响深度剔除：一直用挖洞的那份（镜头升到天花板底下时它也溶开）。
+  // 不接鬼魂的微光（eye G-3：头顶那块跟着镜头走的灰色椭圆）；底光比墙暗一档（ROOM_FILL.ceiling），手电的反弹光照旧
+  if (dissolve) applyDissolve(mat, dissolve, p, vec3(0, -1, 0), albedo, { unlitAmbient: CEILING.ambient, nearCut: true, fill: ROOM_FILL.ceiling, fillSurface: 'flat', ghostGlow: false });
   else mat.colorNode = albedo.mul(CEILING.ambient);
   const mesh = new THREE.Mesh(b.build(), mat);
   mesh.name = 'ceiling';
@@ -635,7 +651,8 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
   moon.target.position.set(HOUSE_W / 2, 0, HOUSE_D / 2);
   root.add(moon, moon.target);
 
-  const hemi = new THREE.HemisphereLight(PALETTE.moonSky, PALETTE.moonGround, MOON.hemi);
+  const hemiBase = ghostMode ? MOON.hemiGhost : MOON.hemi;
+  const hemi = new THREE.HemisphereLight(PALETTE.moonSky, PALETTE.moonGround, hemiBase);
   hemi.name = 'moon-sky';
   core.scene.add(hemi);
 
@@ -664,8 +681,10 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
     moon.color.copy(dawnMix.moon);
     moon.intensity = (high ? MOON.intensity : MOON.intensityLow) * dawnMix.moonGain;
     hemi.color.copy(dawnMix.sky);
-    hemi.intensity = MOON.hemi * dawnMix.hemiGain;
+    hemi.intensity = hemiBase * dawnMix.hemiGain;
     patches.strength.value = (high ? MOON.patch : MOON.patchLow) * dawnMix.patch;
+    // 屋里的底光（第三人称的墙、地板、家具、天花板）跟着天光往上
+    roomFill.value = ROOM_FILL.level * dawnMix.fill;
     // 看得见的天：窗玻璃、屋外底色；地面雾的环境色（fog.ts 自己在 update 里按 fogSky 写 uniform）
     skyGlass.value.copy(dawnMix.glass);
     if (core.scene.background instanceof THREE.Color) core.scene.background.copy(dawnMix.background);
@@ -691,13 +710,13 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
   // 墙、家具附近会不会有洞（HOLE_TEST），不会就换上不挖洞的那份材质（省掉 discard 的开销）
   const camPos = new THREE.Vector3();
   const boxes = holeBoxes(tiles);
-  const writeGhost = (ctx: FrameCtx) => {
+  const writeGhost = () => {
     if (!dissolve || !isGhostRig(rig)) return;
     rig.camera.getWorldPosition(camPos);
     core.houseRoot.updateWorldMatrix(true, false);
     core.houseRoot.worldToLocal(camPos);
     const ortho = (rig.camera as { isOrthographicCamera?: boolean }).isOrthographicCamera === true;
-    writeDissolve(dissolve, rig.ghost, camPos, ortho, ctx.time);
+    writeDissolve(dissolve, rig.ghost, camPos, ortho);
     const near = holesNear(boxes, rig.ghost, camPos, ortho);
     walls.setHoles(near.walls);
     furniture.setHoles(near.furniture);
@@ -727,7 +746,7 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
     update(ctx: FrameCtx) {
       bounceDue = dissolve !== undefined;
       bounceDt = ctx.dt;
-      if (ghostMode) writeGhost(ctx);
+      if (ghostMode) writeGhost();
       else {
         walls.update(ctx.dt, rig.viewDir);
         aimMoon();
@@ -752,7 +771,8 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
       porch.set(level, seconds);
     },
     setDawn(k, seconds) {
-      dawn.set(Math.min(1, Math.max(0, k)), seconds);
+      const to = Math.min(1, Math.max(0, k));
+      dawn.set(to, seconds * (to > dawn.value ? DAWN.rise : 1));
       // 直接切（减少动态）：这一下就写上
       if (!dawn.moving) applyLight();
     },
@@ -761,6 +781,7 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
       clearBounce();
       // 天亮写过的全页共用的值退回夜里（下一次建房子从夜里开始）
       skyGlass.value.set(1, 1, 1);
+      roomFill.value = ROOM_FILL.level;
       fogSky.k = 0;
       if (core.scene.background instanceof THREE.Color) core.scene.background.set(PALETTE.night);
       core.houseRoot.remove(root);
@@ -768,7 +789,7 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
       walls.dispose();
       furniture.dispose();
       outdoors.dispose();
-      if (dissolve) writeDissolve(dissolve, null, camPos, false, 0);
+      if (dissolve) writeDissolve(dissolve, null, camPos, false);
       for (const f of [...floors, ...(ceiling ? [ceiling] : [])]) { f.geometry.dispose(); (f.material as THREE.Material).dispose(); }
       patches.mesh.geometry.dispose();
       (patches.mesh.material as THREE.Material).dispose();

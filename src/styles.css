@@ -88,18 +88,27 @@ body {
 
 /* ── 开场遮罩：一张反白印刷的标题页 ─────────────────────── */
 
+/* 整页都能点（2026-10-30 newbie G5）；还没准备好时光标是「忙着、但照样能点」（点了记下来，准备好自动开场）。
+ * 说明多了以后矮屏（手机横屏）放不下：整页可以滚，内容用 margin: auto 居中（放不下时从顶上排起，不会把标题挤出屏幕） */
 .hud-start {
   --lx: 50%;
   --ly: 46%;
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 56px 28px 112px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 44px 28px 60px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--grain) var(--night);
   pointer-events: auto;
-  cursor: pointer;
+  cursor: progress;
   transition: opacity 0.8s ease;
+}
+
+.hud-start.is-ready {
+  cursor: pointer;
 }
 
 .hud-start::before {
@@ -120,6 +129,12 @@ body {
   cursor: default;
 }
 
+.hud-start.is-error .hud-steps,
+.hud-start.is-error .hud-night,
+.hud-start.is-error .hud-begin-wrap {
+  display: none;
+}
+
 /* 烛光：中间一圈暖光，越往外越暗，把字压回黑里 */
 .hud-start-light {
   position: absolute;
@@ -132,6 +147,7 @@ body {
 
 .hud-start-page {
   position: relative;
+  margin: auto 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -164,9 +180,19 @@ body {
   color: var(--ash);
 }
 
+/* 开场按钮和下面那条细线（2026-10-30 开局不空等）：准备好之前字是灰烬色、不呼吸，下面一条慢慢变满的细线；
+ * 准备好了细线走满、淡掉，按钮加上标本签的框（和悬停标签、Click to resume 同一种），字开始呼吸——看得出是个按钮（newbie G5） */
+.hud-begin-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .hud-begin {
+  position: relative;
   margin: 0;
-  padding: 0.15em 0.4em;
+  padding: 0.28em 0.95em 0.36em;
   border: 0;
   background: none;
   font: inherit;
@@ -175,6 +201,25 @@ body {
   line-height: 1.2;
   color: var(--bone);
   cursor: pointer;
+}
+
+.hud-begin::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-image: var(--frame-label) 14 fill / 14px stretch;
+  opacity: 0;
+  transition: opacity 0.7s ease;
+  pointer-events: none;
+}
+
+.hud-start.is-ready .hud-begin::before {
+  opacity: 1;
+}
+
+.hud-begin-text {
+  position: relative;
+  display: inline-block;
   animation: hud-breathe 3.6s ease-in-out infinite;
 }
 
@@ -183,11 +228,41 @@ body {
   outline-offset: 4px;
 }
 
-/* 还在加载：字变暗、不呼吸，点了也不开始 */
+/* 还没准备好：字变暗、不呼吸；禁用的按钮不吃点击（不然浏览器把这一下吞了，也不冒泡），点击落到整页上照样记下来 */
 .hud-begin:disabled {
   color: var(--ash);
   cursor: progress;
+  pointer-events: none;
+}
+
+.hud-begin:disabled .hud-begin-text {
   animation: none;
+}
+
+/* 细线：一根骨白的发丝从左往右长。只改 transform（hud.ts 的 setProgress，比真进度多走一点），过渡在合成线程上走：
+ * 主线程编管线卡着的时候它照样往前挪。不用循环的 CSS 动画（那是假进度），不发光 */
+.hud-wick {
+  position: relative;
+  display: block;
+  width: min(13rem, 56vw);
+  height: 1px;
+  overflow: hidden;
+  background: rgba(220, 210, 189, 0.16);
+  transition: opacity 0.8s ease 0.35s;
+}
+
+.hud-wick-fill {
+  position: absolute;
+  inset: 0;
+  background: rgba(220, 210, 189, 0.72);
+  transform: scaleX(0);
+  transform-origin: 0 50%;
+  transition: transform 1.6s cubic-bezier(0.25, 0.7, 0.35, 1);
+  will-change: transform;
+}
+
+.hud-start.is-ready .hud-wick {
+  opacity: 0;
 }
 
 @keyframes hud-breathe {
@@ -200,16 +275,78 @@ body {
   }
 }
 
-/* 玩法说明（这一局的目标）：挂在 Click to begin 上面一行，正常字号（2026-10-30 试玩 P2-11：原来排成书页底部的版权行，
+/* 这一局的目标：三步说明上面那一行，正常字号（2026-10-30 试玩 P2-11：原来排成书页底部的版权行，
  * 小型大写、整页最小最淡，两轮试玩都说没人看）。比按钮小、比 Put on headphones 亮一点，不抢按钮 */
 .hud-hint {
   max-width: 34rem;
-  margin: 0.2rem 0 0.9rem;
+  margin: 0.2rem 0 0.5rem;
   text-align: center;
   text-wrap: balance;
   font-size: 1.22rem;
   line-height: 1.45;
+  color: var(--bone);
+}
+
+/* 三步说明（2026-10-30 用户：「要有游戏说明」）：居中的一栏里左对齐，罗马数字悬在左边（IM Fell、灰烬色），像旧印刷品上的条款。
+ * 第三步里的 F 排成键帽（.hud-key） */
+.hud-steps {
+  max-width: 33rem;
+  margin: 0.25rem 0 0.55rem;
+  padding: 0 0 0 2.1em;
+  list-style: upper-roman outside;
+  text-align: left;
+  font-size: 1.12rem;
+  line-height: 1.42;
   color: #c9bfa9;
+}
+
+.hud-steps li {
+  margin: 0.26em 0;
+  padding-left: 0.4em;
+  text-wrap: pretty;
+}
+
+.hud-steps li::marker {
+  font-family: var(--face-display);
+  font-size: 0.92em;
+  color: var(--ash);
+}
+
+/* 一夜多长、天亮时怎样：旁白的斜体、灰烬色，比三步说明轻一档 */
+.hud-night {
+  max-width: 34rem;
+  margin: 0.1rem 0 1.05rem;
+  text-align: center;
+  text-wrap: balance;
+  font-style: italic;
+  font-size: 1.05rem;
+  line-height: 1.4;
+  color: var(--ash);
+}
+
+/* 键帽（标题页第三步的 F、右下角按键说明里的 F）：细框、底边略厚，像一颗旧打字机键；不发光、不动 */
+.hud-key {
+  display: inline-block;
+  min-width: 1.3em;
+  padding: 0 0.3em;
+  border: 1px solid rgba(220, 210, 189, 0.55);
+  border-bottom-width: 2px;
+  border-radius: 0.22em;
+  background: rgba(8, 7, 9, 0.55);
+  font-family: var(--face-text);
+  font-weight: 600;
+  font-style: normal;
+  font-variant-caps: normal;
+  letter-spacing: 0;
+  line-height: 1.2;
+  text-align: center;
+  color: var(--bone);
+}
+
+.hud-steps .hud-key {
+  margin: 0 0.08em;
+  font-size: 0.86em;
+  vertical-align: 0.06em;
 }
 
 /* 触屏竖屏（hud.ts 给 #hud 加 is-touch）：玩法说明下面另起一行「把手机横过来」，同样的小型大写（2026-10-30 试玩报告 P1-6 c） */
@@ -665,7 +802,16 @@ body {
 
 @media (max-width: 640px) {
   .hud-start {
-    padding: 40px 22px 124px;
+    padding: 36px 20px 44px;
+  }
+
+  .hud-steps {
+    font-size: 1.04rem;
+    padding-left: 1.9em;
+  }
+
+  .hud-night {
+    font-size: 0.98rem;
   }
 
   .hud-start::before {
@@ -713,8 +859,12 @@ body {
 /* ── 减弱动态：关掉呼吸、眨眼、推移这类非必要的动作，保留淡入淡出 ── */
 
 @media (prefers-reduced-motion: reduce) {
-  .hud-begin {
+  .hud-begin-text {
     animation: none;
+  }
+
+  .hud-wick-fill {
+    transition-duration: 0.3s;
   }
 
   .ov-eye,
@@ -853,7 +1003,7 @@ body {
   letter-spacing: 0.13em;
   font-size: 1.05rem;
   line-height: 1.45;
-  color: #b2a994;
+  color: #c2b9a4;
   text-shadow: var(--ink-shadow);
   background: rgba(8, 7, 9, 0.5);
   border-radius: 0.9em;
@@ -928,19 +1078,114 @@ body {
   max-width: min(46rem, calc(100vw - 48px));
 }
 
-/* 做不到时的一句（Not yet. / Too far away. …）：准星下面一点，斜体灰烬色，和播报里安静的那几行一个口气；来得快、去得慢 */
+/* 暂停（「Click to resume」挂着）：画面整体压暗再放字（2026-10-30 eye S-4：原来字直接压在访客身上、鬼魂头上）。
+ * 压的是画布和场景叠层（名牌、眼睛在 #overlay，在 #hud 下面），HUD 自己的字在它上面 */
+.hud-play::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(5, 6, 8, 0.55);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.hud-play.is-paused::before {
+  opacity: 1;
+}
+
+/* 常驻的按键说明（2026-10-30 HT-2，用户：「F 没有任何提示」）：右下角、按钮栏上面一小块，右对齐，一行一个键：
+ * CLICK possess / HOLD set a trap / [F] appear  READY（键骨白、动作灰烬色，小型大写；F 后面的状态 Ready 幽绿、冷却秒数灰烬色）。
+ * 三样都用过以后（hud.ts 的 createUseWatch）只留 [F] 和状态（.is-compact）。垫一层很淡的黑底，压在亮处也读得出；
+ * 和准星一起出现（指针锁着时），暂停时让给「Click to resume」下面那一行完整的，收夜光收回时淡掉 */
+.hud-legend {
+  position: absolute;
+  right: max(24px, env(safe-area-inset-right));
+  bottom: calc(max(20px, env(safe-area-inset-bottom)) + 56px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+  margin: 0;
+  padding: 0.3em 0.7em 0.36em;
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.12em;
+  font-size: 1.02rem;
+  line-height: 1.32;
+  color: #a39a87;
+  text-shadow: var(--ink-shadow);
+  background: rgba(8, 7, 9, 0.42);
+  border-radius: 0.8em;
+  box-shadow: 0 0 14px 6px rgba(8, 7, 9, 0.42);
+  opacity: 0;
+  transition: opacity 0.5s ease;
+  pointer-events: none;
+}
+
+.hud-legend.is-on {
+  opacity: 1;
+}
+
+.hud-legend-row {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.hud-legend-key {
+  color: var(--bone);
+}
+
+.hud-legend .hud-key {
+  font-size: 0.82em;
+  vertical-align: 0.08em;
+}
+
+.hud-key + .hud-legend-act {
+  margin-left: 0.45em;
+}
+
+.hud-legend-state {
+  margin-left: 0.6em;
+  font-variant-numeric: lining-nums tabular-nums;
+  color: var(--ash);
+}
+
+.hud-legend-state.is-ready {
+  color: var(--ghost);
+}
+
+.hud-legend-state:empty {
+  display: none;
+}
+
+.hud-legend.is-compact .hud-legend-more {
+  display: none;
+}
+
+.hud-play.is-paused .hud-legend,
+.hud-play.is-silent .hud-legend,
+.hud-play.is-closing .hud-legend {
+  opacity: 0;
+}
+
+/* 做不到时的一句（Not yet. / Too far away. …）：准星下面一点，斜体，和播报里安静的那几行一个口气；来得快、去得慢。
+ * 垫一层很淡的黑底（同 .hud-note），字亮一点（2026-10-30 eye S-4：原来是一行很小、很暗的斜体，压在亮处读不出来） */
 .hud-refusal {
   position: absolute;
   left: 50%;
   top: calc(50% + 26px);
   margin: 0;
+  padding: 0.1em 0.75em 0.16em;
   transform: translateX(-50%);
   white-space: nowrap;
   font-style: italic;
-  font-size: 1.1rem;
+  font-size: 1.12rem;
   line-height: 1.2;
-  color: var(--ash);
+  color: #aba290;
   text-shadow: var(--ink-shadow);
+  background: rgba(8, 7, 9, 0.5);
+  border-radius: 0.8em;
+  box-shadow: 0 0 12px 6px rgba(8, 7, 9, 0.5);
   opacity: 0;
   transition: opacity 0.6s ease;
   pointer-events: none;
@@ -968,6 +1213,52 @@ body {
   .hud-seg {
     white-space: normal;
   }
+
+  /* 窄窗口：下面是播报（占满一行）和按钮，按键说明挪到右上角 */
+  .hud-legend {
+    top: max(14px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    bottom: auto;
+  }
+}
+
+/* 矮屏（手机横屏、很矮的窗口）：标题页收紧一档，放得下三步说明（还放不下就整页滚） */
+@media (max-height: 600px) {
+  .hud-start {
+    padding: 22px 24px 26px;
+  }
+
+  .hud-title {
+    font-size: clamp(2.2rem, 9vh, 3.6rem);
+  }
+
+  .hud-rule {
+    margin: 0.55rem 0 0.75rem;
+  }
+
+  .hud-headphones,
+  .hud-hint {
+    font-size: 1.02rem;
+  }
+
+  .hud-hint {
+    margin-bottom: 0.3rem;
+  }
+
+  .hud-steps {
+    margin-bottom: 0.35rem;
+    font-size: 0.98rem;
+    line-height: 1.32;
+  }
+
+  .hud-night {
+    margin-bottom: 0.6rem;
+    font-size: 0.94rem;
+  }
+
+  .hud-begin {
+    font-size: 1.5rem;
+  }
 }
 
 /* 触屏横屏（2026-10-30 试玩 P2-7）：放在计数下面那一行横穿房子的上方，压在物件的眼睛和冷却环上。
@@ -986,6 +1277,35 @@ body {
     max-width: min(36vw, 22rem);
     text-align: right;
   }
+}
+
+/* 准星旁的 F 键帽（2026-10-30 HT-3，view/overlays.ts）：现身就绪、此刻现身会吓到人时，准星右边一个小小的 F 键帽，
+ * 和右下角按键说明里的 F 同一个样子（细框、底边略厚）。淡入淡出，不发光、不放大、不弹跳 */
+.ov-fkey {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  top: 50%;
+  min-width: 1.35em;
+  margin: -0.75em 0 0 21px;
+  padding: 0 0.3em;
+  border: 1px solid rgba(220, 210, 189, 0.6);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: rgba(8, 7, 9, 0.62);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.75);
+  font-family: var(--face-text);
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.25;
+  text-align: center;
+  color: var(--bone);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.ov-fkey.is-on {
+  opacity: 1;
 }
 
 /* 场景叠层在第三人称下的遮挡、远近淡出（view/overlays.ts 把 opacity 写在内层元素上）：走出视线时淡掉，不是一下消失。

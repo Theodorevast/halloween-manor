@@ -1,8 +1,8 @@
 // 地上的范围霜线（src/view/rangeFrost.ts，手感 FEEL-2、FEEL-11）：
 // - 范围掩码（二值图）和模拟结算用的是同一套规则：每个物件随机取 500 个格心，和 canSee / canHear / facesToward 直接算的结果一致；
-//   现身那张和「察觉半径内、有视线」一致；再放真访客进模拟里，附身那一步谁被吓到 / 谁听见，和掩码说的一样
+//   现身那张和落下时的结算（MANIFEST.range 内、有视线）一致；再放真访客进模拟里，附身那一步谁被吓到 / 谁听见，和掩码说的一样
 // - 有符号距离：正负和掩码一致，边界在两格中间；墙不出线（墙两边都不画线，只有距离到头、视线被挡、正面以外那几处出线）
-// - 模块：平时藏着、标了 deferCompile；对准时 0.25 秒浮现、移开 0.35 秒退掉；冷却中整体减半；现身蓄力时前沿长到 5 米，收回后化掉；
+// - 模块：平时藏着、标了 deferCompile；对准时 0.25 秒浮现、移开 0.35 秒退掉；冷却中整体减半；现身蓄力时前沿长到 MANIFEST.range（6 米，和结算同一个数，critic G-1），收回后化掉；
 //   冷却好了脚下的霜往外呼一次（瞄着物件、减少动态、鬼魂在墙里时不呼）
 import * as THREE from 'three/webgpu';
 import { describe, expect, test, vi } from 'vitest';
@@ -32,10 +32,10 @@ function expectedObject(o: (typeof OBJECTS)[number], p: Vec2): boolean {
   const look = angleOf(o.pos.x - p.x, o.pos.z - p.z);
   return facesToward(o, p) && canSee(grid, { pos: p, lookDir: look }, o.pos, Math.min(spec.range, VISION.range));
 }
-/** 现身：察觉半径内（蓄力时就转过来了）、落下时看得见那里（视线、MANIFEST.range） */
+/** 现身：落下时看得见那里（视线、MANIFEST.range）。原来画的是察觉半径（5 米），结算是 6 米，差的那 1 米里的人照样被吓到（critic G-1） */
 function expectedManifest(at: Vec2, p: Vec2): boolean {
   const look = angleOf(at.x - p.x, at.z - p.z);
-  return Math.hypot(at.x - p.x, at.z - p.z) <= MANIFEST.noticeRadius && canSee(grid, { pos: p, lookDir: look }, at, MANIFEST.range);
+  return canSee(grid, { pos: p, lookDir: look }, at, MANIFEST.range);
 }
 
 const tiles = buildTiles();
@@ -88,7 +88,7 @@ describe('范围掩码：和结算同一套规则', () => {
     expect(mask[k({ x: m.pos.x - 0.2, z: m.pos.z + 1 })]).toBe(0); // 镜子背后那一侧
   });
 
-  test('现身：12 个随机站位 × 500 个格心，和「察觉半径内、有视线」一致；墙格里现身是空的', () => {
+  test('现身：12 个随机站位 × 500 个格心，和「MANIFEST.range 内、有视线」一致；墙格里现身是空的', () => {
     const rng = createRng(4242);
     let placed = 0;
     while (placed < 12) {
@@ -163,7 +163,7 @@ describe('范围掩码：放真访客进模拟，附身那一步的结算和掩�
 
 describe('有符号距离：线只出在范围真正的边上', () => {
   const solid = solidTexels(grid);
-  const W = RANGE_FROST.width.ghost;
+  const W = RANGE_FROST.bandMax; // 线离边界最远这么多米（线宽按屏幕像素算，极斜地看时也不超过它）
 
   test('墙格、窗格才是「实」的；门洞、家具、物件格不是', () => {
     for (let k = 0; k < N; k++) expect(solid[k] === 1).toBe(solidAt(texelCenter(k)));
@@ -255,7 +255,7 @@ describe('有符号距离：线只出在范围真正的边上', () => {
 
 describe('平滑：视线那一楔的台阶磨成斜线，别的不动', () => {
   const solid = solidTexels(grid);
-  const W = RANGE_FROST.width.ghost;
+  const W = RANGE_FROST.bandMax; // 线离边界最远这么多米（线宽按屏幕像素算，极斜地看时也不超过它）
 
   test.each(OBJECTS.map((o) => [o.id] as const))('%s：离边界 0.25 米以外，平滑前后正负一样（只磨边界附近）', (id) => {
     const mask = rangeMask(grid, objAct(id));
@@ -404,7 +404,7 @@ describe('模块：显隐和时间', () => {
     m.dispose();
   });
 
-  test('现身：蓄力那一刻以鬼魂为中心算掩码，前沿 0.6 秒长到 5 米（和 frost.ts 同一条曲线），收回后 1.2 秒化掉', () => {
+  test('现身：蓄力那一刻以鬼魂为中心算掩码，前沿 0.6 秒长到 MANIFEST.range（6 米，和 frost.ts 同一条曲线），收回后 1.2 秒化掉', () => {
     const core = makeCore();
     const m = createRangeFrost(core, makeRig({ x: 8, z: 6 }), { reduced: () => false });
     const state = makeState();
@@ -413,9 +413,9 @@ describe('模块：显隐和时间', () => {
     m.onEvent!({ type: 'manifest', phase: 'windup', pos, scared: [] }, state);
     let d = run(m, state, 0.3 + 1 / 60, clock); // 第一帧定起点
     const g = 0.3 / MANIFEST.windup;
-    expect(d.manifest.front).toBeCloseTo(MANIFEST.noticeRadius * (1 - (1 - g) ** 2), 1);
+    expect(d.manifest.front).toBeCloseTo(MANIFEST.range * (1 - (1 - g) ** 2), 1);
     d = run(m, state, 0.4, clock);
-    expect(d.manifest.front).toBeCloseTo(MANIFEST.noticeRadius, 6);
+    expect(d.manifest.front).toBeCloseTo(MANIFEST.range, 6);
     expect(d.manifest.level).toBe(1);
     m.onEvent!({ type: 'manifest', phase: 'drop', pos, scared: [] }, state);
     d = run(m, state, MANIFEST.hold, clock);
@@ -451,7 +451,7 @@ describe('模块：显隐和时间', () => {
     m.dispose();
   });
 
-  test('冷却好了（cooldown → idle 那一帧）、没瞄着物件：以鬼魂为中心往外呼一次，0.9 秒到 5 米，比蓄力淡，再 1.2 秒化掉', () => {
+  test('冷却好了（cooldown → idle 那一帧）、没瞄着物件：以鬼魂为中心往外呼一次，0.9 秒到 MANIFEST.range，比蓄力淡，再 1.2 秒化掉', () => {
     const core = makeCore();
     const m = createRangeFrost(core, makeRig({ x: 8, z: 6 }), { reduced: () => false });
     const state = makeState();
@@ -462,12 +462,12 @@ describe('模块：显隐和时间', () => {
     let d = run(m, state, 0.45 + 1 / 60, clock);
     expect(d.manifest.kind).toBe('exhale');
     expect(d.manifest.center).toEqual({ x: 8, z: 6 });
-    expect(d.manifest.front).toBeGreaterThan(MANIFEST.noticeRadius * 0.6);
-    expect(d.manifest.front).toBeLessThan(MANIFEST.noticeRadius);
+    expect(d.manifest.front).toBeGreaterThan(MANIFEST.range * 0.6);
+    expect(d.manifest.front).toBeLessThan(MANIFEST.range);
     expect(d.manifest.line).toBe(RANGE_FROST.exhale.line);
     expect(d.manifest.line).toBeLessThan(RANGE_FROST.weights.ghost.line);
     d = run(m, state, 0.45, clock);
-    expect(d.manifest.front).toBeCloseTo(MANIFEST.noticeRadius, 6);
+    expect(d.manifest.front).toBeCloseTo(MANIFEST.range, 6);
     d = run(m, state, RANGE_FROST.exhale.melt + 0.05, clock);
     expect(d.manifest.level).toBe(0);
     expect(d.visible).toBe(false);
@@ -587,7 +587,7 @@ describe('修复第 1 轮：安静时不画（审查 I-1），空闲预算的退
     m.onEvent!({ type: 'manifest', phase: 'windup', pos: { x: 8, z: 6 }, scared: [] }, state);
     let d = run(m, state, 1.0, clock);
     expect(d.manifest.level).toBe(1);
-    expect(d.manifest.front).toBeCloseTo(MANIFEST.noticeRadius, 6);
+    expect(d.manifest.front).toBeCloseTo(MANIFEST.range, 6);
     quiet = true;
     d = run(m, state, 0.6, clock);
     expect(d.manifest.level).toBeCloseTo(0.5, 1);
