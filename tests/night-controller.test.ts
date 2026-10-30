@@ -611,7 +611,7 @@ describe('门廊灯慢慢熄、亮回来（house.ts 的 createPorchDimmer）：�
 
 // ── 天亮的光（house.ts 的 smoothRamp、dawnLights）──────────────────────────────────────
 
-describe('天亮的光：只改已有的月光、半球光，慢慢往灰白偏一点、亮一点点', () => {
+describe('天亮的光：只改已有的月光、半球光、窗玻璃和屋里的底光（不加灯），慢慢往冷白偏、明显亮起来', () => {
   it('smoothRamp：smoothstep 走过去，seconds 秒正好到；一路只往一个方向（不过冲）；起步很平；seconds = 0 直接切；中途改目标从此刻的值接着走', () => {
     const r = smoothRamp(0);
     r.set(1, 20);
@@ -636,39 +636,57 @@ describe('天亮的光：只改已有的月光、半球光，慢慢往灰白偏�
     expect(mid - next).toBeLessThan(0.01);
   });
 
-  it('dawnLights：k = 0 就是原来的夜；k = 1 月光、天空色饱和度降下来（往灰白偏），仍然不偏暖（不像黄昏）；月亮落下去直射弱一点、天光散开亮一些；k 从 0 走到 1：直射（月光、光斑）一路往下、天光一路往上，按真实强度算的总亮度一路往上', () => {
+  it('dawnLights：k = 0 就是原来的夜；k = 1 月光、天空色往冷白偏（饱和度降下来，不偏暖、不像黄昏）；天光从窗户照进来（第二波 VX，eye G-7）：月光、窗下的光斑、半球光、屋里的底光都明显往上；k 从 0 走到 1 每一项都单调、平滑，按真实强度算的总亮度一路往上', () => {
     const lum = (c: THREE.Color) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
     const sat = (c: THREE.Color) => c.getHSL({ h: 0, s: 0, l: 0 }).s;
     const night = dawnLights(0);
     expect(night.moon.equals(new THREE.Color(PALETTE.moon))).toBe(true);
     expect(night.sky.equals(new THREE.Color(PALETTE.moonSky))).toBe(true);
-    expect([night.moonGain, night.hemiGain, night.patch]).toEqual([1, 1, 1]);
+    expect([night.moonGain, night.hemiGain, night.patch, night.fill]).toEqual([1, 1, 1, 1]);
     const dawn = dawnLights(1);
     for (const [d, n] of [[dawn.moon, night.moon], [dawn.sky, night.sky]]) {
       expect(sat(d)).toBeLessThan(sat(n) * 0.75);
+      // 冷白：蓝不比红少（不偏暖）
       expect(d.b).toBeGreaterThanOrEqual(d.r);
-      // 颜色本身的亮度几乎不变（只是变灰），亮多少由强度的乘数管
+      // 颜色本身的亮度几乎不变（只是变白），亮多少由强度的乘数管
       expect(Math.abs(lum(d) / lum(n) - 1)).toBeLessThan(0.05);
     }
-    // 月亮落下去：直射的月光只暗一点点（ART-2：×0.9）；天光变散：半球光亮一些（×1.5），不像日出那样大亮
-    expect(dawn.moonGain).toBeGreaterThanOrEqual(0.85);
-    expect(dawn.moonGain).toBeLessThan(1);
-    expect(dawn.hemiGain).toBeGreaterThan(1);
-    expect(dawn.hemiGain).toBeLessThanOrEqual(1.6);
-    // 一路平滑地走（每 1% 的 k 变化不到 1%），各自单调：直射的月光、窗下的光斑往下，天光往上；
-    // 总亮度按真实强度（MOON：月光 High / Low 两档、半球光）算，两档都一路往上（审查 M-1：原来那句不带强度，月光往下也测不出来）
+    // 天光从窗户进来：直射的月光（只从窗洞照进来）、窗下的光斑、半球光、屋里的底光都至少 1.5 倍；也不是日出那样大亮（都不到 4 倍）
+    for (const g of [dawn.moonGain, dawn.patch, dawn.hemiGain, dawn.fill]) {
+      expect(g).toBeGreaterThanOrEqual(1.5);
+      expect(g).toBeLessThan(4);
+    }
+    // 一路平滑地走（每 1% 的 k 变化不到 4%），各自单调往上；
+    // 总亮度按真实强度（MOON：月光 High / Low 两档、半球光）算，两档都一路往上，k = 1 时至少是夜里的两倍
     let prev = dawnLights(0);
     const total = (l: ReturnType<typeof dawnLights>, moonI: number) => lum(l.moon) * moonI * l.moonGain + lum(l.sky) * MOON.hemi * l.hemiGain;
     for (let k = 1; k <= 100; k++) {
       const l = dawnLights(k / 100);
       const direct = lum(l.moon) * l.moonGain, prevDirect = lum(prev.moon) * prev.moonGain;
-      expect(direct).toBeLessThanOrEqual(prevDirect + 1e-12);
-      expect(prevDirect - direct).toBeLessThan(prevDirect * 0.01);
-      expect(l.patch).toBeLessThanOrEqual(prev.patch + 1e-12);
-      expect(lum(l.sky) * l.hemiGain).toBeGreaterThanOrEqual(lum(prev.sky) * prev.hemiGain - 1e-12);
+      expect(direct).toBeGreaterThanOrEqual(prevDirect - 1e-12);
+      expect(direct - prevDirect).toBeLessThan(prevDirect * 0.04);
+      for (const [a, b] of [[l.patch, prev.patch], [l.fill, prev.fill], [lum(l.sky) * l.hemiGain, lum(prev.sky) * prev.hemiGain]]) {
+        expect(a).toBeGreaterThanOrEqual(b - 1e-12);
+        expect(a - b).toBeLessThan(b * 0.04);
+      }
       for (const moonI of [MOON.intensity, MOON.intensityLow]) expect(total(l, moonI)).toBeGreaterThanOrEqual(total(prev, moonI) - 1e-12);
       prev = l;
     }
+    for (const moonI of [MOON.intensity, MOON.intensityLow]) expect(total(dawn, moonI)).toBeGreaterThanOrEqual(total(night, moonI) * 2);
+    // 看得出来：光起来的时间要比「天亮 → 光开始收回前门」（一夜里约 15 秒）短
+    expect(NIGHT_FX.dawnLight * DAWN.rise).toBeLessThanOrEqual(15);
+  });
+
+  it('天亮的光退回夜里（Keep haunting，NIGHT_FX.dawnBack 秒）：按真实强度算的总亮度一路往下，countDips 数整段就是一下，不闪', () => {
+    const lum = (c: THREE.Color) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const total = (l: ReturnType<typeof dawnLights>) => (lum(l.moon) * MOON.intensity * l.moonGain + lum(l.sky) * MOON.hemiGhost * l.hemiGain) * (1 + l.fill);
+    const r = smoothRamp(1);
+    r.set(0, NIGHT_FX.dawnBack);
+    const top = total(dawnLights(1));
+    const v: number[] = [1];
+    for (let k = 0; k < (NIGHT_FX.dawnBack + 1) * HZ; k++) v.push(total(dawnLights(r.step(DT))) / top);
+    for (let i = 1; i < v.length; i++) expect(v[i]).toBeLessThanOrEqual(v[i - 1] + 1e-12);
+    expect(countDips(v, HZ)).toBe(1);
   });
 
   it('看得见的天（ART-2）：窗玻璃的倍数、屋外底色、雾随 k 一路只往上（每个通道都是），k = 0 是夜里原来的样子、k = 1 是 DAWN 给的；天是冷的灰蓝，不偏暖', () => {

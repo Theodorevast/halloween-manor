@@ -51,8 +51,69 @@ export const BLOOM = {
 };
 /** 暗角：d 是到画面中心的距离（边中点 0.71，角 1） */
 export const VIGNETTE = { strength: 0.45, inner: 0.35, outer: 1.0 };
-/** 暗角脉冲：先快速泛起（attack），再在 duration 内退去；最多把边缘混到 maxMix 的比例 */
-export const PULSE = { attack: 0.07, duration: 0.6, inner: 0.25, outer: 0.95, maxMix: 0.85 };
+/**
+ * 暗角脉冲（吓跑一个人时 juice.ts 调）：把画面边缘往一个颜色（PALETTE.dread，近黑的冷色）混，d 在 inner..outer 之间渐入，最多混 maxMix。
+ * 浓度 0..1 的包络见 createPulseEnvelope：attack 秒慢慢收拢（smoothstep，两头平）、停 hold 秒、release 秒里退去（余弦）。
+ * 2026-10-30 第二波（路 VX，newbie S2、eye S-2）：原来 0.07 秒冲到满、四角混到 85% 的暗红，整屏泛红像「你受伤了」；
+ * 现在很淡（四角最多压暗 30%，画面中间 inner 以内不动），慢慢收拢再松开，像屏住一口气
+ */
+export const PULSE = { attack: 0.22, hold: 0.15, release: 0.9, inner: 0.42, outer: 1.05, maxMix: 0.3 };
+
+/** 暗角脉冲的浓度包络（纯逻辑，测试直接走它）：trigger 来一下，step 走 dt 秒、返回此刻的浓度 */
+export interface PulseEnvelope {
+  readonly value: number;
+  trigger(strength: number): void;
+  step(dt: number): number;
+}
+
+/**
+ * 几个人接连吓跑不叠加：浓度取最大，不相加（tests/flee-pulse.test.ts）——
+ * - 正在收拢：从此刻的浓度接着往「两下里大的那个」收拢（起点就是此刻的值，不跳变）
+ * - 停住时：来的不比此刻浓，就把停住的时间往后续；更浓，从此刻接着收拢上去
+ * - 正在退：来的不比此刻浓，就停在此刻的浓度（再停 attack + hold 秒）然后接着退——画面只是多暗了一会儿，不会再暗一下；
+ *   更浓，从此刻的浓度收拢上去
+ * 这样画面边缘每暗下去一次（countDips 数的「一下」），中间至少隔着 attack + hold + 退去三分之一的时间（约 0.7 秒），任意 1 秒最多两下
+ */
+export function createPulseEnvelope(): PulseEnvelope {
+  type Phase = 'idle' | 'rise' | 'hold' | 'fall';
+  let phase: Phase = 'idle';
+  let t = 0;
+  let from = 0;
+  let peak = 0;
+  const value = () => {
+    switch (phase) {
+      case 'idle': return 0;
+      case 'rise': {
+        const x = Math.min(1, t / PULSE.attack);
+        return from + (peak - from) * x * x * (3 - 2 * x);
+      }
+      case 'hold': return peak;
+      case 'fall': return peak * (0.5 + 0.5 * Math.cos(Math.PI * Math.min(1, t / PULSE.release)));
+    }
+  };
+  return {
+    get value() { return value(); },
+    trigger(strength) {
+      const s = Math.min(1, Math.max(0, strength));
+      if (!(s > 0)) return;
+      const cur = value();
+      if (phase === 'hold' && s <= peak) { t = 0; return; }
+      // 收拢、退去、停住时来了更浓的、或者原来没有：都从此刻的浓度收拢到两者里大的那个
+      from = cur;
+      peak = Math.max(s, cur, phase === 'rise' ? peak : 0);
+      phase = 'rise';
+      t = 0;
+    },
+    step(dt) {
+      if (phase === 'idle') return 0;
+      t += Math.max(0, dt);
+      if (phase === 'rise' && t >= PULSE.attack) { phase = 'hold'; t -= PULSE.attack; }
+      if (phase === 'hold' && t >= PULSE.hold) { phase = 'fall'; t -= PULSE.hold; }
+      if (phase === 'fall' && t >= PULSE.release) { phase = 'idle'; t = 0; peak = 0; from = 0; }
+      return value();
+    },
+  };
+}
 /**
  * 胶片颗粒：显示空间的幅度（±amount/2），按 fps 换一次花样，像胶片而不是电视雪花。
  * 幅度随显示亮度从 dark 降到 bright（knee 是过渡区间）：真胶片的颗粒在暗部最显眼，亮处几乎看不见
@@ -563,21 +624,13 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
   let last = performance.now();
   let grainClock = 0;
   let grainStep = -1;
-  let pulseT = Infinity;
-  let pulseStrength = 0;
+  const pulse = createPulseEnvelope();
   let lastDpr = -1;
   let porchFound = false;
   let aoWasHigh = false;
   const bufSize = new THREE.Vector2();
   const lastBuf = new THREE.Vector2();
   const v0 = new THREE.Vector3();
-
-  const pulseValue = () => {
-    if (pulseT >= PULSE.duration) return 0;
-    if (pulseT < PULSE.attack) return pulseStrength * (1 - (1 - pulseT / PULSE.attack) ** 2);
-    const u = (pulseT - PULSE.attack) / (PULSE.duration - PULSE.attack);
-    return pulseStrength * (0.5 + 0.5 * Math.cos(Math.PI * u));
-  };
 
   const fx: PostFx = {
     timeScale: 1,
@@ -620,8 +673,7 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
       }
       opts.houseRoot.getWorldPosition(uHouseOff.value);
 
-      pulseT += dt * fx.timeScale;
-      uPulse.value = Math.min(1, pulseValue()) * PULSE.maxMix;
+      uPulse.value = pulse.step(dt * fx.timeScale) * PULSE.maxMix;
 
       grainClock += dt;
       const step = Math.floor(grainClock * GRAIN.fps);
@@ -655,11 +707,8 @@ export function createPostFx(renderer: THREE.WebGPURenderer, scene: THREE.Scene,
       if (built) rebuildHigh();
     },
     vignettePulse(strength, colorHex = PALETTE.dread) {
-      // 叠加：峰值取「此刻的强度」和新强度里大的那个；从此刻的强度接着往上泛，不会跳变
-      const cur = pulseValue();
-      pulseStrength = Math.max(strength, cur);
-      // 起音曲线 v = S·(1 − (1 − x)²) 反解出 v = cur 时的进度 x
-      pulseT = pulseStrength > 0 ? PULSE.attack * (1 - Math.sqrt(Math.max(0, 1 - cur / pulseStrength))) : 0;
+      // 不叠加：浓度取最大、从此刻的浓度接着走，不跳变（见 createPulseEnvelope）
+      pulse.trigger(strength);
       hexToDisplay(colorHex, uPulseColor.value);
     },
     setReveal(progress, origin) {
