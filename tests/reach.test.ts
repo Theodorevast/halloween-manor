@@ -15,6 +15,9 @@ import { Grid } from '../src/sim/grid';
 import { reachOf } from '../src/sim/reach';
 import { createRng } from '../src/sim/rng';
 import { createWorld } from '../src/sim/world';
+import { STRINGS } from '../src/config/strings';
+import { hudLines } from '../src/ui/hud';
+import { fKeyDue } from '../src/view/overlays';
 import type { Personality, SimEvent, Vec2, World } from '../src/sim/types';
 
 const DT = 1 / 60;
@@ -342,5 +345,54 @@ describe('reachOf：现身（蓄力察觉 + 落下时看得见）', () => {
     expect(closeMiss).toBeLessThan(close);
     expect(agree / people, misses.join('\n')).toBeGreaterThanOrEqual(0.98);
     expect(sameSet / trials).toBeGreaterThanOrEqual(0.95);
+  });
+});
+
+describe('现身的新规则和界面对得上（路 GP 合并 HT 以后）：F 键帽亮不亮（fKeyDue、reachOf）、落下吓到谁、现身失败那句话', () => {
+  const at = { x: 8.0, z: 9.5 }; // 门厅正中
+  /** 一个人站在 pos、手电朝 look、恐惧值 fear：出手前问 F 键帽，按下去看落下吓到谁、HUD 说什么 */
+  function press(pos: Vec2, look: number, fear: number, seed: number) {
+    const w = createWorld({ seed, autoSpawn: false });
+    const n = stand(w, pos, look);
+    n.fear = fear;
+    drive(w, 0.05, at);
+    n.lookDir = look;
+    const key = fKeyDue(at, w.state.manifest, reachOf(grid, w.state, { kind: 'manifest', at }));
+    expect(w.manifest()).toBe(true);
+    const drop = ofType(drive(w, MANIFEST.windup + 0.1, at), 'manifest').find((e) => e.phase === 'drop')!;
+    const said = hudLines(drop, w.state, { manifestMiss: true }).lines.map((l) => l.text);
+    return { id: n.id, key, scared: drop.scared, said };
+  }
+  const MISSED = STRINGS.onboarding.manifestMissed;
+  const WEST = { x: 6.0, z: 9.5 }; // 2 米，在发毛范围外
+
+  it('平静、背对着：键帽不亮，按了也吓不到（蓄力不替你把人转过来），HUD 说 No one saw you. Stand in their light.', () => {
+    const r = press(WEST, Math.PI, 0, 41);
+    expect(r.key).toBe(false);
+    expect(r.scared).toEqual([]);
+    expect(r.said).toEqual([MISSED]);
+  });
+
+  it('平静、手电照着那里：键帽亮，吓得到，不说失败那句', () => {
+    const r = press(WEST, 0, 0, 42);
+    expect(r.key).toBe(true);
+    expect(r.scared).toEqual([r.id]);
+    expect(r.said).not.toContain(MISSED);
+  });
+
+  it('已经紧张、背对着：键帽亮（灯一暗他就转过来），吓得到', () => {
+    const r = press(WEST, Math.PI, FEAR.nervous + 5, 43);
+    expect(r.key).toBe(true);
+    expect(r.scared).toEqual([r.id]);
+    expect(r.said).not.toContain(MISSED);
+  });
+
+  it('再紧张，隔着墙也不算：键帽不亮、吓不到、说失败那句', () => {
+    const inBedroom = { x: 4.5, z: 9.5 };
+    expect(grid.lineOfSight(inBedroom, at)).toBe(false);
+    const r = press(inBedroom, 0, FEAR.nervous + 20, 44);
+    expect(r.key).toBe(false);
+    expect(r.scared).toEqual([]);
+    expect(r.said).toEqual([MISSED]);
   });
 });
