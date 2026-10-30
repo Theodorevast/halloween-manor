@@ -5,6 +5,7 @@
 // 这里只测不依赖渲染的部分：投影矩形、重叠比例、平滑、挑哪些访客；着色器里只是多乘一个 uniform 的值
 import { describe, expect, it } from 'vitest';
 import { CHARACTER } from '../src/config/character';
+import { ghostSees } from '../src/engine/ghostRig';
 import type { Vec2 } from '../src/sim/types';
 import {
   GHOST, approachCover, coverOf, ghostCoverRect, occludeK, overlapOfGhost, rectOf, rectOverlap, visitorCoverRect,
@@ -234,5 +235,84 @@ describe('overlapOfGhost：挑谁、取最大的那个重叠', () => {
     const r = overlap([npc(10, 7.0)]);
     expect(r).toBeGreaterThan(0);
     expect(r).toBeLessThan(1);
+  });
+});
+
+// ───────────────────────── 只算看得见的人（修复第 2 轮，审查 I1） ─────────────────────────
+// 用真的房子（config/house.ts）和游戏里用的 ghostSees（engine/ghostRig.ts，按看得见的墙体算，名牌、眼睛显不显示也用它）：
+// 走廊（hall）在 z 5–7 米，它北边的墙在 z 4.5–5、南边的墙在 z 7–7.5，门洞在 x 7.5–8.5（通客厅 / 门厅）。
+// 镜头在门厅里朝北（隔着走廊南墙，那面墙按视线胶囊溶开了），鬼魂在走廊里，访客在走廊里、或隔着北墙在客厅里
+
+describe('overlapOfGhost：只算看得见的人（隔着墙的人不让鬼魂淡）', () => {
+  const npc = (x: number, z: number, mode = 'wander'): CoverNpc => ({ pos: { x, z } as Vec2, mode });
+  /** 镜头在 (cx, 8.4) 朝北；鬼魂在它北边 2.4 米的走廊里 (cx, 6) */
+  const scene = (cx: number) => {
+    const cam = makeCam(cx, 8.4, 0, -1);
+    const ghost = { x: cx, y: 1.4, z: 6 };
+    return (npcs: CoverNpc[], sees?: (a: { x: number; z: number }, b: Vec2) => boolean) =>
+      overlapOfGhost({ project: cam.project, cam: cam.cam, right: cam.right, ghost, npcs, sees });
+  };
+
+  it('前提：不判视线时，客厅里正对着鬼魂的人（隔着走廊北墙）盖满 = 1；判了视线就不算 = 0（墙是实心的：x = 9 不在门洞里）', () => {
+    const overlap = scene(9);
+    expect(overlap([npc(9, 3)])).toBeCloseTo(1, 9);
+    expect(ghostSees({ x: 9, z: 6 }, { x: 9, z: 3 })).toBe(false);
+    expect(overlap([npc(9, 3)], ghostSees)).toBe(0);
+  });
+
+  it('同一个房间（走廊里）的人算，哪怕镜头在走廊南墙外：镜头 → 鬼魂那一段上的墙已经溶开，不查；如果查镜头 → 访客就会误判成看不见', () => {
+    const overlap = scene(9);
+    // 走廊里鬼魂身后 0.7 米：正对着，被盖住八成多
+    expect(overlap([npc(9, 5.3)], ghostSees)).toBeGreaterThan(0.8);
+    expect(overlap([npc(9, 5.3)], ghostSees)).toBeCloseTo(overlap([npc(9, 5.3)]), 9);
+    // 对照：从镜头那一点看，中间隔着南墙，看不见（所以视线不能从镜头起查）
+    expect(ghostSees({ x: 9, z: 8.4 }, { x: 9, z: 5.3 })).toBe(false);
+    expect(ghostSees({ x: 9, z: 6 }, { x: 9, z: 5.3 })).toBe(true);
+  });
+
+  it('门洞：正对着门洞的人看得见、算；斜着穿过门洞的算；错开门洞、被北墙挡住的不算（鬼魂在门洞边上，人在墙那一段后面）', () => {
+    const overlap = scene(8);
+    expect(overlap([npc(8, 3)], ghostSees)).toBeCloseTo(1, 9); // 正对着门洞
+    expect(overlap([npc(8.3, 3.2)], ghostSees)).toBeCloseTo(1, 9); // 斜着穿过门洞
+    // 鬼魂靠在门洞的东沿（8.3），人在它东北、视线擦过 8.5 以东的那段墙
+    const edge = scene(8.3);
+    const o = edge([npc(8.9, 3)]);
+    expect(o).toBeGreaterThan(0.5); // 不判视线时盖住大半
+    expect(ghostSees({ x: 8.3, z: 6 }, { x: 8.9, z: 3 })).toBe(false);
+    expect(edge([npc(8.9, 3)], ghostSees)).toBe(0);
+  });
+
+  it('几个人：被墙挡住的那个盖得再多也不算，取看得见的里最大的', () => {
+    const overlap = scene(9);
+    // 客厅里正对着的（隔墙，盖满）+ 走廊里偏一点的（看得见，盖住一部分）
+    const hidden = npc(9, 3), seen = npc(9.4, 5.3);
+    const oSeen = overlap([seen]);
+    expect(oSeen).toBeGreaterThan(0);
+    expect(oSeen).toBeLessThan(1);
+    expect(overlap([hidden, seen], ghostSees)).toBeCloseTo(oSeen, 9);
+    expect(overlap([hidden, seen])).toBeCloseTo(1, 9); // 不判视线时被隔墙的那个顶上去
+  });
+
+  it('只在会抬高当前最大值时才查视线：不重叠的人不查、已经有更大的了也不再查（视线检查比矩形重叠贵）', () => {
+    const overlap = scene(9);
+    let calls = 0;
+    const spy = () => { calls++; return true; };
+    // 不重叠的人（走廊里偏东 4 米）：一次都不查
+    expect(overlap([npc(13, 6.4)], spy)).toBe(0);
+    expect(calls).toBe(0);
+    // 近的盖满（9, 4）、远的也盖满（9, 2.5）：近的查一次，远的不会比它大，不查
+    calls = 0;
+    expect(overlap([npc(9, 4), npc(9, 2.5)], spy)).toBeCloseTo(1, 9);
+    expect(calls).toBe(1);
+    // 近的盖住八成（9, 5.3）、远的盖满：两个都要查（远的抬高了最大值）
+    calls = 0;
+    expect(overlap([npc(9, 5.3), npc(9, 3)], spy)).toBeCloseTo(1, 9);
+    expect(calls).toBe(2);
+  });
+
+  it('看不见的人不占「最多 people 个」以外的额外名额：还是离镜头最近的 3 个里挑；全都看不见 = 0', () => {
+    const overlap = scene(9);
+    expect(overlap([npc(9, 3), npc(9.1, 2.6), npc(8.9, 2.2)], () => false)).toBe(0);
+    expect(overlap([npc(9, 3), npc(9.1, 2.6), npc(8.9, 2.2)], () => true)).toBeCloseTo(1, 9);
   });
 });

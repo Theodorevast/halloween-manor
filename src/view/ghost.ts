@@ -21,7 +21,7 @@
 //   「实」的那份标了 deferCompile，开场按钮可用之后由 main.ts 预编译
 // - 挡住访客时自己淡下去（2026-10-30，手感 FEEL-5，参数见 GHOST.occlude）：朝人飘过去时他就在鬼魂身后，贴近发毛、现身落下被吓的人、
 //   吓跑的人都被鬼魂自己挡住。每帧把鬼魂和比它离镜头更远的访客投到屏幕上，访客被鬼魂的矩形盖住得多就把 u.fade 乘一个小于 1 的数
-//   （平时 0.35、现身的实体 0.5、正被手电照出来 0.6），变淡快、回来慢；只是 uniform 的值，不加材质
+//   （平时 0.35、现身的实体 0.5、正被手电照出来 0.6），变淡快、回来慢；只是 uniform 的值，不加材质。只算看得见的访客（隔着墙的不算）
 // ?noghostfx：不画鬼魂（量开销的对照，和 house.ts 一致）
 import * as THREE from 'three/webgpu';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -977,11 +977,22 @@ export interface CoverInput {
   right: Vec2;
   ghost: { x: number; z: number };
   npcs: readonly CoverNpc[];
+  /**
+   * 从 a 看 b 中间有没有墙（看得见 = true）。不给就都看得见（纯几何的单测、没有墙的场合）；游戏里传 ghostSees（engine/ghostRig.ts：
+   * 按看得见的墙体算，斜穿门洞也算看得见，名牌、眼睛显不显示也用它）。a 是鬼魂、b 是访客，不是镜头，见 overlapOfGhost
+   */
+  sees?: (a: { x: number; z: number }, b: Vec2) => boolean;
 }
 
 /**
  * 鬼魂挡住访客的程度 overlap（0..1）：比鬼魂离镜头更远、range 米以内、没走（gone）的访客里，离镜头最近的 people 个，
- * 各自被鬼魂的矩形盖住的比例，取最大的。吓跑的人照样算（吓跑那一下正是要看清他的时候）。鬼魂在镜头背后没有矩形 = 0
+ * 各自被鬼魂的矩形盖住的比例，取最大的。吓跑的人照样算（吓跑那一下正是要看清他的时候）。鬼魂在镜头背后没有矩形 = 0。
+ *
+ * 只算玩家看得见的人（修复第 2 轮，审查 I1）：隔着墙站在隔壁房间、投影正好落在鬼魂矩形里的访客不算，不然鬼魂会无缘无故淡下去，
+ * 还等于告诉玩家「墙后有人」（名牌、眼睛都隔墙不显示）。视线查的是鬼魂 → 访客这一段（c.sees），不是镜头 → 访客：
+ * 第三人称的墙是全高的，镜头 → 鬼魂那一段上的墙已经按视线胶囊溶开了（walls.ts 的 DISSOLVE.sight，洞宽 0.6–1 米，鬼魂矩形盖得住的访客
+ * 都在这个洞的张角里），隔着溶开的墙看鬼魂、看鬼魂身后同一个房间的人是看得见的，要算；鬼魂身后再隔一面墙的人，墙没溶开，看不见，不算。
+ * 视线检查比矩形重叠贵（沿线每 8 厘米查一次墙体），所以只在这个人的重叠会抬高当前最大值时才查
  */
 export function overlapOfGhost(c: CoverInput): number {
   const O = GHOST.occlude;
@@ -998,7 +1009,9 @@ export function overlapOfGhost(c: CoverInput): number {
   let best = 0;
   for (const { n } of cands.slice(0, O.people)) {
     const vr = visitorCoverRect(c.project, n.pos, c.right);
-    if (vr) best = Math.max(best, rectOverlap(gr, vr));
+    if (!vr) continue;
+    const o = rectOverlap(gr, vr);
+    if (o > best && (!c.sees || c.sees(c.ghost, n.pos))) best = o;
   }
   return best;
 }
@@ -1007,7 +1020,7 @@ export function overlapOfGhost(c: CoverInput): number {
 
 const isWallish = (t: number) => t === Tile.Wall || t === Tile.Window;
 
-/** 这一帧最亮那支手电照着鬼魂的程度（uReveal，0..1）：声音（被照到时的低压声）、调试读。没有鬼魂画面时恒为 0 */
+/** 这一帧最亮那支手电照着鬼魂的程度（uReveal，0..1）：墙上多一个影子的判断（otherShadow.ts）、调试读。声音、提示不读它，走模拟的 reveal 事件。没有鬼魂画面时恒为 0 */
 let revealNow = 0;
 export function ghostRevealAmount(): number {
   return revealNow;
@@ -1399,7 +1412,7 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
         const rl = Math.hypot(camRight.x, camRight.z) || 1;
         rightH.x = camRight.x / rl;
         rightH.z = camRight.z / rl;
-        overlapNow = overlapOfGhost({ project, cam: camPos, right: rightH, ghost: g, npcs });
+        overlapNow = overlapOfGhost({ project, cam: camPos, right: rightH, ghost: g, npcs, sees: ghostSees });
       } else overlapNow = 0;
       coverS = approachCover(coverS, coverOf(overlapNow), dt);
       if (dt > 0) kS += (occludeK(solid, revealNow > GHOST.occlude.lit) - kS) * (1 - Math.exp(-dt / GHOST.occlude.out));
