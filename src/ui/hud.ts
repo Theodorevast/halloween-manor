@@ -13,7 +13,7 @@
 //   准备好才亮（加上标本签的框、呼吸）。整页都能点；还在点蜡烛时就点了的记下来（按钮改写 almostLit），main.ts 准备好了自动开场
 // - 常驻的按键说明（右下角）：Click possess · Hold set a trap · F appear，F 后面写 Ready / 冷却秒数（fStatus）；
 //   三样都用过以后只留 F 和状态（createUseWatch）；暂停时让给「Click to resume」下面那一行完整的
-// - 开场的操作说明留到第一次成功附身为止（createOpeningLine），中间情境提示要用那一行时让出来、提示说完再回来
+// - 开场的操作说明留到第一次成功附身为止，最多显示 KEYS.max 秒（createOpeningLine），中间情境提示要用那一行时让出来、提示说完再回来
 // - 失败要说话：附身落空（No one saw the lamp.）、现身落空（No one saw you. Stand in their light.）在各自第一次成功之前每次都说，
 //   之后只在一共说过的不到 MISSED_LINES 次时说（hints.ts 的 missLineDue）
 // 天亮自己走的人（exit 带 calm，2026-10-30「一夜」）：播报写 walked out into the morning（安静的灰字），不跳计数；
@@ -78,10 +78,11 @@ const START_FADE = 0.8;
 /**
  * 第三人称开场的操作说明（秒）：开场后多久淡入（delay）；第一次至少停多久（hold）——之后要等第一次成功附身才走
  * （2026-10-30 newbie G1：原来停 10 秒就走，那 10 秒新手正忙着看访客进门）；情境提示要用那一行时让出来，提示说完再回来，
- * 再回来的那几次至少停 again 秒才让；淡出多久（fade，和 styles.css 里 .hud-keys 的 transition 一致，淡完才把那一行还回去）。
+ * 再回来的那几次至少停 again 秒才让；一直没成功附身也最多显示多久（max，几次加起来，2026-10-30 试玩：两行字整夜压在画面下沿，右下角已有常驻的按键说明）；
+ * 淡出多久（fade，和 styles.css 里 .hud-keys 的 transition 一致，淡完才把那一行还回去）。
  * delay 原来 1.2 秒，正好撞上第一个访客推门、从身边走过（开场后约 2–4 秒），没人看（2026-10-30 试玩报告 P1-3 c）
  */
-export const KEYS = { delay: 4.5, hold: 10, again: 3, fade: 1.2 };
+export const KEYS = { delay: 4.5, hold: 10, again: 3, max: 30, fade: 1.2 };
 /** 触屏竖屏：开场后多久说一句「把手机横过来」、停多久（秒）；横过来了就收。等娃娃屋的开场镜头（约 2.5 秒）落定再说 */
 const TURN = { delay: 3, hold: 7 };
 /** 开场按钮下面那条细线：比真进度往前多走一点（JS 卡着的时候它照样往前挪，见 setProgress），最多多走这么多；两次改写至少隔多久（毫秒） */
@@ -324,7 +325,8 @@ export function fStatus(m: ManifestState): string {
  * 第三人称开场的操作说明（WASD drift · Mouse look · …）什么时候挂着（2026-10-30 newbie G1）。纯逻辑（tests/opening.test.ts 测），
  * 用画面下方正中那一行（hints.ts 的 bottomLine）：
  * - start：开场就先占着那一行（第一个访客推门的那几秒不出任何字），KEYS.delay 秒后显示
- * - 第一次至少挂 KEYS.hold 秒；之后要等第一次成功附身（succeeded）才淡出、把那一行还回去，不再回来
+ * - 第一次至少挂 KEYS.hold 秒；之后第一次成功附身（succeeded）就淡出、把那一行还回去，不再回来
+ * - 一直没成功附身：显示的时间加起来到 KEYS.max 秒也淡出，不再回来（右下角的常驻说明、Esc 的完整说明还在）
  * - 情境提示在等那一行（wanted，bottomLine.takeRequest）：挂够了（第一次 KEYS.hold，再回来的 KEYS.again）就淡出让给它；
  *   它说完把那一行还回来，还没成功附身就再挂上
  * tick 每帧调，返回此刻显示不显示（淡出的时候已经是 false：CSS 慢慢淡）
@@ -334,6 +336,10 @@ export function createOpeningLine(k = KEYS) {
   /** queued：什么时候显示；on：从什么时候显示的；fading：什么时候淡完 */
   let at = 0;
   let shows = 0;
+  /** 前几次显示了多少秒（让给提示再回来的也算进 KEYS.max） */
+  let shownBefore = 0;
+  /** 显示够 KEYS.max 秒了：淡完不再回来 */
+  let spent = false;
   return {
     get done(): boolean {
       return phase === 'done';
@@ -353,17 +359,21 @@ export function createOpeningLine(k = KEYS) {
             shows++;
           }
           break;
-        case 'on':
-          if (now - at >= (shows === 1 ? k.hold : k.again) && (succeeded || wanted)) {
+        case 'on': {
+          const on = now - at;
+          spent = shownBefore + on >= k.max;
+          if (spent || (on >= (shows === 1 ? k.hold : k.again) && (succeeded || wanted))) {
+            shownBefore += on;
             phase = 'fading';
             at = now + k.fade;
           }
           break;
+        }
         case 'fading':
           if (now >= at) {
             bottomLine.release('keys');
-            // 让给提示的、还没成功附身的：回来；成功附身了的：不回来
-            phase = succeeded ? 'done' : 'away';
+            // 让给提示的、还没成功附身的：回来；成功附身了的、显示够了的、只剩不到 again 秒的（出来闪一下就走，不如不出来）：不回来
+            phase = succeeded || spent || k.max - shownBefore < k.again ? 'done' : 'away';
           }
           break;
         case 'away':

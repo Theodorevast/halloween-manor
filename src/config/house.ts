@@ -148,24 +148,26 @@ export interface PaintingPlacement {
 /**
  * 墙上的挂画（2026-10-30 试玩反馈「不够吓人，平面那里可以放真正的恐怖图片」）。画像（物件 portrait）以外的六幅，
  * 每幅一张生成的维多利亚风格恐怖画；位置、画框、加载见 view/paintings.ts，规则 tests/paintings.test.ts 钉着：
- * - 背后是实墙（不压窗、不跨门洞），离墙角、门框至少 0.15 米；前面 1 米内没有物件、没有比画框底边高的家具
- * - 只挂内墙：两头的外墙（走廊东西两头）、客厅北墙壁炉西边、卧室衣柜旁是墙上多一个影子的落点（view/otherShadow.ts 的 OTHER_SPOTS），
- *   别处的外墙不是窗就是被家具、物件挡着。娃娃屋俯视下内墙一直是 0.5 米的矮墙，画挂不住，所以娃娃屋不建（第三人称才有）
- * - 高度：画布中心约 1.5 米（画框底边在护墙板腰线 0.9 米以上）
+ * - 背后是实墙（不压窗、不跨门洞），离墙角、门框至少 0.15 米；前面 1 米内没有物件、没有比画框底边高的家具；不在墙上多一个影子的落点旁边（view/otherShadow.ts 的 OTHER_SPOTS）
+ * - 一开始就碰得到（试玩 S2：一夜里基本碰不到）：开场镜头对着前门，第一帧就看得见门厅南墙那幅（门西边，门开着时门板也挡不住）；
+ *   第一个访客进门朝北走，手电正对门厅北墙那幅；从门厅门洞出来，正对面的走廊北墙是全家福
+ * - 挂得高，上沿都在离地 2.125 米（试玩 S2：鬼魂正好挡在画前）：鬼魂站在画前时，头顶那条线在墙上约 1.75 米，线以上还露着四成以上，画上的脸都在上半幅。
+ *   静物的手在画的最下面，鬼魂正对着时看不见，让开就看得见
+ * - 只有第三人称才有（墙一直全高）。娃娃屋俯视不建：内墙一直是 0.5 米的矮墙，外墙按镜头降低，都挂不住画
  */
 export const PAINTINGS: PaintingPlacement[] = [
-  // 书房东墙，书桌背后的那面墙（从书房门进来往东看就是它）：老绅士，眼睛被人后来用黑漆涂掉
-  { id: 'study-gentleman', art: 'gentleman', room: 'study', facing: W, along: 2.75, y: 1.5, size: [0.52, 0.78] },
+  // 门厅南墙，前门西边（开场第一帧就在画面右边）：老绅士，眼睛被人后来用黑漆涂掉。试玩时一眼就觉得不对的就是他
+  { id: 'foyer-gentleman', art: 'gentleman', room: 'foyer', facing: N, along: 6.55, y: 1.675, size: [0.6, 0.9] },
+  // 门厅北墙，走廊门洞的左边（进门的人手电正对着它）：夜里的老宅（就是这栋），楼上唯一亮着的窗里贴着一张脸
+  { id: 'foyer-house', art: 'house', room: 'foyer', facing: S, along: 6.4, y: 1.75, size: [0.5, 0.75] },
+  // 走廊北墙，门厅门洞斜对面、客厅门的左边（从门厅出来抬头就看见）：全家福，每张脸都被刀刮掉
+  { id: 'hall-family', art: 'family', room: 'hall', facing: S, along: 6.6, y: 1.675, size: [0.6, 0.9] },
+  // 书房东墙，书桌背后的那面墙（从书房门进来往东看就是它）：雾里的荒原，枯树下远远站着一个很高很瘦的白影
+  { id: 'study-moor', art: 'moor', room: 'study', facing: W, along: 2.75, y: 1.675, size: [0.6, 0.9] },
   // 客厅西墙（整面空墙，和书房那幅隔着同一堵墙、错开半米）：静物，桌布底下伸出一只又长又白的手
-  { id: 'living-still-life', art: 'stillLife', room: 'living', facing: E, along: 2.25, y: 1.5, size: [0.52, 0.78] },
-  // 走廊北墙，书房门和客厅门之间：全家福，每张脸都被刀刮掉
-  { id: 'hall-family', art: 'family', room: 'hall', facing: S, along: 5.25, y: 1.5, size: [0.6, 0.9] },
-  // 走廊南墙，门厅门和浴室门之间（和全家福错开，一边一幅）：雾里的荒原，枯树下远远站着一个很高很瘦的白影
-  { id: 'hall-moor', art: 'moor', room: 'hall', facing: N, along: 10.5, y: 1.5, size: [0.6, 0.9] },
+  { id: 'living-still-life', art: 'stillLife', room: 'living', facing: E, along: 2.25, y: 1.735, size: [0.52, 0.78] },
   // 卧室东墙，正对床（床朝东，躺着就看见）：抱瓷娃娃的小女孩，两个都盯着你
-  { id: 'bedroom-girl', art: 'girl', room: 'bedroom', facing: W, along: 10.1, y: 1.45, size: [0.46, 0.69] },
-  // 门厅北墙，进门抬头就看见、走廊门洞的左边：夜里的老宅（就是这栋），楼上唯一亮着的窗里贴着一张脸
-  { id: 'foyer-house', art: 'house', room: 'foyer', facing: S, along: 6.4, y: 1.5, size: [0.5, 0.75] },
+  { id: 'bedroom-girl', art: 'girl', room: 'bedroom', facing: W, along: 10.1, y: 1.78, size: [0.46, 0.69] },
 ];
 
 export const cellCenter = (i: number, j: number) => ({ x: (i + 0.5) * CELL, z: (j + 0.5) * CELL });

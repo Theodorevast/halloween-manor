@@ -1,13 +1,14 @@
 // 肖像：画架上一幅维多利亚风格的女士像（2026-10-30 起是素材中台生成的油画，public/assets/paintings/portrait.webp，穿丧服的年轻女士）。
 // 被附身时眼睛猛地转向最近的访客、瞳孔里亮起一点幽绿；就在那一刻，她的脸开始化开成同一幅画的恐怖版（portrait-possessed.webp：
-// 脸成了张大嘴的骷髅、脸周围的颜料起泡龟裂），从脸往外约 0.4 秒漫过整幅画（见 PORTRAIT_REVEAL），不闪；
-// 盯 0.6 秒、画框发抖，然后整幅画向前扑倒、脸朝下砸在地上，回弹一下。broken 期间一直趴着，reset 时还脸朝下就换回平常的样子，飘回画架。
+// 脸成了张大嘴的骷髅、脸周围的颜料起泡龟裂），从脸往外漫过整幅画，访客受惊（0.94 秒）时正好换完（见 PORTRAIT_REVEAL），不闪；
+// 那张脸留 1.5 秒盯着人，然后画框发抖、整幅画向前扑倒、脸朝下砸在地上，回弹一下（时间线见 T）。broken 期间一直趴着，reset 时还脸朝下就换回平常的样子，飘回画架。
 // 画砸下去时把地上积的灰吹开：画扶回画架以后，地板上留下一块比周围干净的长方形印子，几秒里慢慢淡掉（见 PRINT）。
 import * as THREE from 'three/webgpu';
 import {
   abs, clamp, color, dot, exp, float, length, max, min, mix, mx_noise_float, positionLocal, smoothstep, texture, uniform, uv, vec2, vec3,
 } from 'three/tsl';
-import { C, Parts, bodyMaterial, bump, inCubic, inOutCubic, inOutSine, inQuad, lerp, mesh, outCubic, outQuad, seg, wobble, type PropFrame, type PropRig } from './kit';
+import { C, Parts, bodyMaterial, bump, inOutCubic, inOutSine, inQuad, lerp, mesh, outCubic, outQuad, seg, wobble, type PropFrame, type PropRig } from './kit';
+import { SCARES } from '../../config/scares';
 import { PALETTE } from '../palette';
 import { paintingTexture } from '../paintings';
 
@@ -45,13 +46,37 @@ const EYE_Y = FH / 2 + (0.5 - EYES.pupils[0][1]) * CH;
 /** 眼睛最多转多少（弧度）：左右 yaw，往下 down、往上 up */
 const LOOK = { yaw: 0.85, down: 0.55, up: 0.35 };
 
+/** 换完以后脸留多少秒才开始扑倒 */
+const FACE_HOLD = 1.5;
+const FALL = SCARES.portrait.hitAt + FACE_HOLD;
 /**
- * 换脸：被附身、眼睛甩过去那一刻（T.snap）起，time 秒里从脸（face，贴图 uv）往外化开到整幅画。前沿的形状：
+ * 时间线（秒，从 trigger 算起）。2026-10-30 试玩 S2：原来 0.6 秒就扑倒，脸只看得见半秒，0.9 秒起画面上只剩画架。
+ * 现在访客受惊（SCARES.portrait.hitAt，0.94 秒，不变）对着换脸，砸地往后挪：发抖、扑倒、砸地、回弹之间的间隔照旧。
+ * 声音（sfx.ts）、灰（particles.ts）都读这一份，砸地的声音和灰跟着真的砸地走
+ */
+const T = {
+  snap: 0.07, // 眼睛甩过去，脸同时开始化开
+  trembleFrom: FALL - 0.22,
+  fall: FALL, // 开始扑倒
+  impact: FALL + 0.34, // 砸地
+  bounce1: FALL + 0.5,
+  bounce2: FALL + 0.6,
+  end: FALL + 0.7,
+};
+
+/**
+ * 换脸：被附身、眼睛甩过去那一刻（T.snap）起，time 秒里从脸（face，贴图 uv）往外化开到整幅画，访客受惊时正好换完。前沿的形状：
  * 到脸的距离（画布高度为 1，宽按 CW / CH 缩）加噪声（最多 noise，见 portraitReveal），软边 soft；前沿后面 3 × soft 那一圈颜料暗下去 scorch
  * （像从画布背后烧过来），前沿过去就恢复。reach：离脸最远的角有多远。不加亮、不闪
  */
 export const PORTRAIT_REVEAL = {
-  time: 0.4,
+  time: SCARES.portrait.hitAt - T.snap,
+  /**
+   * 前沿分两段匀速（portraitRot）：前 faceAt 的时间走到 faceRot，刚好盖住整张脸（约 0.7 秒换完脸，一路看得出五官一处处化开，
+   * 比访客受惊早一个反应的时间）；剩下的时间漫过脸外面那一大片，那里两张图差别小
+   */
+  faceAt: 0.72,
+  faceRot: 0.27,
   face: [0.49, 0.3] as [number, number],
   noise: 0.08,
   soft: 0.05,
@@ -66,11 +91,12 @@ export const PORTRAIT_REVEAL = {
 /** 前沿走完整幅画要走多远：最远的角 + 噪声 + 烧暗那一圈（进度 1 时哪儿都换完、也不再暗） */
 const REVEAL_SPAN = PORTRAIT_REVEAL.reach + PORTRAIT_REVEAL.noise + PORTRAIT_REVEAL.soft * 3;
 
-/**
- * 换脸的进度（0 = 平常的女士像，1 = 换完）：t 是触发以后的秒数。先慢后快：眼睛先甩过去，隔一拍脸才开始化（约 8 帧看得出它在化开），
- * 脸之外那一大片差别小，最后很快漫过去。原来用 inOutSine 时脸 4 帧就换完，像切了一张图（看样发现）
- */
-export const portraitRot = (t: number) => inCubic(seg(t, T.snap, T.snap + PORTRAIT_REVEAL.time));
+/** 换脸的进度（0 = 平常的女士像，1 = 换完）：t 是触发以后的秒数。两段匀速，见 PORTRAIT_REVEAL.faceAt */
+export const portraitRot = (t: number) => {
+  const { time, faceAt, faceRot } = PORTRAIT_REVEAL;
+  const u = seg(t, T.snap, T.snap + time);
+  return u < faceAt ? (u / faceAt) * faceRot : lerp(faceRot, 1, (u - faceAt) / (1 - faceAt));
+};
 
 /** 贴图 uv（u, v，左上角为原点）这一点在进度 rot 时换过去了多少（0..1）；n 是这一点的噪声（0..1）。着色器里是同一个式子 */
 export function portraitReveal(u: number, v: number, rot: number, n: number): number {
@@ -107,17 +133,6 @@ const PRINT = {
 
 /** 复原（reset）时落回画架、停稳的时刻（秒，从 reset 算起；sfx.ts 的 PORTRAIT_RESET.settle 也是这个数） */
 const RESET_SETTLE = 1.05;
-
-// 时间线（秒，从 trigger 算起）
-const T = {
-  snap: 0.07, // 眼睛甩过去
-  trembleFrom: 0.38,
-  fall: 0.6, // 开始扑倒
-  impact: 0.94, // 砸地
-  bounce1: 1.1,
-  bounce2: 1.2,
-  end: 1.3,
-};
 
 /**
  * 用 Canvas 画一张维多利亚女士像：深色衣裙、高领蕾丝、盘发，脸色发青，表情冷硬；整张画发黄、带龟裂。
@@ -497,7 +512,7 @@ export function createPortrait(): PropRig {
         t += dt;
         // 眼睛甩过去那一刻起换脸（扑倒、趴着时一直是恐怖版，复原时才换回来）
         rot.value = portraitRot(t);
-        // 0–0.6：盯着人
+        // 一直盯着人，到扑倒为止
         if (t < T.fall + 0.1) aimEyes(f);
         const snap = t < T.snap ? outCubic(seg(t, 0, T.snap)) : 1;
         look.yaw = lerp(look.yaw, look.tYaw, t < T.snap ? snap : 1 - Math.exp(-dt * 22));
@@ -506,7 +521,7 @@ export function createPortrait(): PropRig {
 
         if (t < T.fall) {
           restPose();
-          // 0.38 起画框开始发抖，越抖越凶
+          // 扑倒前 0.22 秒画框开始发抖，越抖越凶
           const k = inQuad(seg(t, T.trembleFrom, T.fall));
           pivot.rotation.z = wobble(t * 2.2, 1) * 0.03 * k;
           pivot.rotation.x = LEAN + wobble(t * 2.6, 3) * 0.02 * k;

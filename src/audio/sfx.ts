@@ -19,12 +19,13 @@
 //     4.62 / 4.98 / 5.42 几乎听不见]；每到头一次一声嘎吱 —— 窄脉冲（粘滑摩擦，往后仰 46→36 Hz、往前 31→25 Hz）
 //     + 被它调制的噪声，过三只高 Q 带通（木头共鸣），音量 ∝ 振幅^0.8；往前到头时摇腿前端磕一下地；
 //     摇腿在地上滚的低沉摩擦（低通 240 Hz 噪声，音量跟着角速度）；0 秒一下被猛推的闷响 [第一下往后仰]
-//   肖像 portrait（1.3 秒 + 混响尾巴）：0 秒一个极短的「嗒」[眼睛甩过去 0–0.07]；D2 + E♭2 锯齿波低通的低沉拉长音，
-//     渐强，0.38 秒起加越来越快的颤音 + 越来越密的木框碰撞声 [画框越抖越厉害 0.38–0.60]，0.6 秒收掉 [往前扑]；
-//     下落的风声渐强 [0.6–0.94]；0.94 闷响（72→40 Hz 正弦 + 低通噪声）+ 木框碎裂（7 个 2–10 毫秒的宽带颗粒）
-//     + 碎玻璃（4.5 kHz 以上的稀疏颗粒，没有音高，不会像「叮」）[砸地 0.94]；小一号的闷响 [弹一下 1.10]、更小的 [1.20 停住]
+//   肖像 portrait（3.14 秒 + 混响尾巴）：0 秒一个极短的「嗒」[眼睛甩过去 0–0.07]；D2 + E♭2 锯齿波低通的低沉拉长音，
+//     跟着换脸渐强、变亮 [0.07–0.94，访客受惊时换完]，然后压低撑着 [脸留着]，2.22 秒起加越来越快的颤音 + 越来越密的木框碰撞声
+//     [画框越抖越厉害 2.22–2.44]，2.44 秒收掉 [往前扑]；下落的风声渐强 [2.44–2.78]；2.78 闷响（72→40 Hz 正弦 + 低通噪声）
+//     + 木框碎裂（7 个 2–10 毫秒的宽带颗粒）+ 碎玻璃（4.5 kHz 以上的稀疏颗粒，没有音高，不会像「叮」）[砸地 2.78]；
+//     小一号的闷响 [弹一下 2.94]、更小的 [3.04 停住]。时刻都读 view/props/portrait.ts 的时间线
 //   肖像复原 reset（1.05 秒）：两下极轻的木头抽动 [0–0.12]，0.32–0.92 一阵低通噪声的「气」托起来 [飘回画架]，1.05 轻轻一磕 [落定]
-//   镜子 mirror（1.0 秒 + 混响尾巴）：每次脸闪出来一声很轻的高频气声 [0, 0.14, 0.26]；0–0.6 反向渐强（同一组音簇 + 噪声，
+//   镜子 mirror（2.25 秒 + 混响尾巴，时刻读 view/props/mirror.ts 的 MIRROR_FLASH，脸留着的时候音簇撑着，下面的秒数是脸留长之前的）：每次脸闪出来一声很轻的高频气声 [0, 0.14, 0.26]；0–0.6 反向渐强（同一组音簇 + 噪声，
 //     指数渐强、低通越开越亮，0.6 秒硬切）[0.31–0.6 全黑时还在涨]；0.6 小二度音簇冲击：上层 C♯4 D4 E♭4（两个小二度叠在一起）
 //     锯齿波 + 下层 D2 D3 E♭3 + 冲击噪声 + 58→34 Hz 的下沉 [脸扑出来、镜子震]；上层带 13 Hz 颤音、0.28 秒内退掉 [镜子抖]，
 //     镜框里玻璃抖动的颗粒声；0.84 起上层跟着脸的闪烁表断开 [0.84–1.0 闪着消失]，下层平滑收掉，留混响尾巴
@@ -708,15 +709,18 @@ export const portrait: SfxFn = (bus, t, at) => {
   // 眼睛甩过去：一个极短的「嗒」
   wood.push({ t: 0.004, len: 0.0015, amp: P.snap });
 
-  // 低沉拉长音：起音跟着眼睛（0.07 秒），渐强，扑倒时收掉
+  // 低沉拉长音：起音跟着眼睛（0.07 秒），跟着换脸渐强、变亮，访客受惊时到头；脸留着的时候压低撑着；发抖时再涨上去，扑倒时收掉
+  const faced = SCARES.portrait.hitAt;
   const lp = s.bq('lowpass', P.lp[0], 2.5);
   for (const f of P.groanHz) for (const d of [-6, 6]) s.osc('sawtooth', f, t, t + T.fall + 0.2, d).connect(lp);
   lp.frequency.setValueAtTime(P.lp[0], t);
+  lp.frequency.linearRampToValueAtTime(P.lp[1], t + faced);
+  lp.frequency.linearRampToValueAtTime(P.lp[0], t + T.trembleFrom);
   lp.frequency.linearRampToValueAtTime(P.lp[1], t + T.fall);
   const trem = s.gain(1);
   const env = s.gain(0);
   lp.connect(trem).connect(env).connect(s.out);
-  line(env.gain, t, [[0, 0], [T.snap, P.groan * 0.6], [T.trembleFrom, P.groan * 0.75], [T.fall - 0.02, P.groan], [T.fall + 0.08, 0]]);
+  line(env.gain, t, [[0, 0], [T.snap, P.groan * 0.6], [faced, P.groan * 0.85], [faced + 0.4, P.groan * 0.6], [T.trembleFrom, P.groan * 0.6], [T.fall - 0.02, P.groan], [T.fall + 0.08, 0]]);
   // 抖：颤音越来越快、越来越深
   const lfo = s.osc('sine', 9, t, t + T.fall + 0.2);
   lfo.frequency.setValueAtTime(9, t + T.trembleFrom);

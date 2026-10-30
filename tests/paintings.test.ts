@@ -3,11 +3,13 @@
 import * as THREE from 'three/webgpu';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  CELL, FURNITURE, GRID_H, GRID_W, PAINTINGS, PROPS, ROOMS, Tile, WALL_H, buildTiles, idx, propCenter, type PaintingPlacement, type RoomId,
+  CELL, FRONT_DOOR, FURNITURE, PAINTINGS, PROPS, ROOMS, Tile, WALL_H, blocksSight, buildTiles, cellOf, idx, inGrid, propCenter, type PaintingPlacement, type RoomId,
 } from '../src/config/house';
+import { VISION } from '../src/config/visitors';
 import { SCARES } from '../src/config/scares';
 import { FURNITURE_TOP } from '../src/view/furniture';
-import { countDips } from '../src/view/lightfx';
+import { GHOST_BODY } from '../src/view/ghost';
+import { countDips, dipStarts } from '../src/view/lightfx';
 import { OTHER_LOOK, OTHER_SPOTS } from '../src/view/otherShadow';
 import {
   FRAME, PAINTING_FILES, PROP_TEXTURES, createPaintingLoader, createPaintings, frameBounds, paintingWall, type PaintingTex,
@@ -64,15 +66,14 @@ describe('挂画：挂在实墙上（避开窗、门洞、前门）', () => {
     const wh = paintingWall(hallN);
     expect(wh).toMatchObject({ axis: 'z', cell: 9, nx: 0, nz: 1 });
     expect(wh.plane).toBeCloseTo(4.85, 9);
-    const foyer = PAINTINGS.find((p) => p.room === 'foyer')!;
-    expect(foyer.facing).toBe(Math.PI / 2);
+    const foyer = PAINTINGS.find((p) => p.room === 'foyer' && p.facing === Math.PI / 2)!;
     const wf = paintingWall(foyer);
     expect(wf).toMatchObject({ axis: 'z', cell: 14 });
     expect(wf.plane).toBeCloseTo(7.35, 9);
-    // 朝北的画挂在房间的南墙上（走廊南墙 z = 7.15）、朝东的挂在西墙上（客厅西墙 x = 5.35）
-    const hallS = PAINTINGS.find((p) => p.room === 'hall' && p.facing === -Math.PI / 2)!;
-    expect(paintingWall(hallS)).toMatchObject({ axis: 'z', cell: 14, nx: 0, nz: -1 });
-    expect(paintingWall(hallS).plane).toBeCloseTo(7.15, 9);
+    // 朝北的画挂在房间的南墙上（门厅南墙 z = 11.65）、朝东的挂在西墙上（客厅西墙 x = 5.35）
+    const foyerS = PAINTINGS.find((p) => p.room === 'foyer' && p.facing === -Math.PI / 2)!;
+    expect(paintingWall(foyerS)).toMatchObject({ axis: 'z', cell: 23, nx: 0, nz: -1 });
+    expect(paintingWall(foyerS).plane).toBeCloseTo(11.65, 9);
     const living = PAINTINGS.find((p) => p.room === 'living')!;
     expect(paintingWall(living)).toMatchObject({ axis: 'x', cell: 10, nx: 1, nz: 0 });
     expect(paintingWall(living).plane).toBeCloseTo(5.35, 9);
@@ -96,11 +97,86 @@ describe('挂画：挂在实墙上（避开窗、门洞、前门）', () => {
     }
   });
 
-  it('高度：画框底边在护墙板腰线（0.9 米）以上，顶边离天花板至少 0.3 米', () => {
+  it('高度：画框底边在护墙板腰线（0.9 米）以上，顶边在顶线（离天花板 0.12 米）下面留一点', () => {
     for (const p of PAINTINGS) {
       const b = frameBounds(p);
       expect(b.y0, p.id).toBeGreaterThanOrEqual(0.95);
-      expect(b.y1, p.id).toBeLessThanOrEqual(WALL_H - 0.3);
+      expect(b.y1, p.id).toBeLessThanOrEqual(WALL_H - 0.19);
+    }
+  });
+});
+
+/** 第三人称的默认镜头（engine/ghostRig.ts 的 CAM、LOOK：吊臂 2.4 米，俯仰 4° + 构图 4°，过肩 0.32 米）；鬼魂离地 1.4 米 */
+const CAMERA = { dist: 2.4, phi: (8 * Math.PI) / 180, pivotY: 1.65, shoulder: 0.32, ghostY: 1.4, ghostHalfW: 0.3, halfFov: (42.7 * Math.PI) / 180 };
+const canvasCenter = (p: PaintingPlacement) => {
+  const w = paintingWall(p);
+  return w.axis === 'x' ? { x: w.plane, z: p.along } : { x: p.along, z: w.plane };
+};
+/** 从 a 看 b 中间有没有墙（窗也挡视线；终点是墙面，贴着墙的最后一小段不算） */
+function clearLine(a: { x: number; z: number }, b: { x: number; z: number }) {
+  const n = 200;
+  for (let k = 0; k < n; k++) {
+    const u = (k / n) * (1 - 0.2 / Math.max(0.2, Math.hypot(b.x - a.x, b.z - a.z)));
+    const [i, j] = cellOf(a.x + (b.x - a.x) * u, a.z + (b.z - a.z) * u);
+    if (inGrid(i, j) && blocksSight(at(i, j) as Tile)) return false;
+  }
+  return true;
+}
+/** 从 from 朝 dir（方向角）看，这幅画的正面对着他、中间没有墙、离视线中心多少弧度 */
+function sighting(p: PaintingPlacement, from: { x: number; z: number }, dir: number) {
+  const c = canvasCenter(p), w = paintingWall(p);
+  const dx = c.x - from.x, dz = c.z - from.z;
+  const off = Math.abs(Math.atan2(Math.sin(Math.atan2(dz, dx) - dir), Math.cos(Math.atan2(dz, dx) - dir)));
+  return { off, dist: Math.hypot(dx, dz), faces: -(dx * w.nx + dz * w.nz) > 0, clear: clearLine(from, c), angle: Math.atan2(dz, dx) };
+}
+
+describe('挂画：第一眼看得见（2026-10-30 试玩 S2：一夜里基本碰不到）', () => {
+  it('开场第一帧：镜头正对前门，门厅南墙有一幅，在画面里、中间没有墙、鬼魂挡不住', () => {
+    // 开场的位置在 ghostRig.ts 的 START（没有导出），从源码读：谁改了开场站位，这里要跟着看一眼
+    const src = new TextDecoder().decode(fs.readFileSync(new URL('../src/engine/ghostRig.ts', import.meta.url)));
+    const m = /const START = \{ x: ([\d.]+), z: ([\d.]+), heading: Math\.PI \/ 2 \}/.exec(src);
+    expect(m).not.toBeNull();
+    const ghost = { x: Number(m![1]), z: Number(m![2]) }, heading = Math.PI / 2;
+    const back = CAMERA.dist * Math.cos(CAMERA.phi);
+    const cam = {
+      x: ghost.x - Math.cos(heading) * back - Math.sin(heading) * CAMERA.shoulder,
+      z: ghost.z - Math.sin(heading) * back + Math.cos(heading) * CAMERA.shoulder,
+    };
+    const toGhost = Math.atan2(ghost.z - cam.z, ghost.x - cam.x);
+    const seen = PAINTINGS.filter((p) => {
+      const s = sighting(p, cam, heading);
+      const half = Math.atan2(p.size[0] / 2 + 0.075, s.dist);
+      const fromGhost = Math.abs(Math.atan2(Math.sin(s.angle - toGhost), Math.cos(s.angle - toGhost)));
+      return s.faces && s.clear && s.off + half < CAMERA.halfFov && fromGhost > Math.atan2(CAMERA.ghostHalfW, CAMERA.dist) + half;
+    });
+    expect(seen.map((p) => p.room)).toContain('foyer');
+  });
+
+  it('第一个访客进门：走到门里朝北，手电正对着门厅北墙的一幅（在视野半角里、够得着）', () => {
+    const lit = PAINTINGS.filter((p) => {
+      const s = sighting(p, FRONT_DOOR.inside, -Math.PI / 2);
+      return s.faces && s.clear && s.off < VISION.halfAngle && s.dist < VISION.range;
+    });
+    expect(lit.map((p) => p.room)).toContain('foyer');
+  });
+
+  it('隔着走廊：从门厅门洞出来，正对面的走廊北墙有一幅（往前 45° 以内、3 米以内）', () => {
+    const across = PAINTINGS.filter((p) => {
+      const s = sighting(p, { x: 8, z: 7.25 }, -Math.PI / 2);
+      return p.room === 'hall' && s.faces && s.clear && s.off < Math.PI / 4 && s.dist < 3;
+    });
+    expect(across.length).toBeGreaterThan(0);
+  });
+
+  it('鬼魂正好站在画前：头顶那条线以上还露着至少 38% 的画（画上的脸都在上半幅），离墙 0.8 到 2 米都是', () => {
+    const camY = CAMERA.pivotY + CAMERA.dist * Math.sin(CAMERA.phi), back = CAMERA.dist * Math.cos(CAMERA.phi);
+    const head = CAMERA.ghostY + GHOST_BODY.top;
+    for (const p of PAINTINGS) {
+      const top = p.y + p.size[1] / 2;
+      for (const d of [0.8, 1.25, 2]) {
+        const line = camY + ((head - camY) * (back + d)) / back;
+        expect((top - line) / p.size[1], `${p.id} 离墙 ${d} 米`).toBeGreaterThanOrEqual(0.38);
+      }
     }
   });
 });
@@ -157,14 +233,6 @@ describe('挂画：前面没有挡着的东西', () => {
 });
 
 describe('挂画：娃娃屋俯视', () => {
-  it('六幅都挂在内墙上（内墙在娃娃屋里一直是 0.5 米的矮墙，挂不住画，所以娃娃屋不建）', () => {
-    for (const p of PAINTINGS) {
-      const w = paintingWall(p);
-      expect(w.cell, p.id).toBeGreaterThan(0);
-      expect(w.cell, p.id).toBeLessThan((w.axis === 'x' ? GRID_W : GRID_H) - 1);
-    }
-  });
-
   it('createPaintings：第三人称建六幅（开场就在场景里、不延后编译、不投影、受阴影），娃娃屋一幅都不建', () => {
     const ghostCore = { houseRoot: new THREE.Group(), scene: new THREE.Scene() } as unknown as RenderCore;
     const ghostRig = { ghost: { x: 0, y: 1.4, z: 0 } } as unknown as CameraRig;
@@ -323,18 +391,26 @@ describe('贴图加载：娃娃屋', () => {
   });
 });
 
-describe('镜子（mirror.ts）：只换脸，时间线、亮度、冷光不动', () => {
+describe('镜子（mirror.ts）：脸留到 1.8 秒，别的时间线、亮度、冷光不动', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
   const objState = (): ScareObjectState => ({
     id: 'mirror', type: 'mirror', pos: { x: 11.25, z: 8.75 }, facing: 0, cooldown: 0, active: 0, broken: 0, seenBy: [], armed: 0,
   });
   it('扑上来的时刻、亮度表照旧（声音 sfx.ts 的 mirror()、config/scares.ts 的 hitAt 都对着它）', () => {
     expect(MIRROR_T.hit).toBe(SCARES.mirror.hitAt);
-    expect(MIRROR_FLASH.slice(0, 7)).toEqual([[0, 0], [0.38, 0.65], [0.43, 0], [0.47, 0.4], [0.5, 0], [0.6, 1.3], [0.7, 1.12]]);
+    expect(MIRROR_FLASH.slice(0, 8)).toEqual([[0, 0], [0.38, 0.65], [0.43, 0], [0.47, 0.4], [0.5, 0], [0.6, 1.3], [0.7, 1.12], [0.8, 1]]);
     expect(Math.max(...MIRROR_FLASH.map((e) => e[1]))).toBe(1.3);
   });
 
-  it('物件：冷光最亮还是 3.38（1.3 × 2.6），任意 1 秒内暗不超过 3 下，演完脸藏起来、灯灭；脸的网格还是 deferCompile', () => {
+  it('脸贴在玻璃上留到 1.8 秒才化开，化完才开始散雾；别的时刻不动', () => {
+    expect(MIRROR_T.dissolveFrom).toBeCloseTo(1.8, 9);
+    expect(MIRROR_T.dissolveTo - MIRROR_T.dissolveFrom).toBeCloseTo(0.45, 9); // 化开本身的快慢照旧
+    expect(MIRROR_T.dissolveTo).toBeLessThanOrEqual(MIRROR_T.clearFrom);
+    expect({ fogTo: MIRROR_T.fogTo, handFrom: MIRROR_T.handFrom, handTo: MIRROR_T.handTo, hit: MIRROR_T.hit, clearFrom: MIRROR_T.clearFrom, clearTo: MIRROR_T.clearTo })
+      .toEqual({ fogTo: 0.42, handFrom: 0.15, handTo: 0.36, hit: 0.6, clearFrom: 2.4, clearTo: 5.4 });
+  });
+
+  it('物件：冷光最亮还是 3.38（1.3 × 2.6），留着的时候稳稳亮着，任意 1 秒内暗不超过 3 下，演完脸藏起来、灯灭；脸的网格还是 deferCompile', () => {
     // 手印的遮罩是 Canvas 画的（node 里没有 document）：给一张什么也不画的假画布，这里只查灯和网格
     const ctx = new Proxy({}, { get: (_t, k) => (k === 'createRadialGradient' ? () => ({ addColorStop() {} }) : () => {}), set: () => true });
     vi.stubGlobal('document', { createElement: () => ({ width: 0, height: 0, getContext: () => ctx }) });
@@ -349,13 +425,31 @@ describe('镜子（mirror.ts）：只换脸，时间线、亮度、冷光不动'
     rig.update({ dt: 1 / 60, time: 0, obj, state });
     expect(face.visible).toBe(false);
     rig.trigger(state, { type: 'trigger', object: 'mirror', scareType: 'mirror' });
+    const HZ = 60;
     const series: number[] = [];
-    for (let k = 0; k < 60 * 6; k++) {
-      rig.update({ dt: 1 / 60, time: k / 60, obj, state });
+    const faceSeen: boolean[] = [];
+    for (let k = 0; k < HZ * 6; k++) {
+      rig.update({ dt: 1 / HZ, time: k / HZ, obj, state });
       series.push(flash.intensity);
+      faceSeen.push(face.visible);
     }
+    const at_ = (t: number) => Math.round(t * HZ) - 1;
     expect(Math.max(...series)).toBeCloseTo(1.3 * 2.6, 6);
-    expect(countDips(series)).toBeLessThanOrEqual(3);
+    // 第二个参数是采样率：不给的话默认按 10 Hz 算，「1 秒」的窗口只有 1/6 秒，这条就白测了。
+    // 从第一次亮起来开始数：dipStarts 的起始高点是 1（灯平时亮着的约定），这盏灯平时是 0，从 0 开头会多数一下 t = 0 的「暗」
+    const first = series.findIndex((v) => v > 0);
+    const lit = series.slice(first);
+    expect(countDips(lit, HZ)).toBeLessThanOrEqual(3);
+    // 暗下去的只有原来那三下（两次闪现、扑上来以后退一点），脸留长没有多出一下
+    const dips = dipStarts(lit, HZ).map((d) => d + (first + 1) / HZ);
+    expect(dips).toHaveLength(3);
+    [0.43, 0.5, 0.7].forEach((d, i) => expect(dips[i]).toBeCloseTo(d, 1));
+    // 留着的这一段（亮度退到 1.0 以后、化开之前）一点不闪
+    const hold = series.slice(at_(0.85), at_(MIRROR_T.dissolveFrom - 0.02));
+    expect(Math.max(...hold) - Math.min(...hold)).toBeLessThan(1e-9);
+    expect(hold[0]).toBeCloseTo(2.6, 9);
+    expect(faceSeen[at_(0.9)] && faceSeen[at_(1.4)] && faceSeen[at_(1.75)]).toBe(true);
+    expect(faceSeen[at_(MIRROR_T.dissolveTo + 0.05)]).toBe(false);
     expect(flash.intensity).toBe(0);
     expect(face.visible).toBe(false);
   });
@@ -363,13 +457,13 @@ describe('镜子（mirror.ts）：只换脸，时间线、亮度、冷光不动'
 
 describe('画像换脸（portrait.ts）', () => {
   const T = PORTRAIT_TIMELINE;
-  it('时间线：眼睛甩过去那一刻（snap）开始，约 0.4 秒换完，单调、连续，换完以后才开始扑倒', () => {
+  it('时间线：眼睛甩过去那一刻（snap）开始化开，访客受惊（hitAt，0.94 秒不变）时正好换完，单调、连续', () => {
+    expect(SCARES.portrait.hitAt).toBe(0.94);
     expect(portraitRot(0)).toBe(0);
     expect(portraitRot(T.snap)).toBe(0);
-    expect(portraitRot(T.snap + PORTRAIT_REVEAL.time)).toBe(1);
-    expect(PORTRAIT_REVEAL.time).toBeGreaterThanOrEqual(0.35);
-    expect(PORTRAIT_REVEAL.time).toBeLessThanOrEqual(0.45);
-    expect(T.snap + PORTRAIT_REVEAL.time).toBeLessThanOrEqual(T.fall);
+    expect(T.snap + PORTRAIT_REVEAL.time).toBeCloseTo(SCARES.portrait.hitAt, 9);
+    expect(portraitRot(SCARES.portrait.hitAt)).toBeCloseTo(1, 9);
+    expect(portraitRot(SCARES.portrait.hitAt + 0.01)).toBe(1);
     let prev = 0;
     for (let t = 0; t <= 1.2; t += 1 / 240) {
       const r = portraitRot(t);
@@ -377,6 +471,24 @@ describe('画像换脸（portrait.ts）', () => {
       expect(r - prev).toBeLessThan(0.05); // 1/240 秒里不跳
       prev = r;
     }
+  });
+
+  it('换完以后脸至少留 1.5 秒才扑倒；扑倒、砸地、回弹之间的间隔照旧（声音、灰、印子都跟着这一份）', () => {
+    expect(T.fall - SCARES.portrait.hitAt).toBeGreaterThanOrEqual(1.5 - 1e-9);
+    expect(T.fall - T.trembleFrom).toBeCloseTo(0.22, 9);
+    expect(T.impact - T.fall).toBeCloseTo(0.34, 9);
+    expect(T.bounce1 - T.impact).toBeCloseTo(0.16, 9);
+    expect(T.bounce2 - T.bounce1).toBeCloseTo(0.1, 9);
+    expect(T.end - T.bounce2).toBeCloseTo(0.1, 9);
+  });
+
+  it('脸在访客受惊之前就换完了：眼睛甩过去后很快开始，下巴（离脸中心 0.145）在 hitAt 之前 0.2 秒以上到位', () => {
+    const F = PORTRAIT_REVEAL.face;
+    // 噪声最不利（n = 1，前沿最靠后）
+    expect(portraitReveal(F[0], F[1], portraitRot(T.snap + 0.15), 0)).toBeGreaterThan(0);
+    expect(portraitReveal(F[0], F[1] + 0.145, portraitRot(SCARES.portrait.hitAt - 0.2), 1)).toBe(1);
+    // 换得不能太早：hitAt 之前 0.5 秒时下巴还没到（受惊要对着换脸，不是换完很久才叫）
+    expect(portraitReveal(F[0], F[1] + 0.145, portraitRot(SCARES.portrait.hitAt - 0.5), 1)).toBeLessThan(1);
   });
 
   it('从脸开始化开：脸先换完、四角最后；进度 0 时哪儿都没换，进度 1 时全换完（噪声取哪头都一样）', () => {
@@ -423,9 +535,17 @@ describe('画像换脸（portrait.ts）', () => {
     expect(rot.value).toBeCloseTo(portraitRot(T.snap + 0.2), 6);
     expect(rot.value).toBeGreaterThan(0);
     expect(rot.value).toBeLessThan(1);
+    // 模拟的 active（1.8 秒）先到头，画还立着、脸还在：不能被「错过事件」的兜底提前放倒
+    to(1.8);
+    obj.active = 0;
+    to(T.trembleFrom - 0.01);
+    expect(rot.value).toBe(1);
+    expect(pivot.rotation.x).toBeCloseTo(-0.1, 9);
+    expect(pivot.position.y).toBeCloseTo(0.755, 9);
+    to(T.impact + 0.02);
+    expect(pivot.rotation.x).toBeGreaterThan(1.2);
     to(T.end + 0.5);
     expect(rot.value).toBe(1);
-    obj.active = 0;
     to(T.end + 3);
     expect(rot.value).toBe(1);
     // 复原：头 0.32 秒还趴着（脸朝下），这时换回来

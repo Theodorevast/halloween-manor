@@ -37,7 +37,7 @@ export const STRINGS = {
   },
   /** 第三人称（有鼠标的设备，engine/ghostRig.ts） */
   ghost: {
-    /** 开场后在画面下方停几秒的操作说明，只出现一次 */
+    /** 开场后在画面下方的操作说明：挂到第一次成功附身，最多约 30 秒（hud.ts 的 KEYS.max） */
     controls: 'WASD drift · Mouse look · Click to possess · Hold to set a trap · Right-click or F to appear',
     /** 丢了指针锁定（按了 Esc、切走了窗口）：点一下继续 */
     resume: 'Click to resume',

@@ -9,7 +9,7 @@ import * as THREE from 'three/webgpu';
 import { vec3 } from 'three/tsl';
 import { describe, expect, it } from 'vitest';
 import { WALL_H } from '../src/config/house';
-import { DISSOLVE, HOLE_TEST, ROOM_FILL, dissolveAt, fillShapeAt, holeFieldAt, makeDissolveUniforms, writeDissolve } from '../src/view/walls';
+import { DISSOLVE, HOLE_TEST, ROOM_FILL, dissolveAt, fillShapeAt, holeFieldAt, holeTouchesBox, makeDissolveUniforms, writeDissolve } from '../src/view/walls';
 
 // tsconfig 的 types 里没有 node 的类型：用变量当模块名取 node:fs（tests/overlays.test.ts 同样的写法）
 const fsId = 'node:fs';
@@ -107,6 +107,48 @@ describe('洞边：不发光、不结霜；截面跟着材质、偏暗', () => {
     expect(holeFieldAt(V(4.6, 1.3, wallZ), N, g, c, 1, true)).toBeGreaterThan(0);
     expect(DISSOLVE.sight.cutFrom).toBeGreaterThan(0);
     expect(DISSOLVE.sight.grow).toBeGreaterThan(0);
+  });
+});
+
+describe('试玩 S1：物件被挖开时不像渲染坏了', () => {
+  it('家具、物件（holeScale 不是 1）：鬼魂周围的洞不看面的法线，薄部件各个面的洞口对得上（不再一圈错开的小台阶）；墙还是按面压扁', () => {
+    const ghost = V(5, 1.2, 5), cam = V(5, 2, 7.4);
+    const normals = [V(1, 0, 0), V(-1, 0, 0), V(0, 1, 0), V(0, 0, 1), V(0, 0, -1)];
+    for (const P of [V(5.3, 1.2, 5), V(5, 1.6, 5.1), V(4.7, 0.9, 4.8), V(5.45, 1.2, 5)]) {
+      const f = normals.map((n) => holeFieldAt(P, n, ghost, cam, DISSOLVE.furniture));
+      for (const v of f) expect(v).toBeCloseTo(f[0], 10);
+      const w = normals.map((n) => holeFieldAt(P, n, ghost, cam, 1));
+      expect(Math.max(...w) - Math.min(...w)).toBeGreaterThan(0.01);
+    }
+  });
+
+  it('holeTouchesBox：鬼魂贴着、视线穿过的物件算被挖开（外壳不画）；瞄着前面够得着的物件（洞没碰到）照常', () => {
+    const box = { x0: 2, z0: 2, x1: 3, z1: 2.4 };
+    // 鬼魂贴着
+    expect(holeTouchesBox(box, { x: 2.5, z: 2.7 }, { x: 2.5, z: 5 })).toBe(true);
+    // 镜头在物件这边、鬼魂在那边：视线穿过物件
+    expect(holeTouchesBox(box, { x: 2.5, z: 3.6 }, { x: 2.5, z: 1.2 })).toBe(true);
+    // 视线从旁边擦过，离它不到胶囊半径
+    expect(holeTouchesBox(box, { x: 3.4, z: 4.2 }, { x: 3.4, z: 0.5 })).toBe(true);
+    // 鬼魂面对着 1.6 米外的物件，镜头在鬼魂后面：洞碰不到，外壳照常（悬停的描边还在）
+    expect(holeTouchesBox(box, { x: 2.5, z: 4 }, { x: 2.5, z: 6.4 })).toBe(false);
+    // 隔着一段距离从旁边过
+    expect(holeTouchesBox(box, { x: 5, z: 2 }, { x: 5, z: 4.4 })).toBe(false);
+  });
+
+  it('物件的底光、洞口压暗都接上了；前门也有底光（门板不再是一块黑）', () => {
+    const props = readFileSync(new URL('../src/view/props.ts', import.meta.url), 'utf8');
+    const body = props.slice(props.indexOf('const dissolveMaterial ='), props.indexOf('const frost = createFrostHint()'));
+    expect(body).toMatch(/diffuseColor\.rgb\.mul\(roomFillAt\(P, ROOM_FILL\.props\)\)/);
+    expect(body).toMatch(/DISSOLVE\.cut\.thinDark/);
+    const door = readFileSync(new URL('../src/view/frontDoor.ts', import.meta.url), 'utf8');
+    expect(door).toMatch(/roomFillAt\(P, ROOM_FILL\.props\)/);
+    // 被挖开的物件，外壳的亮度乘 whole
+    expect(props).toMatch(/e\.glow\.amount\.value = amount \* e\.whole/);
+    // 洞口压得比原来暗（原来 0.4），是自己的颜色乘一个数，不混别的颜色；物件的细部件压得轻一点，不是一根黑刺
+    expect(DISSOLVE.cut.dark).toBeLessThanOrEqual(0.3);
+    expect(DISSOLVE.cut.thinDark).toBeGreaterThan(DISSOLVE.cut.dark);
+    expect(DISSOLVE.cut.thinDark).toBeLessThan(1);
   });
 });
 
