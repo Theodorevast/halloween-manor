@@ -14,11 +14,12 @@
 // 娃娃屋俯视：南墙降低时门板跟着沉到地板下面（读 walls.ts 的 wallFullness）。沉着也还在场景里、还可见：开场的预编译和阴影 pass 都要画到它，
 // 南墙第一次升起来才不会卡一下；开合的动作照常走，openness 不受影响
 import * as THREE from 'three/webgpu';
-import { add, bool, materialEmissive, normalWorld, positionWorld, uniform } from 'three/tsl';
+import { add, attribute, bool, materialEmissive, normalWorld, positionWorld, uniform } from 'three/tsl';
 import { FRONT_DOOR_TIMELINE as TL } from '../config/frontDoor';
 import { CELL, FRONT_DOOR } from '../config/house';
 import type { GhostRig, Module, RenderCore } from '../engine/types';
 import type { NpcMode, Vec2 } from '../sim/types';
+import { torchBounceAt } from './bounce';
 import { C, Parts, bodyMaterial, clamp01, inOutSine, lerp, mesh, outCubic, seg } from './props/kit';
 import { DISSOLVE, Side, dissolveAt, ghostDissolve, v3, wallFullness } from './walls';
 
@@ -258,13 +259,16 @@ export function createFrontDoor(core: RenderCore, rig: GhostRig | null): FrontDo
   // 溶解按房屋坐标算：门会动，用片元的世界坐标减去 houseRoot 的偏移（houseRoot 只平移不旋转）。写法照 props.ts 的 dissolveMaterial
   const houseOffset = uniform(new THREE.Vector3());
   if (dissolve) {
-    const d = dissolveAt(ghostDissolve, positionWorld.sub(houseOffset), normalWorld, DISSOLVE.furniture);
+    const P = positionWorld.sub(houseOffset);
+    // nearCut（walls.ts 的 DISSOLVE.sight）：和南墙一样，隔开镜头和鬼魂时从吊臂和门的交点开洞往外长，不然墙溶开了门板、门框悬在半空
+    const d = dissolveAt(ghostDissolve, P, normalWorld, DISSOLVE.furniture, true);
     material.maskNode = d.keep;
     // 影子照旧：溶开的只是「看穿」
     material.maskShadowNode = bool(true);
-    // 洞口一圈冷光、附近一点霜光
+    // 洞口一圈冷光、附近一点霜光；手电打在门厅地上、墙上反弹回来的光（bounce.ts，和墙一样乘底色：门的底色就是顶点色）
     const edge = v3(DISSOLVE.rimGlow).mul(d.rim).add(v3(DISSOLVE.frostGlow).mul(d.frost));
-    material.emissiveNode = add((material.emissiveNode as THREE.Node<'vec3'> | null) ?? materialEmissive, edge);
+    const bounce = attribute('color', 'vec3').mul(torchBounceAt(P, normalWorld));
+    material.emissiveNode = add((material.emissiveNode as THREE.Node<'vec3'> | null) ?? materialEmissive, edge.add(bounce));
   }
 
   const frameGeo = buildFrame();

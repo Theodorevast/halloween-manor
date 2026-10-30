@@ -16,22 +16,24 @@ import {
   select, sin, smoothstep, uniform, uv, vec2, vec3,
 } from 'three/tsl';
 import {
-  CELL, DOORWAYS, FRONT_DOOR, HOUSE_D, HOUSE_W, ROOMS, WALL_H, WALL_T, buildTiles, roomAt, type Rect, type RoomId,
+  CELL, DOORWAYS, FRONT_DOOR, HOUSE_D, HOUSE_W, ROOMS, WALL_H, WALL_T, buildTiles, roomAt, type RoomId,
 } from '../config/house';
 import { isGhostRig, type CameraRig, type FrameCtx, type Module, type Quality, type RenderCore } from '../engine/types';
 import type { Vec2 } from '../sim/types';
+import { clearBounce, floorRect, torchBounceAt, updateBounce } from './bounce';
+import { fogSky } from './fog';
 import { createFurniture } from './furniture';
 import { PALETTE } from './palette';
 import {
-  GeoBuilder, HEAD_H, OUTWARD, SILL_H, Side, TRANSOM_Y, applyDissolve, createWalls, ghostDissolve, ghostGlowAt, holeBoxes, holesNear, v3,
-  writeDissolve, type DissolveUniforms, type V3, type WindowRun,
+  GeoBuilder, HEAD_H, OUTWARD, SILL_H, Side, TRANSOM_Y, applyDissolve, createWalls, ghostDissolve, ghostGlowAt, holeBoxes, holesNear,
+  skyGlass, v3, writeDissolve, type DissolveUniforms, type V3, type WindowRun,
 } from './walls';
 
 /** 墙体之外、墙格之内的那一条（地板伸进墙格这么多，正好接到墙面） */
 const M = (CELL - WALL_T) / 2;
 
-/** 月光：仰角、相对「从远墙照向镜头」偏转的方位角、强度 */
-const MOON = {
+/** 月光：仰角、相对「从远墙照向镜头」偏转的方位角、强度（导出给天亮的测试按真实强度算总亮度） */
+export const MOON = {
   elevation: (38 * Math.PI) / 180,
   yawOffset: (12 * Math.PI) / 180,
   intensity: 2.6,
@@ -48,6 +50,8 @@ const MOON = {
  * 作用距离压短（2.4 米），漏进屋的只有墙根一小片，台阶和门口的小路照得到
  */
 const PORCH = { pos: { x: 9.55, y: 1.35, z: 12.6 }, intensity: 1.8, distance: 2.4 };
+/** 收夜时门廊灯熄了，灯笼的自发光最低留到这么多：油灯最后一点余烬（只是灯罩里一点暗光，不再照亮东西） */
+const LANTERN_EMBER = 0.06;
 
 /**
  * 门廊灯极轻的油灯式摇曳：t 秒时的亮度（乘 PORCH.intensity）。0.95 ± 0.045，峰谷差 0.09，比 countDips 的门槛（0.1）小：
@@ -164,18 +168,24 @@ export function createPorchDimmer(): PorchDimmer {
 }
 
 /**
- * 天亮（2026-10-30「一夜」：模拟时间到 NIGHT.dawn，屋里没被吓走的人自己出门）：现有的月光、半球光慢慢从月夜的冷蓝往灰白偏一点、
- * 亮一点点（颜色往同样亮度的灰白偏，亮多少只由强度的乘数管）；窗下的月光光斑淡一点（天快亮了，直射的月光弱，光是散的）。
- * 不加灯，只改已有灯的颜色、强度和光斑的 uniform（都不重编）。克制：不是日出，没有暖色，不闪
+ * 天亮（2026-10-30「一夜」：模拟时间到 NIGHT.dawn，屋里没被吓走的人自己出门）：现有的月光、半球光慢慢从月夜的冷蓝往灰白偏一点
+ * （颜色往同样亮度的灰白偏，亮多少只由强度的乘数管）；月亮落下去、直射弱了，天光变散：月光暗一点、半球光亮一些，窗下的光斑淡下去。
+ * 玩家看得见的「天」只有窗玻璃和屋外的底色，它们跟着亮起来、偏灰白；地面雾的环境色也跟着亮（晨雾被天光照亮，fog.ts 的 fogSky）。
+ * 不加灯，只改已有灯的颜色、强度、底色和 uniform（都不重编）。克制：不是日出，没有暖色，不闪；月光的方向不转
+ * （转了窗下的光斑会在几十秒里扫过地板，像延时摄影）
  * - moonGrey / skyGrey：月光、天空色往灰白偏多少（0..1）；moonGain / hemiGain：强度乘多少；patch：窗下光斑乘多少
+ * - glass：窗玻璃乘多少（r, g, b，见 walls.ts 的 skyGlass）；background：屋外的底色（夜里是 PALETTE.night）；fog：雾的环境色走到天亮的程度
  * - white：灰白带的那一点点暖（r, g, b 的乘数，不是纯灰；亮度不变）
  */
 export const DAWN = {
   moonGrey: 0.45,
-  moonGain: 1.15,
+  moonGain: 0.9,
   skyGrey: 0.5,
-  hemiGain: 1.2,
-  patch: 0.8,
+  hemiGain: 1.5,
+  patch: 0.55,
+  glass: [3.2, 3.2, 3.0] as [number, number, number],
+  background: 0x1a2030,
+  fog: 1,
   white: [1, 0.985, 0.96] as [number, number, number],
 };
 
@@ -191,15 +201,25 @@ const MOON_NIGHT = new THREE.Color(PALETTE.moon);
 const SKY_NIGHT = new THREE.Color(PALETTE.moonSky);
 const MOON_DAWN = towardGrey(MOON_NIGHT, DAWN.moonGrey);
 const SKY_DAWN = towardGrey(SKY_NIGHT, DAWN.skyGrey);
+const GLASS_NIGHT = new THREE.Vector3(1, 1, 1);
+const GLASS_DAWN = new THREE.Vector3(...DAWN.glass);
+const BG_NIGHT = new THREE.Color(PALETTE.night);
+const BG_DAWN = new THREE.Color(DAWN.background);
 
-/** 天亮到 k（0 夜里、1 天亮）时月光、天空色和几个乘数；给了 out 就写进去（每帧用，不新建颜色） */
-export function dawnLights(k: number, out = { moon: new THREE.Color(), sky: new THREE.Color(), moonGain: 1, hemiGain: 1, patch: 1 }) {
+/** 天亮到 k（0 夜里、1 天亮）时月光、天空色、窗玻璃、屋外底色、雾和几个乘数；给了 out 就写进去（每帧用，不新建颜色） */
+export function dawnLights(k: number, out = {
+  moon: new THREE.Color(), sky: new THREE.Color(), moonGain: 1, hemiGain: 1, patch: 1,
+  glass: new THREE.Vector3(), background: new THREE.Color(), fog: 0,
+}) {
   const x = Math.min(1, Math.max(0, k));
   out.moon.lerpColors(MOON_NIGHT, MOON_DAWN, x);
   out.sky.lerpColors(SKY_NIGHT, SKY_DAWN, x);
   out.moonGain = 1 + (DAWN.moonGain - 1) * x;
   out.hemiGain = 1 + (DAWN.hemiGain - 1) * x;
   out.patch = 1 + (DAWN.patch - 1) * x;
+  out.glass.lerpVectors(GLASS_NIGHT, GLASS_DAWN, x);
+  out.background.lerpColors(BG_NIGHT, BG_DAWN, x);
+  out.fog = DAWN.fog * x;
   return out;
 }
 
@@ -230,12 +250,16 @@ const FLOOR: Record<RoomId, FloorStyle> = {
   bathroom: { kind: 'tile', tint: mixC(PALETTE.tile, PALETTE.moon, 0.25).multiplyScalar(0.75), size: 0.2, checker: false },
 };
 
-/** 房间地板的米坐标范围：向四周伸进墙格 M，正好接到墙面 */
-const floorRect = (r: Rect) => ({ x0: r.x0 * CELL - M, z0: r.z0 * CELL - M, x1: r.x1 * CELL + M, z1: r.z1 * CELL + M });
+/**
+ * 木地板做旧（2026-10-30 ART-9，只改着色器）：离墙 edge[0] 米以内算「墙边」（积灰、发暗），到 edge[1] 米算「中间」（走出来的、磨亮）；
+ * 颜色在 tone 两头之间、粗糙度在 roughness 两头之间（墙边 → 中间）。地砖不做
+ */
+const FLOOR_WEAR = { edge: [0.25, 1.1] as [number, number], tone: [0.82, 1.05] as [number, number], roughness: [0.66, 0.55] as [number, number] };
 
 /** glow 不为空（第三人称模式）：鬼魂身上的冷光照到地板上（walls.ts 的 GHOST_GLOW） */
 function buildFloors(glow?: DissolveUniforms) {
-  const wood = new GeoBuilder({ plank: 3 });
+  // rect：这一块地板所在房间的范围（x0, z0, x1, z1），磨损按离墙多远算（FLOOR_WEAR）
+  const wood = new GeoBuilder({ plank: 3, rect: 4 });
   const tile = new GeoBuilder({ tile: 2 });
   const up: V3 = [0, 1, 0];
   const quad = (b: GeoBuilder, x0: number, z0: number, x1: number, z1: number) =>
@@ -245,7 +269,7 @@ function buildFloors(glow?: DissolveUniforms) {
     const r = floorRect(ROOMS[id]);
     const s = FLOOR[id];
     if (s.kind === 'wood') {
-      wood.color(s.tint).set('plank', s.dir, s.plank, n + 1);
+      wood.color(s.tint).set('plank', s.dir, s.plank, n + 1).set('rect', r.x0, r.z0, r.x1, r.z1);
       quad(wood, r.x0, r.z0, r.x1, r.z1);
     } else {
       tile.color(s.tint).set('tile', s.size, s.checker ? 1 : 0);
@@ -253,18 +277,20 @@ function buildFloors(glow?: DissolveUniforms) {
     }
   });
 
-  // 门洞的门槛：填上墙体那一段（墙两侧的地板已经各伸进来 M）；木纹顺着通行方向
+  // 门洞的门槛：填上墙体那一段（墙两侧的地板已经各伸进来 M）；木纹顺着通行方向。
+  // 磨损的范围就是门槛自己（窄，算出来是「墙边」那一档）：和两边房间贴着墙的那一条接得上，门洞里不会多出一道亮条
+  const sill = (x0: number, z0: number, x1: number, z1: number) => quad(wood.set('rect', x0, z0, x1, z1), x0, z0, x1, z1);
   const sills: [number, number][] = [...DOORWAYS.flatMap((d) => d.cells)];
   for (const [i, j] of sills) {
     const horizWall = roomAt(i, j - 1) !== null || roomAt(i, j + 1) !== null;
     wood.color(C(PALETTE.woodDark)).set('plank', horizWall ? 1 : 0, 0.12, 50);
-    if (horizWall) quad(wood, i * CELL, j * CELL + M, (i + 1) * CELL, (j + 1) * CELL - M);
-    else quad(wood, i * CELL + M, j * CELL, (i + 1) * CELL - M, (j + 1) * CELL);
+    if (horizWall) sill(i * CELL, j * CELL + M, (i + 1) * CELL, (j + 1) * CELL - M);
+    else sill(i * CELL + M, j * CELL, (i + 1) * CELL - M, (j + 1) * CELL);
   }
   // 前门门槛：一直铺到房子外沿
   for (const [i, j] of FRONT_DOOR.cells) {
     wood.color(C(PALETTE.woodDark)).set('plank', 1, 0.12, 51);
-    quad(wood, i * CELL, j * CELL + M, (i + 1) * CELL, (j + 1) * CELL);
+    sill(i * CELL, j * CELL + M, (i + 1) * CELL, (j + 1) * CELL);
   }
 
   // 木地板：一条条错缝的木板，板缝略暗，每块板深浅略有不同
@@ -287,7 +313,12 @@ function buildFloors(glow?: DissolveUniforms) {
     const aa = fwidth(across).add(0.004);
     const seam = smoothstep(0, aa, min(da, ds)).mul(0.4).add(0.6);
     const grain = sin(along.mul(17).add(hash(row.add(77)).mul(6.28)).add(sin(along.mul(3.1)).mul(2))).mul(0.035).add(1);
-    woodMat.colorNode = vec3(tone.mul(seam).mul(grain));
+    // 做旧（FLOOR_WEAR）：墙边积灰发暗，房间中间走出来的那一片磨亮、略有光泽
+    const rc = attribute('rect', 'vec4');
+    const edge = min(min(p.x.sub(rc.x), rc.z.sub(p.x)), min(p.z.sub(rc.y), rc.w.sub(p.z)));
+    const wear = smoothstep(FLOOR_WEAR.edge[0], FLOOR_WEAR.edge[1], edge);
+    woodMat.colorNode = vec3(tone.mul(seam).mul(grain).mul(mix(float(FLOOR_WEAR.tone[0]), float(FLOOR_WEAR.tone[1]), wear)));
+    woodMat.roughnessNode = mix(float(FLOOR_WEAR.roughness[0]), float(FLOOR_WEAR.roughness[1]), wear);
   }
 
   // 地砖：厨房黑白相间（这里是深浅两种灰），浴室小方砖；砖缝略暗
@@ -307,11 +338,12 @@ function buildFloors(glow?: DissolveUniforms) {
   }
 
   if (glow) {
-    // 底色 = colorNode × 顶点色（材质开着 vertexColors，three 会自己乘；自发光要的底色这里再乘一遍）
+    // 底色 = colorNode × 顶点色（材质开着 vertexColors，three 会自己乘；自发光要的底色这里再乘一遍）。
+    // 自发光：鬼魂的微光 + 手电的反弹光（bounce.ts）
     const upN = vec3(0, 1, 0);
     for (const m of [woodMat, tileMat]) {
       const albedo = (m.colorNode as THREE.Node<'vec3'>).mul(attribute('color', 'vec3'));
-      m.emissiveNode = albedo.mul(ghostGlowAt(glow, positionLocal, upN));
+      m.emissiveNode = albedo.mul(ghostGlowAt(glow, positionLocal, upN).add(torchBounceAt(positionLocal, upN)));
     }
   }
 
@@ -525,10 +557,14 @@ function buildMoonPatches(runs: WindowRun[]) {
  * 墙顶的顶面和它在同一高度，但朝上、从下面看是背面，被剔掉，不会互相闪
  */
 const CEILING = {
-  color: mixC(PALETTE.wallpaper, PALETTE.wallTrim, 0.45),
+  /**
+   * 旧灰泥（线性亮度约 0.059）。原来是墙纸和顶线的颜色混出来的（约 0.025），太暗：手电的反弹光（bounce.ts）照上去也看不出来，
+   * 画面上方三分之一永远是死黑（ART-1）
+   */
+  color: C(0x4a4440),
   /** 深浅：每米几个起伏、最多暗多少 */
   stainFreq: 0.55,
-  stain: 0.3,
+  stain: 0.4,
   ambient: 0.003,
 };
 
@@ -543,7 +579,7 @@ function buildCeiling(dissolve?: DissolveUniforms) {
   const n = mx_noise_float(vec3(p.x.mul(CEILING.stainFreq), p.z.mul(CEILING.stainFreq), 3.1)).mul(0.5).add(0.5);
   const albedo = v3(CEILING.color).mul(n.mul(CEILING.stain).add(1 - CEILING.stain));
   // 不写深度，挖洞（discard）也就不影响深度剔除：一直用挖洞的那份（镜头升到天花板底下时它也溶开）
-  if (dissolve) applyDissolve(mat, dissolve, p, vec3(0, -1, 0), albedo, { unlitAmbient: CEILING.ambient });
+  if (dissolve) applyDissolve(mat, dissolve, p, vec3(0, -1, 0), albedo, { unlitAmbient: CEILING.ambient, nearCut: true });
   else mat.colorNode = albedo.mul(CEILING.ambient);
   const mesh = new THREE.Mesh(b.build(), mat);
   mesh.name = 'ceiling';
@@ -630,6 +666,10 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
     hemi.color.copy(dawnMix.sky);
     hemi.intensity = MOON.hemi * dawnMix.hemiGain;
     patches.strength.value = (high ? MOON.patch : MOON.patchLow) * dawnMix.patch;
+    // 看得见的天：窗玻璃、屋外底色；地面雾的环境色（fog.ts 自己在 update 里按 fogSky 写 uniform）
+    skyGlass.value.copy(dawnMix.glass);
+    if (core.scene.background instanceof THREE.Color) core.scene.background.copy(dawnMix.background);
+    fogSky.k = dawnMix.fog;
   };
   const applyQuality = (q: Quality) => {
     quality = q;
@@ -663,9 +703,30 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
     furniture.setHoles(near.furniture);
   };
 
+  // 手电的反弹光（bounce.ts，只在第三人称的材质上）：落点要等访客模块写完这一帧的手电才算得对，所以放在渲染前
+  // （scene.onBeforeRender，和 lightfx.ts 一样）。一帧里场景会画好几遍（每张阴影图也走这个钩子），只在 update 之后的第一遍算一次；
+  // 镜头位置按 rig 的相机取（阴影那几遍传进来的是灯的相机）
+  let bounceDue = false;
+  let bounceDt = 0;
+  const bounceCam = new THREE.Vector3();
+  const prevHook = core.scene.onBeforeRender;
+  if (dissolve) {
+    core.scene.onBeforeRender = function (...args) {
+      if (bounceDue) {
+        bounceDue = false;
+        rig.camera.getWorldPosition(bounceCam);
+        core.houseRoot.worldToLocal(bounceCam);
+        updateBounce(bounceCam, bounceDt);
+      }
+      prevHook.apply(this, args);
+    };
+  }
+
   let flicker = 0;
   return {
     update(ctx: FrameCtx) {
+      bounceDue = dissolve !== undefined;
+      bounceDt = ctx.dt;
       if (ghostMode) writeGhost(ctx);
       else {
         walls.update(ctx.dt, rig.viewDir);
@@ -674,8 +735,10 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
       // 门廊灯：极轻的油灯式摇曳（porchFlicker）；收夜时慢慢熄、Keep haunting 时亮回来（createPorchDimmer）
       flicker += ctx.dt;
       outdoors.porch.intensity = PORCH.intensity * porch.step(ctx.dt, flicker);
-      if (porch.level !== lanternLevel) {
-        lanternLevel = porch.level;
+      // 灯笼跟着熄，但最低留一点余烬（LANTERN_EMBER）：天亮、收尾时门外那一点暗光还在
+      const lantern = Math.max(porch.level, LANTERN_EMBER);
+      if (lantern !== lanternLevel) {
+        lanternLevel = lantern;
         outdoors.lantern.color.copy(lanternBase).multiplyScalar(lanternLevel);
       }
       // 天亮的光：走的时候每帧写一次，走完不再碰
@@ -694,6 +757,12 @@ export function createHouseView(core: RenderCore, rig: CameraRig): HouseView {
       if (!dawn.moving) applyLight();
     },
     dispose() {
+      if (dissolve) core.scene.onBeforeRender = prevHook;
+      clearBounce();
+      // 天亮写过的全页共用的值退回夜里（下一次建房子从夜里开始）
+      skyGlass.value.set(1, 1, 1);
+      fogSky.k = 0;
+      if (core.scene.background instanceof THREE.Color) core.scene.background.set(PALETTE.night);
       core.houseRoot.remove(root);
       core.scene.remove(hemi);
       walls.dispose();

@@ -12,12 +12,13 @@
 import * as THREE from 'three/webgpu';
 import {
   Fn, If, abs, attribute, bool, clamp, dot, float, floor, fract, hash, length, max, min, mix, mx_noise_float,
-  normalLocal, positionLocal, select, smoothstep, uniform, uv, varying, vec3,
+  normalLocal, normalize, positionLocal, select, smoothstep, uniform, uv, varying, vec3,
 } from 'three/tsl';
 import {
   CELL, FRONT_DOOR, GRID_H, GRID_W, HOUSE_D, HOUSE_W, Tile, WALL_CUT_H, WALL_H, WALL_T, WINDOWS, idx, inGrid,
 } from '../config/house';
 import type { Vec2 } from '../sim/types';
+import { torchBounceAt } from './bounce';
 import { PALETTE } from './palette';
 
 /** 窗台、窗顶高度（米）。计划里定的数，config 里没有，放在这里 */
@@ -412,9 +413,14 @@ export const DISSOLVE = {
   /**
    * 视线胶囊：镜头这头、鬼魂这头的水平半径（正交相机的视线是平行的，两头都用 ghostR），竖直方向在鬼魂那头乘 tall（横截面是竖着的椭圆：
    * 盖住鬼魂从头顶到下摆，左右只比身子宽一点，在 2 米宽的走廊正中飘时两边的墙不会跟着结霜）；
-   * 鬼魂那头是平的，过了身体中部 capPad 米截断
+   * 鬼魂那头是平的，过了身体中部 capPad 米截断。
+   * 墙后的镜头（2026-10-30 FEEL-4，修复第 2 轮）：把镜头和鬼魂隔开的那一面墙（镜头、鬼魂分在这一面的两侧），鬼魂沿吊臂过了这面墙
+   * cutFrom 米以后，从吊臂和墙面的交点开一个洞、按多出来的米数 × grow 往外长（舷窗慢慢张大成剖面），只留鬼魂身后那一截：
+   * 鬼魂在房间里、镜头退到墙外时，画面不再是一个四周黑墙的舷窗；鬼魂刚穿过墙（身子还在墙里、刚出墙）时还是原来的舷窗。
+   * 用沿吊臂的米数而不是吊臂长的比例：吊臂会变（滚轮 1–4 米，碰天花板时被压短），按比例的话长吊臂时舷窗留太久、短吊臂时穿墙的舷窗被截掉。
+   * 只给墙、窗、天花板、前门（dissolveAt 的 nearCut 参数），家具不溶
    */
-  sight: { camR: 0.3, ghostR: 0.5, tall: 1.6, capPad: 0.12 },
+  sight: { camR: 0.3, ghostR: 0.5, tall: 1.6, capPad: 0.12, cutFrom: 0.8, grow: 3 },
   /** 洞边的噪声：两层（freq 每米几个起伏，amp 米）；creep：花纹每秒往上飘多少米（像烟，不是静止的破洞） */
   noise: [{ freq: 2.3, amp: 0.17 }, { freq: 6.1, amp: 0.06 }] as const,
   creep: 0.06,
@@ -432,6 +438,8 @@ export const DISSOLVE = {
   frostAlbedo: new THREE.Color(0.56, 0.63, 0.72),
   rimGlow: new THREE.Color(0.32, 0.45, 0.6).multiplyScalar(0.17),
   frostGlow: new THREE.Color(0.32, 0.45, 0.6).multiplyScalar(0.04),
+  /** 洞口冷光按「这一面正对镜头的程度」|N·V| 在这两个数之间淡入：侧着看（贴着墙、卡在墙里）时收掉 */
+  rimFacing: [0.12, 0.45] as [number, number],
 };
 
 /**
@@ -510,10 +518,13 @@ type V3n = THREE.Node<'vec3'>;
 /**
  * 片元 P（房屋坐标，N 是它所在面的法线）的溶解：keep = 不在洞里（给 maskNode），frost 0..1 霜的厚度，rim 0..1 紧贴洞口的那一圈。
  * holeScale 只缩放鬼魂周围的洞（家具用 DISSOLVE.furniture）；视线胶囊不缩，隔着衣柜也要看得见鬼魂。
+ * nearCut：隔开镜头和鬼魂的面，鬼魂沿吊臂过了它 cutFrom 米以后从交点开洞往外长（DISSOLVE.sight；墙、窗、天花板、前门传 true，家具、物件不传）。
  * 噪声只在离洞 reach 米以内的片元上算（If 分支），离洞远的整片墙只多两次距离计算。
  * 分支外先把要用的量存进变量，分支里只赋值：避开「共享节点第一次在分支里生成，另一边读到 0」的坑（调研文档）
  */
-export function dissolveAt(u: DissolveUniforms, P: V3n, N: V3n, holeScale = 1): { keep: THREE.Node<'bool'>; frost: F; rim: F } {
+export function dissolveAt(
+  u: DissolveUniforms, P: V3n, N: V3n, holeScale = 1, nearCut = false,
+): { keep: THREE.Node<'bool'>; frost: F; rim: F } {
   const D = DISSOLVE;
   const [n0, n1] = D.noise;
   const reach = n0.amp + n1.amp + D.frost.band + 0.02;
@@ -533,7 +544,21 @@ export function dissolveAt(u: DissolveUniforms, P: V3n, N: V3n, holeScale = 1): 
     // 竖直方向的拉长只在鬼魂那头需要（盖住头顶到下摆）；镜头那头是圆的，镜头附近不会白白多出一大块要算的区域
     const tall = mix(float(1), float(D.sight.tall), t);
     const dSight = max(length(vec3(rad.x, rad.y.div(tall), rad.z)).sub(mix(u.sightR.x, u.sightR.y, t)), beyond);
-    const sd = min(dGhost, dSight).toVar();
+    let near: F = float(1e3);
+    if (nearCut) {
+      // 按这一面所在的平面判断：hc、hg 是镜头、鬼魂到这个平面的有向距离，异号 = 这一面把两者隔开；t* = |hc| / (|hc| + |hg|) 是吊臂和
+      // 这个平面相交的地方（0 镜头、1 鬼魂），X* 是交点。鬼魂沿吊臂过了这面墙 (1 − t*) × 吊臂长；多出 cutFrom 的部分乘 grow 当洞的半径，
+      // 洞从 X*（正是原来舷窗的中心）往外长：场的梯度还是 1，切边、霜带和舷窗的边一样紧，舷窗慢慢张大成剖面，不留黑板。
+      // 只留鬼魂身后那一截（沿吊臂过了鬼魂 capPad 米以外，和视线胶囊的平头同一个 beyond）；走廊两边的墙不隔开两者，不受影响。
+      // 修复第 2 轮（复审 I-4）：第 1 轮按整个平面取同一个值，鬼魂停在离墙 1–1.4 米时整条墙线在噪声带里变成满屏带冷光边的霜块，
+      // 晃鼠标还会在舷窗 / 满屏霜块 / 整面没了之间来回切；第 0 轮按每个片元的投影 tr 切，斜墙留两块黑板
+      const hc = dot(N, u.cam.sub(P)), hg = dot(N, u.ghost.sub(P));
+      const tStar = abs(hc).div(abs(hc).add(abs(hg)).add(1e-6));
+      const past = float(1).sub(tStar).mul(u.segLen).sub(D.sight.cutFrom);
+      const open = length(P.sub(u.cam.add(u.seg.xyz.mul(tStar)))).sub(past.mul(D.sight.grow));
+      near = select(hc.mul(hg).lessThan(0), max(open, beyond), float(1e3));
+    }
+    const sd = min(min(dGhost, dSight), near).toVar();
     const field = sd.toVar();
     const frost = float(0).toVar();
     const rim = float(0).toVar();
@@ -576,10 +601,12 @@ export interface DissolveOptions {
   masked?: boolean;
   /** 不受光照的材质（MeshBasic，天花板）：底色乘这个当作环境光下的亮度，再加自发光那几项 */
   unlitAmbient?: number;
+  /** 隔开镜头和鬼魂的面，鬼魂沿吊臂过了它 cutFrom 米以后从交点开洞往外长（见 DISSOLVE.sight）：墙、天花板给 true，家具不给 */
+  nearCut?: boolean;
 }
 
 /**
- * 材质（墙、家具、天花板）接上溶解：maskNode 挖洞，底色上霜，再加洞口冷光和鬼魂微光（受光材质放在 emissiveNode）。
+ * 材质（墙、家具、天花板）接上溶解：maskNode 挖洞，底色上霜，再加洞口冷光、鬼魂微光和手电的反弹光（受光材质放在 emissiveNode）。
  * albedo：材质原来的底色（顶点色要自己乘进去，材质别再开 vertexColors）；P、N：房屋坐标的位置和法线。
  * maskShadowNode 恒为 true：阴影图里不挖洞（溶开的只是「看穿」，影子照旧）
  */
@@ -588,7 +615,8 @@ export function applyDissolve(
   o: DissolveOptions = {},
 ) {
   const D = DISSOLVE;
-  const glow = ghostGlowAt(u, P, N);
+  // 鬼魂的微光 + 手电打在地上、墙上反弹回来的光（bounce.ts）：都乘底色，加在自发光里
+  const glow = ghostGlowAt(u, P, N).add(torchBounceAt(P, N));
   const lit = m instanceof THREE.MeshStandardNodeMaterial;
   const amb = o.unlitAmbient ?? 1;
   if (o.masked === false) {
@@ -598,13 +626,16 @@ export function applyDissolve(
     } else m.colorNode = albedo.mul(glow.add(amb));
     return;
   }
-  const d = dissolveAt(u, P, N, o.holeScale ?? 1);
+  const d = dissolveAt(u, P, N, o.holeScale ?? 1, o.nearCut === true);
   m.maskNode = d.keep;
   m.maskShadowNode = bool(true);
   const cover = d.frost.mul(D.frost.cover);
   const col = mix(albedo, v3(D.frostAlbedo), cover);
-  // 鬼魂的微光只照没结霜的部分：霜的底色很亮，被贴得这么近的光一照会亮成一片白；霜的亮度只由 frostGlow 控制
-  const emissive = v3(D.rimGlow).mul(d.rim).add(v3(D.frostGlow).mul(d.frost)).add(albedo.mul(float(1).sub(cover)).mul(glow));
+  // 紧贴洞口那圈冷光侧着看时收掉：镜头卡在墙里、洞口那一面几乎和视线平行时，这一圈在近处连成一条贯穿画面的白色细弧（ART-5）；
+  // 正对着看时不变
+  const facing = smoothstep(D.rimFacing[0], D.rimFacing[1], abs(dot(N, normalize(u.cam.sub(P)))));
+  // 鬼魂的微光、反弹光只照没结霜的部分：霜的底色很亮，被贴得这么近的光一照会亮成一片白；霜的亮度只由 frostGlow 控制
+  const emissive = v3(D.rimGlow).mul(d.rim.mul(facing)).add(v3(D.frostGlow).mul(d.frost)).add(albedo.mul(float(1).sub(cover)).mul(glow));
   if (lit) {
     m.colorNode = col;
     m.emissiveNode = emissive;
@@ -751,6 +782,20 @@ function loweredPosition(hU: FloatU[]) {
   return vec3(p.x, y, p.z);
 }
 
+/**
+ * 墙纸、护墙板做旧（2026-10-30 ART-9，只改着色器、不加贴图）：
+ * - rub：护墙板上沿往上一截发灰（手摸、靠出来的）：离地 [1] 米以下乘 [0]，到 [2] 米恢复
+ * - soot：顶角熏黑：离墙顶 [1] 米到 [2] 米之间渐渐乘到 [0]
+ * - damp：竖着拉长的水渍：噪声沿墙每米 freq[0]、竖直每米 freq[1] 个起伏，乘 1 − amount ± amount
+ * - wainscot：护墙板的深浅（同上的写法）
+ */
+export const WALL_WEAR = {
+  rub: [0.78, 0.9, 1.5] as [number, number, number],
+  soot: [0.82, 0.5, 0.12] as [number, number, number],
+  damp: { freq: [0.9, 0.35] as [number, number], amount: 0.1 },
+  wainscot: { freq: [3, 6] as [number, number], amount: 0.08 },
+};
+
 /** dissolve 不为空：第三人称模式，墙面在鬼魂周围和视线上溶开（见 DISSOLVE）；masked = false 是不挖洞的那份（见 HOLE_TEST） */
 function wallMaterial(hU: FloatU[], dissolve?: DissolveUniforms, masked = true) {
   const m = new THREE.MeshStandardNodeMaterial({ flatShading: true, roughness: 0.92, metalness: 0 });
@@ -765,8 +810,14 @@ function wallMaterial(hU: FloatU[], dissolve?: DissolveUniforms, masked = true) 
   // 室内：踢脚线、护墙板（降低后能看到的就是这一段）、腰线、竖条纹墙纸、顶线
   const panel = smoothstep(0.0, 0.02, abs(fract(along.div(0.5)).sub(0.5)).mul(0.5)).mul(0.12).add(0.88);
   const stripe = select(fract(along.div(0.16)).lessThan(0.5), float(1.0), float(0.86));
-  const wainscot = v3(mixHex(PALETTE.woodDark, PALETTE.wood, 0.35)).mul(panel);
-  const paper = v3(PALETTE.wallpaper).mul(stripe);
+  // 做旧（WALL_WEAR）：护墙板的深浅；墙纸上沿发灰、顶角熏黑、竖着拉长的水渍
+  const W = WALL_WEAR;
+  const blotch = (f: [number, number], amount: number, seed: number) =>
+    mx_noise_float(vec3(along.mul(f[0]), y.mul(f[1]), seed)).mul(amount).add(1 - amount);
+  const wainscot = v3(mixHex(PALETTE.woodDark, PALETTE.wood, 0.35)).mul(panel).mul(blotch(W.wainscot.freq, W.wainscot.amount, 1.7));
+  const rubbed = mix(float(W.rub[0]), float(1), smoothstep(W.rub[1], W.rub[2], y));
+  const soot = mix(float(1), float(W.soot[0]), smoothstep(WALL_H - W.soot[1], WALL_H - W.soot[2], y));
+  const paper = v3(PALETTE.wallpaper).mul(stripe).mul(rubbed).mul(soot).mul(blotch(W.damp.freq, W.damp.amount, 7.3));
   const inner = select(y.lessThan(0.1), v3(PALETTE.wallTrim),
     select(y.lessThan(0.82), wainscot,
       select(y.lessThan(0.9), v3(PALETTE.wood),
@@ -786,10 +837,16 @@ function wallMaterial(hU: FloatU[], dissolve?: DissolveUniforms, masked = true) 
   const base = select(kind.lessThan(0.5), inner, select(kind.lessThan(1.5), outer, select(kind.lessThan(2.5), cap, trim)));
   // 法线用新的 attribute('normal')（片元里是 varying 输入，哪里读都有值），不用 normalLocal：normalLocal 是私有变量，
   // 只在上面 select 的某几个分支里赋值（算 along 的那几支），分支外读到的可能是 0（踢脚线、腰线、顶线、窗框那几种面）
-  if (dissolve) applyDissolve(m, dissolve, p, attribute('normal', 'vec3'), base, { masked });
+  if (dissolve) applyDissolve(m, dissolve, p, attribute('normal', 'vec3'), base, { masked, nearCut: true });
   else m.colorNode = base;
   return m;
 }
+
+/**
+ * 窗玻璃的倍数（r, g, b）：夜里 (1, 1, 1)；天亮时 house.ts 的 DAWN.glass 往上插（玻璃后面的天亮起来、偏灰白）。
+ * 玻璃是加法混合的一层冷光，两种相机、挖不挖洞都乘它；开局编好，只改值
+ */
+export const skyGlass = uniform(new THREE.Vector3(1, 1, 1));
 
 function glassMaterial(hU: FloatU[], dissolve?: DissolveUniforms) {
   const m = new THREE.MeshBasicNodeMaterial({
@@ -805,10 +862,10 @@ function glassMaterial(hU: FloatU[], dissolve?: DissolveUniforms) {
   const base = v3(PALETTE.moonSky).mul(glow).mul(0.12);
   if (dissolve) {
     // 鬼魂贴近窗户：玻璃跟着墙溶开，洞边的玻璃上一层霜（加法混合，霜就是玻璃上多出来的一点冷光）
-    const d = dissolveAt(dissolve, varying(pos), attribute('normal', 'vec3'));
+    const d = dissolveAt(dissolve, varying(pos), attribute('normal', 'vec3'), 1, true);
     m.maskNode = d.keep;
-    m.colorNode = base.add(v3(DISSOLVE.frostGlow).mul(d.frost.mul(2.5))).add(v3(DISSOLVE.rimGlow).mul(d.rim));
-  } else m.colorNode = base;
+    m.colorNode = base.add(v3(DISSOLVE.frostGlow).mul(d.frost.mul(2.5))).add(v3(DISSOLVE.rimGlow).mul(d.rim)).mul(skyGlass);
+  } else m.colorNode = base.mul(skyGlass);
   return m;
 }
 
