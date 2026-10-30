@@ -3,17 +3,21 @@
 // 所以这里拿真的模拟对照：出手之前 reachOf 说会吓到谁，出手以后模拟真的吓到了谁。
 // - 引诱：触发那一步结算，站着的人谁听见和 reachOf 逐人一致
 // - 惊吓类：reachOf 就是 seenBy；附身那一刻看着它的人一定被吓到（蓄势期间被定住盯着它）
-// - 现身：蓄力 0.6 秒里 5 米内看得见那里的人转过来，落下时连同本来就对着那里的人一起被吓到。
-//   站着的人左右照手电，5–6 米那一圈会有人在这 0.6 秒里照进来或照出去，所以按比例对照（≥ 98%）
+// - 现身：落下时手电照着那里的人被吓到；蓄力 0.6 秒里会转过来的只有已经紧张（恐惧值 ≥ FEAR.nervous）、
+//   MANIFEST.noticeRadius 米内看得见那里的人（2026-10-30 路 GP；原来 5 米内的人不管朝哪、隔不隔墙都转过来）。
+//   站着的人左右照手电，光锥边上会有人在这 0.6 秒里照进来或照出去，所以按比例对照（≥ 98%）
 import { describe, expect, it } from 'vitest';
 import { cellCenter, cellOf, GRID_H, GRID_W, PROPS, propCenter } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
-import { MANIFEST } from '../src/config/visitors';
+import { FEAR, GHOST, MANIFEST, TRAITS } from '../src/config/visitors';
 import { angleOf } from '../src/lib/angle';
 import { Grid } from '../src/sim/grid';
 import { reachOf } from '../src/sim/reach';
 import { createRng } from '../src/sim/rng';
 import { createWorld } from '../src/sim/world';
+import { STRINGS } from '../src/config/strings';
+import { hudLines } from '../src/ui/hud';
+import { fKeyDue } from '../src/view/overlays';
 import type { Personality, SimEvent, Vec2, World } from '../src/sim/types';
 
 const DT = 1 / 60;
@@ -184,19 +188,27 @@ describe('reachOf：惊吓类（就是 seenBy，同一条规则）', () => {
 });
 
 describe('reachOf：现身（蓄力察觉 + 落下时看得见）', () => {
-  it('手感分析 E 段的摆法：2 米背对的 Mia 会被吓到（蓄力时转过来）；5.5 米背对的 Hugo、隔墙 4.6 米的 Iris 不会——和落下的 scared 一致', () => {
-    const w = createWorld({ seed: 31, autoSpawn: false });
-    const at = { x: 8.0, z: 6.0 };
-    const mia = stand(w, { x: 10.0, z: 5.6 }, 0);
-    const hugo = stand(w, { x: 13.5, z: 6.4 }, 0);
-    const iris = stand(w, { x: 11.8, z: 8.6 }, angleTo({ x: 11.8, z: 8.6 }, at));
-    drive(w, 0.1, at);
-    const reach = reachOf(grid, w.state, { kind: 'manifest', at });
-    expect(sorted(reach)).toEqual([mia.id]);
-    expect(w.manifest()).toBe(true);
-    const drop = ofType(drive(w, MANIFEST.windup + 0.1, at), 'manifest').find((e) => e.phase === 'drop')!;
-    expect(sorted(drop.scared)).toEqual([mia.id]);
-    expect(hugo.id).not.toBe(iris.id);
+  /** 200 个随机站位里被吓到的人至少这么多（不然对照没有意义） */
+  const SCARED_ANY = 100;
+
+  it('手感分析 E 段的摆法（2026-10-30 起的规则）：2 米背对的 Mia 平静时不算（蓄力不再让人转身），已经紧张时算（会转过来）；5.5 米背对的 Hugo、隔墙 4.6 米的 Iris 不算——和落下的 scared 一致', () => {
+    for (const fear of [0, FEAR.nervous + 10]) {
+      const w = createWorld({ seed: 31, autoSpawn: false });
+      const at = { x: 8.0, z: 6.0 };
+      const mia = stand(w, { x: 10.0, z: 5.6 }, 0);
+      const hugo = stand(w, { x: 13.5, z: 6.4 }, 0);
+      const iris = stand(w, { x: 11.8, z: 8.6 }, angleTo({ x: 11.8, z: 8.6 }, at));
+      drive(w, 0.1, at);
+      mia.fear = fear;
+      iris.fear = fear; // 隔着墙：再紧张也看不见那里
+      const want = fear > 0 ? [mia.id] : [];
+      const reach = reachOf(grid, w.state, { kind: 'manifest', at });
+      expect(sorted(reach)).toEqual(want);
+      expect(w.manifest()).toBe(true);
+      const drop = ofType(drive(w, MANIFEST.windup + 0.1, at), 'manifest').find((e) => e.phase === 'drop')!;
+      expect(sorted(drop.scared)).toEqual(want);
+      expect(hugo.id).not.toBe(iris.id);
+    }
   });
 
   it('5–6 米之间：本来就对着那里（光锥里、有视线）的人算，背对的不算', () => {
@@ -230,9 +242,10 @@ describe('reachOf：现身（蓄力察觉 + 落下时看得见）', () => {
     const n = stand(w, p, angleTo(p, lamp));
     drive(w, 0.1, at);
     n.lookDir = angleTo(n.pos, lamp);
+    n.fear = FEAR.nervous + 10; // 已经紧张：没僵着的时候蓄力会转过来
     drive(w, DT, at);
     expect(w.state.objects.find((o) => o.id === 'lamp-living')!.seenBy).toEqual([n.id]);
-    // 没被吓的时候：5 米内、有视线，蓄力时会转过来，算
+    // 没被吓的时候：已经紧张、noticeRadius 内、有视线，蓄力时会转过来，算
     expect(reachOf(grid, w.state, { kind: 'manifest', at })).toEqual([n.id]);
     w.trigger('lamp-living');
     const ev = drive(w, DT, at);
@@ -250,12 +263,13 @@ describe('reachOf：现身（蓄力察觉 + 落下时看得见）', () => {
     const setup = (at: Vec2, seed: number) => {
       const w = createWorld({ seed, autoSpawn: false });
       const n = stand(w, { x: 8.0, z: 6.0 }, Math.PI / 2);
+      n.fear = FEAR.nervous + 10; // 已经紧张：不往外走的话，背后现身也会转过来
       drive(w, 0.1, at);
       w.dawn();
       drive(w, 0.3, at);
       return { w, n };
     };
-    // 背后：客厅里、隔着客厅的门洞有视线，5 米内——不往外走的人蓄力时会转过来（会算），他不会
+    // 背后：客厅里、隔着客厅的门洞有视线，noticeRadius 内——不往外走的紧张的人蓄力时会转过来（会算），他不会
     const behind = { x: 8.0, z: 3.5 };
     const a = setup(behind, 37);
     expect(a.n.mode).toBe('leaving');
@@ -286,9 +300,11 @@ describe('reachOf：现身（蓄力察觉 + 落下时看得见）', () => {
     expect(reachOf(grid, w.state, { kind: 'manifest', at })).toEqual([]);
   });
 
-  it('200 个随机站位（站着不动）：出手前的 reachOf 和随后落下事件里的 scared 一致 ≥ 98%', () => {
+  it('200 个随机站位（站着不动，一半已经紧张）：发毛范围外，出手前的 reachOf 和随后落下事件里的 scared 一致 ≥ 98%；发毛范围里只会少报、不会多报', () => {
+    // 鬼魂贴得比发毛范围（GHOST.radius × 性格的 chillRange）还近时，平静的人也会回头照一下（npc.ts 的 feelGhost，onset 的时刻是随机的），
+    // 照着了落下时照样被吓到：这一下什么时候来 NpcState 里看不出，眼睛不预报（少报）。但名单上的人一定被吓到（不多报）
     const rng = createRng(4242);
-    let people = 0, agree = 0, scaredAny = 0, trials = 0, sameSet = 0;
+    let people = 0, agree = 0, scaredAny = 0, trials = 0, sameSet = 0, close = 0, closeMiss = 0;
     const misses: string[] = [];
     while (trials < 200) {
       const w = createWorld({ seed: 3000 + trials, autoSpawn: false });
@@ -296,6 +312,8 @@ describe('reachOf：现身（蓄力察觉 + 落下时看得见）', () => {
       const c = cellCenter(gi, gj);
       const at = { x: c.x + rng.range(-0.2, 0.2), z: c.z + rng.range(-0.2, 0.2) };
       const ns = Array.from({ length: 3 }, () => stand(w, nearPoint(rng, at, 7), rng.range(-Math.PI, Math.PI)));
+      // 一半平静（只有手电照着那里才算），一半已经紧张（看得见那里就会转过来）
+      for (const n of ns) n.fear = rng.next() < 0.5 ? 0 : rng.range(FEAR.nervous, 90);
       drive(w, 0.3, at);
       const reach = new Set(reachOf(grid, w.state, { kind: 'manifest', at }));
       if (!w.manifest()) continue; // 鬼魂在能走的格子里，不会失败；万一失败就换一个
@@ -304,18 +322,77 @@ describe('reachOf：现身（蓄力察觉 + 落下时看得见）', () => {
       const scared = new Set(drop?.scared ?? []);
       let same = true;
       for (const n of ns) {
-        people++;
+        const d = Math.hypot(n.pos.x - at.x, n.pos.z - at.z);
         if (scared.has(n.id)) scaredAny++;
+        if (d < GHOST.radius * TRAITS[n.personality].chillRange) {
+          // 发毛范围里：名单上的人一定被吓到；名单外的可能回头看见
+          close++;
+          expect(!reach.has(n.id) || scared.has(n.id), `#${trials} ${n.name} d=${d.toFixed(2)}`).toBe(true);
+          if (reach.has(n.id) !== scared.has(n.id)) closeMiss++;
+          continue;
+        }
+        people++;
         if (reach.has(n.id) === scared.has(n.id)) agree++;
         else {
           same = false;
-          misses.push(`#${trials} ${n.name} d=${Math.hypot(n.pos.x - at.x, n.pos.z - at.z).toFixed(2)} reach=${reach.has(n.id)} scared=${scared.has(n.id)}`);
+          misses.push(`#${trials} ${n.name} d=${d.toFixed(2)} reach=${reach.has(n.id)} scared=${scared.has(n.id)}`);
         }
       }
       if (same) sameSet++;
     }
-    expect(scaredAny).toBeGreaterThan(150); // 前提：样本里有足够多的人被吓到
+    expect(scaredAny).toBeGreaterThan(SCARED_ANY); // 前提：样本里有足够多的人被吓到
+    expect(close).toBeGreaterThan(20); // 前提：发毛范围里也有不少人
+    expect(closeMiss).toBeLessThan(close);
     expect(agree / people, misses.join('\n')).toBeGreaterThanOrEqual(0.98);
     expect(sameSet / trials).toBeGreaterThanOrEqual(0.95);
+  });
+});
+
+describe('现身的新规则和界面对得上（路 GP 合并 HT 以后）：F 键帽亮不亮（fKeyDue、reachOf）、落下吓到谁、现身失败那句话', () => {
+  const at = { x: 8.0, z: 9.5 }; // 门厅正中
+  /** 一个人站在 pos、手电朝 look、恐惧值 fear：出手前问 F 键帽，按下去看落下吓到谁、HUD 说什么 */
+  function press(pos: Vec2, look: number, fear: number, seed: number) {
+    const w = createWorld({ seed, autoSpawn: false });
+    const n = stand(w, pos, look);
+    n.fear = fear;
+    drive(w, 0.05, at);
+    n.lookDir = look;
+    const key = fKeyDue(at, w.state.manifest, reachOf(grid, w.state, { kind: 'manifest', at }));
+    expect(w.manifest()).toBe(true);
+    const drop = ofType(drive(w, MANIFEST.windup + 0.1, at), 'manifest').find((e) => e.phase === 'drop')!;
+    const said = hudLines(drop, w.state, { manifestMiss: true }).lines.map((l) => l.text);
+    return { id: n.id, key, scared: drop.scared, said };
+  }
+  const MISSED = STRINGS.onboarding.manifestMissed;
+  const WEST = { x: 6.0, z: 9.5 }; // 2 米，在发毛范围外
+
+  it('平静、背对着：键帽不亮，按了也吓不到（蓄力不替你把人转过来），HUD 说 No one saw you. Stand in their light.', () => {
+    const r = press(WEST, Math.PI, 0, 41);
+    expect(r.key).toBe(false);
+    expect(r.scared).toEqual([]);
+    expect(r.said).toEqual([MISSED]);
+  });
+
+  it('平静、手电照着那里：键帽亮，吓得到，不说失败那句', () => {
+    const r = press(WEST, 0, 0, 42);
+    expect(r.key).toBe(true);
+    expect(r.scared).toEqual([r.id]);
+    expect(r.said).not.toContain(MISSED);
+  });
+
+  it('已经紧张、背对着：键帽亮（灯一暗他就转过来），吓得到', () => {
+    const r = press(WEST, Math.PI, FEAR.nervous + 5, 43);
+    expect(r.key).toBe(true);
+    expect(r.scared).toEqual([r.id]);
+    expect(r.said).not.toContain(MISSED);
+  });
+
+  it('再紧张，隔着墙也不算：键帽不亮、吓不到、说失败那句', () => {
+    const inBedroom = { x: 4.5, z: 9.5 };
+    expect(grid.lineOfSight(inBedroom, at)).toBe(false);
+    const r = press(inBedroom, 0, FEAR.nervous + 20, 44);
+    expect(r.key).toBe(false);
+    expect(r.scared).toEqual([]);
+    expect(r.said).toEqual([MISSED]);
   });
 });

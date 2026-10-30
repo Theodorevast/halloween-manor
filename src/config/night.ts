@@ -16,8 +16,11 @@ export const NIGHT = {
    * 收夜不用等玩家把最后几位都吓走，5 分钟左右就能翻到登记簿。播报一行 STRINGS.ticker.dawn
    */
   dawn: 270,
-  /** 开局几个访客之间隔多久进门（秒，第一个在 SPAWN.first）：第一个人独自进来 */
-  openingGaps: [20, 20],
+  /**
+   * 开局几个访客之间隔多久进门（秒，第一个在 SPAWN.first）：第一个人独自进来。
+   * 2026-10-30 用户试玩以后 20 → 12（路 GP：开头一个人待 40 秒太松；屋里最多 4 人，所以有三个间隔，见 config/visitors.ts 的 NIGHT_VISITS）
+   */
+  openingGaps: [12, 12, 12],
   /** 收夜时门廊灯在多少秒里慢慢熄到多暗（0..1，不全灭也行）；Keep haunting 时同样的时间亮回来 */
   porchFade: { seconds: 15, level: 0 },
   /** 最后一个人走了、前门关上以后：先静多久，再用多久把光收回前门，再翻开登记簿（秒） */

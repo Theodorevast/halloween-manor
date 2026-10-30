@@ -1,8 +1,11 @@
 // 主动现身（右键 / F，设计文档 3.2）的时间轴：idle → windup（蓄力 MANIFEST.windup 秒）→ hold（落下以后停留 MANIFEST.hold 秒）
-// → cooldown（收回以后冷却 MANIFEST.cooldown 秒）→ idle。谁察觉、谁被吓到、谁被定住由 world.ts 结合感知来算，这里只管时间；
-// 另有落下那一刻吓多少的公式（manifestFear）。纯 TypeScript，画面、声音按 WorldState.manifest 和 manifest 事件同步。
-import { MANIFEST, VISION } from '../config/visitors';
+// → cooldown（收回以后冷却 MANIFEST.cooldown 秒）→ idle。谁被吓到、谁被定住由 world.ts 结合感知来算，这里管时间；
+// 另有两条规则放在这里，world.ts 结算和 reach.ts（「这一下会吓到谁」）共用一份：蓄力那一刻谁会察觉、转过来（sensesManifest），
+// 落下那一刻吓多少（manifestFear）。纯 TypeScript，画面、声音按 WorldState.manifest 和 manifest 事件同步。
+import { FEAR, MANIFEST, VISION } from '../config/visitors';
 import { angleDiff, angleOf } from '../lib/angle';
+import type { Grid } from './grid';
+import { canSee } from './perception';
 import type { ManifestState, NpcState, Vec2 } from './types';
 
 /** 倒计时归零的容差（同 scares.ts）：1/60 累减会剩 1e-13 这种尾巴 */
@@ -101,13 +104,30 @@ export function torchLight(viewer: Pick<NpcState, 'pos' | 'lookDir'>, at: Vec2):
  * 落下那一刻，看得见鬼魂（光锥 + 视线 + MANIFEST.range，由调用方判断）的人这一下的基础恐惧值（再乘性格倍率和习惯化，见 npc.ts 的 exposure）：
  * MANIFEST.fear × 距离系数（near[0] 米内 nearMult[0]，near[1] 米处 nearMult[1]，中间线性）
  * × 正中系数（光锥正中 center[0]，光锥边上 center[1]，按偏离的角度线性）× 在光里（1 到 MANIFEST.lit，按 torchLight）
+ * × 恐惧值加成（primedBy：这一下之前他已经有多怕，2026-10-30 路 GP）
  */
-export function manifestFear(viewer: Pick<NpcState, 'pos' | 'lookDir'>, at: Vec2): number {
+export function manifestFear(viewer: Pick<NpcState, 'pos' | 'lookDir' | 'fear'>, at: Vec2): number {
   const dx = at.x - viewer.pos.x, dz = at.z - viewer.pos.z, d = Math.hypot(dx, dz);
   const far = Math.max(0, Math.min(1, (d - MANIFEST.near[0]) / (MANIFEST.near[1] - MANIFEST.near[0])));
   const near = lerp(MANIFEST.nearMult[0], MANIFEST.nearMult[1], far);
   const off = d < 1e-6 ? 0 : Math.min(1, angleDiff(viewer.lookDir, angleOf(dx, dz)) / VISION.halfAngle);
   const center = lerp(MANIFEST.center[0], MANIFEST.center[1], off);
   const lit = lerp(1, MANIFEST.lit, torchLight(viewer, at));
-  return MANIFEST.fear * near * center * lit;
+  return MANIFEST.fear * near * center * lit * primedBy(viewer.fear);
+}
+
+/** 恐惧值加成（MANIFEST.primed）：恐惧值 0 时 primed[0]，FEAR.max 时 primed[1]，中间线性 */
+export function primedBy(fear: number): number {
+  return lerp(MANIFEST.primed[0], MANIFEST.primed[1], Math.max(0, Math.min(1, fear / FEAR.max)));
+}
+
+/**
+ * 蓄力那一刻这个人会不会察觉、转过来盯到落下（2026-10-30 路 GP，critic F-1；规则见 config/visitors.ts 的 MANIFEST.noticeRadius）：
+ * 手电此刻就照着那里（光锥 + 视线 + MANIFEST.range），或者已经紧张（恐惧值 ≥ FEAR.nervous）、noticeRadius 米内、有视线。
+ * 隔着墙的、不紧张又没照着那里的人都不察觉。能不能被吓、能不能察觉（受惊僵着、天亮往外走的不转身）由调用方另查（npc.ts 的 canBeScared、canNotice）
+ */
+export function sensesManifest(grid: Grid, viewer: Pick<NpcState, 'pos' | 'lookDir' | 'fear'>, at: Vec2): boolean {
+  if (canSee(grid, viewer, at, MANIFEST.range)) return true;
+  if (viewer.fear < FEAR.nervous) return false;
+  return Math.hypot(at.x - viewer.pos.x, at.z - viewer.pos.z) <= MANIFEST.noticeRadius && grid.lineOfSight(viewer.pos, at);
 }

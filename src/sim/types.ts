@@ -146,8 +146,11 @@ export type SimEvent =
    * WARDROBE.fingersChance 的时候先有几根手指扶住门边。可选只是为了不打扰手写事件的开发页、测试（没有当 0）
    */
   | { type: 'trigger'; object: string; scareType: ScareType; variant?: number }
-  /** NPC 听到引诱声，转入警觉 */
-  | { type: 'heard'; npc: number; object: string }
+  /**
+   * NPC 听到引诱声，转入警觉。amount：这一下涨的恐惧值（2026-10-30 路 GP：登记簿按「哪一类来源让他涨得最多」写怎么走的；
+   * 模拟每次都给，可选只是为了不打扰手写事件的开发页、测试）
+   */
+  | { type: 'heard'; npc: number; object: string; amount?: number }
   /**
    * NPC 被吓到（僵住、够多就尖叫）。object 是物件 id；为 null 表示被别人的尖叫吓到（这种不僵住）；
    * 为 GHOST_SOURCE 表示鬼魂贴着后颈吹了一口凉气（同一步前面有一个 neck: true 的 chill，amount 是同一笔，别加两次）
@@ -235,4 +238,19 @@ export interface WorldOptions {
    * 正式游戏给 NIGHT.openingGaps（第一个人独自进来，过一会儿才有第二个敲门）
    */
   openingGaps?: number[];
+  // 下面三个（2026-10-30 用户试玩以后，路 GP）和 openingGaps 一样只有正式游戏给（config/visitors.ts 的 nightWorld），
+  // 机器人、平衡测试都不给：不给就和原来逐步相同（抽随机数的次数、顺序也一样，见 tests/night.test.ts）
+  /** 屋里（不算逃跑中的）同时最多几人。不给就是 SPAWN.target；正式游戏 4（用户定） */
+  target?: number;
+  /**
+   * 结伴进门：开局以后，每次轮到有人进门、屋里容得下两个时，有 chance 的机会两人一起来，第二个隔 gap 秒跟进。
+   * final：这一夜（开局，或 reopen 的那一刻）过了 final 秒以后，进门的都是两人结伴（不再抽随机数），而且等屋里容得下两个才来——
+   * 收夜前最后来的一批是两人结伴。不给就没有结伴
+   */
+  pairs?: { chance: number; gap: number; final?: number };
+  /**
+   * 收夜以后（close / dawn 调过、还没 reopen）屋里的人更容易被吓：每一下涨的恐惧值（物件、引诱、现身、尖叫传染、发毛、后颈一凉）× gain，
+   * 回落的速度 × decay。不给就和平常一样
+   */
+  late?: { gain: number; decay: number };
 }

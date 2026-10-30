@@ -1,5 +1,5 @@
 // 访客（NPC）的参数（设计文档 1. 体验与玩法 /「访客」「节奏」「爽点」）
-import type { NoticeKind, Personality } from '../sim/types';
+import type { NoticeKind, Personality, WorldOptions } from '../sim/types';
 
 export const PERSONALITIES: Record<Personality, { fearMult: number; weight: number }> = {
   timid: { fearMult: 1.5, weight: 30 },
@@ -75,11 +75,8 @@ export const VISION = {
 export const BEHAVIOR = {
   /** 闲逛到达后左右照的时长范围（秒） */
   lookAround: [2, 4] as [number, number],
-  /** 警觉时到达声源后查看多久（秒） */
-  investigate: 3,
-  // 警觉时走到离声源多近停下查看：按性格，见 TRAITS.investigateDist（原来这里全员共用一个 1.5，2026-10-28 并过去了，只留一份）
-  /** 警觉查看时，手电以声源方向为中心左右扫的幅度（弧度）：扫一扫声源周围 */
-  investigateSweep: 0.8,
+  // 警觉时走到离声源多近停下查看：按性格，见 TRAITS.investigateDist（原来这里全员共用一个 1.5，2026-10-28 并过去了，只留一份）。
+  // 到了以后怎么查看见下面的 SCAN（2026-10-30 起；原来是在声源方向左右扫 3 秒）
   /** 闲逛时手电左右扫的幅度（弧度）和周期（秒） */
   sweepAmp: 0.6,
   sweepPeriod: 2.6,
@@ -91,6 +88,26 @@ export const BEHAVIOR = {
   arrive: 0.15,
   /** 走出前门后再走多远消失（米） */
   exitWalk: 1.2,
+};
+
+/**
+ * 被引诱的人走到声源旁以后怎么查看（2026-10-30 用户试玩以后，路 GP；critic S-1：原来只在声源方向左右扫 3 秒，
+ * 惊吓物件不在那一扇形里，玩家照提示去旁边的物件等，十几次都等不到人看它，「先引诱、再附身」接不上）：
+ * 先盯着声源 glance 秒，再用手电把四周扫一圈（每秒转 turn 弧度，往离声源方向最近的那件物件那边转），
+ * 扫过看得见的惊吓物件时停 hold 秒——给玩家出手的窗口。「看得见」和眼睛图标（seenBy）同一条规则：视线、物件的 range（不超过 VISION.range）、
+ * 肖像和镜子只算正面。身体跟着手电转。扫完回到闲逛。
+ * doorway：引诱物是门（厨房门）时走到离它这么近（米）再查看——站进门洞往里看，门两边的屋都扫得到。原来按性格停在 1.5 米外
+ * （TRAITS.investigateDist），从走廊西头过来的人停在门洞斜对面，隔着墙看不见厨房里的摇椅，扫一圈也是白扫。
+ * again：开始查看一个声源以后这么多秒内，同一个地方（SAME_SOURCE 米内）再响，只回头看一眼（察觉那一拍），不再走过去重新查看——
+ * 查看变长以后，站在门洞里刚扫完的人正好赶上门的冷却（10 秒）结束，一拉就回去、又被同一件物件吓一次（习惯化越吓越少），
+ * 机器人实测单独一个 brave 3 分钟内一个都吓不跑（tests/balance.test.ts 目标 2、5）。恐惧值照涨
+ */
+export const SCAN = {
+  glance: 0.8,
+  turn: 1.8,
+  hold: 1.0,
+  doorway: 0.3,
+  again: 12,
 };
 
 /**
@@ -249,30 +266,29 @@ export const GHOST = {
   wallGap: 0.9,
   /**
    * 每人听见一次穿墙声以后多久（秒）内不再算（2026-10-28，审查 I1）。取 8，和后颈一凉的冷却（neckCooldown）一样：
-   * 比听见以后的那一套（察觉 ≤ 1.5 秒 + 走过去 + 查看 BEHAVIOR.investigate 3 秒）长，他还在查看上一声时不会又被叫回去；
+   * 比听见以后的那一套（察觉 ≤ 1.5 秒 + 走过去 + 查看：SCAN 的 glance 加扫一圈，不停顿也有 4 秒）长，他还在查看上一声时不会又被叫回去；
    * 也比 FEAR.decayDelay（4 秒）长，鬼魂光靠来回穿墙按不住一个人的恐惧值不让它回落
    */
   hearCooldown: 8,
 };
 
 /**
- * 主动现身（2026-10-28，设计文档 3.2）：右键或 F。蓄力 windup 秒（附近的访客察觉、灯暗下来）→ 落下（结算谁被吓到）→
+ * 主动现身（2026-10-28，设计文档 3.2）：右键或 F。蓄力 windup 秒（看得见那里的访客察觉、灯暗下来）→ 落下（结算谁被吓到）→
  * 停留 hold 秒（鬼魂几乎不动）→ 收回，进入冷却。克制：不扑过来、不变大、不说话。
- * 被吓到的恐惧值 = fear × 距离系数 × 正中系数 × 在光里 × 性格倍率 × 习惯化（按 'manifest' 这一种算）
+ * 被吓到的恐惧值 = fear × 距离系数 × 正中系数 × 在光里 × 恐惧值加成（primed）× 性格倍率 × 习惯化（按 'manifest' 这一种算）。
+ * 2026-10-30 用户试玩以后（路 GP，critic F-1「贴着人狂按 F 是唯一最优解」）：现身改成「收尾」，不再是「发动机」——
+ * 蓄力不再把附近的人（隔着墙、背对着的也算）转过来（见 noticeRadius），吓多少按这个人此刻已经有多怕加成（primed）：
+ * 物件先把人吓紧张，现身收尾
  */
 export const MANIFEST = {
   windup: 0.6,
   hold: 1.5,
   cooldown: 18,
-  /** 落下时看得见鬼魂的最远距离（米） */
+  /** 落下时看得见鬼魂的最远距离（米）：光锥 + 视线 + 这个距离 */
   range: 6,
   /**
-   * 基础恐惧值。设计原定 30；用户 2026-10-29：先用 20，看样时再按手感调。
-   * 20 时只靠现身也能吓跑 brave，只是比附身加现身慢（tests/balance.test.ts「现身」那条，单独一个 brave、10 个种子：
-   * 只靠现身中位 112 秒、附身加现身 68 秒，慢 1.65 倍；10 局都在 5 分钟内，最长 200 秒）。
-   * 30 时只靠现身三次就吓跑 brave，和附身加现身一样快（那条不变量只多 0.1 秒）：一次冷却加蓄力、停留共 20 秒，
-   * 比习惯化恢复（FEAR.habituationRecover 15 秒）还长，每次现身都是满额。
-   * 20 时 1 米、光锥正中、在他手电光里的 average 一下 39，2 米 35（都尖叫），brave 2 米 21（倒吸一口气，不尖叫）。
+   * 基础恐惧值（再乘下面各个系数，最后一个是 primed）。设计原定 30；用户 2026-10-29：先用 20，看样时再按手感调。
+   * 一次冷却加蓄力、停留共 20 秒，比习惯化恢复（FEAR.habituationRecover 15 秒）还长，每次现身都是满额。
    * 离现身点 backOff 米以外被吓到的人不挪步，只原地转过去照
    */
   fear: 20,
@@ -283,8 +299,24 @@ export const MANIFEST = {
   center: [1.2, 0.9] as [number, number],
   /** 鬼魂被这个人的手电照着时再乘 */
   lit: 1.25,
-  /** 蓄力时多远内的访客会察觉（米） */
-  noticeRadius: 5,
+  /**
+   * 蓄力时谁察觉、转过来盯到落下（落下时谁在光锥里看得见，谁就被吓到）。只有两种人：
+   * - 手电此刻就照着那里的人（光锥 + 视线 + range）：盯着不放，不会在这 0.6 秒里照开
+   * - 已经紧张的人（恐惧值 ≥ FEAR.nervous，走得快、手电抖，玩家看得出来）：noticeRadius 米内、有视线，灯一暗就转过来
+   *   （转得到：手电以 BEHAVIOR.turnRate × NOTICE.torchTurn 转）
+   * 隔着墙的、不紧张又没照着那里的人都不转身（原来 5 米内的人不管朝哪、隔不隔墙都转过来）。
+   * 门槛不能再低：取过 30，贴在人身后狂按（tests/bots.ts 的 hug）光靠发毛、后颈一凉就过了门槛，吓跑的人和先引诱再附身打平（50 个种子 7.2 比 7.3）；
+   * 取 FEAR.nervous 以后 2.7 比 7.3（同样的 50 个种子）。
+   * noticeRadius 和 range 取同一个数：现身的范围只有一个数（critic G-1：原来画 5 米、实际吓 6 米）
+   */
+  noticeRadius: 6,
+  /**
+   * 恐惧值加成：落下那一刻这个人的恐惧值为 0 时 × primed[0]，FEAR.max 时 × primed[1]，中间线性。
+   * 现在 2 米、光锥正中、在光里的 average 平静时一下 17（倒吸一口气，不尖叫），被物件吓到 60 以后一下 38（尖叫）；
+   * brave 平静时一下 10，60 以后一下 23。只靠现身也吓得跑，只是慢（单独一个 brave，机器人中位 160 秒，附身加现身 87 秒）。
+   * 机器人对照见 tests/balance.test.ts 的「现身是收尾」
+   */
+  primed: [0.5, 1.5] as [number, number],
   /** 被吓到的人：后退到离鬼魂至少 backOff 米，之后 avoidTime 秒内绕开 avoidRadius 米的圆 */
   backOff: 1.5,
   avoidRadius: 2.5,
@@ -308,7 +340,7 @@ export const TRAP = {
 };
 
 export const SPAWN = {
-  /** 屋里少于这么多人就安排下一个访客 */
+  /** 屋里少于这么多人就安排下一个访客（机器人、平衡测试；正式游戏另给 NIGHT_VISITS.target，见 nightWorld） */
   target: 3,
   /** 安排后多久进门（秒） */
   delay: [8, 15] as [number, number],
@@ -320,3 +352,24 @@ export const SPAWN = {
 
 /** 吓跑瞬间的 hit-stop 时长（秒） */
 export const HIT_STOP = 0.15;
+
+/**
+ * 正式游戏的一夜（2026-10-30 用户试玩以后，路 GP；用户：人太少；critic S-3、newbie G4：收夜以后最后一分多钟没事干）。
+ * 只有 main.ts 的 createWorld 给（nightWorld），机器人、平衡测试都不给（WorldOptions 的 target、pairs、late 默认关）：
+ * - target：屋里同时最多 4 人（用户定；SPAWN.target 还是 3，机器人照旧）
+ * - pairs：开局以后，轮到有人进门、屋里容得下两个时，三分之一的机会两人结伴，第二个人隔 2 秒跟进
+ * - finalPair：收夜前这么多秒起，进门的都是两人结伴（等屋里容得下两个再来）——收夜前最后来的一批是两个人，最后一段有新面孔可吓
+ * - late：收夜以后恐惧值每一下涨得快一点（× gain）、回落得慢一点（× decay）——剩下的 skeptic 在天亮前也推得动
+ */
+export const NIGHT_VISITS = {
+  target: 4,
+  pairs: { chance: 1 / 3, gap: 2 },
+  finalPair: 50,
+  late: { gain: 1.25, decay: 0.5 },
+};
+
+/** 正式游戏 createWorld 的开关（NIGHT_VISITS）。closeAt：这一夜几秒收夜（NIGHT.length；?night 调过的按调过的，debug.ts 的 nightTiming） */
+export function nightWorld(closeAt: number): Pick<WorldOptions, 'target' | 'pairs' | 'late'> {
+  const v = NIGHT_VISITS;
+  return { target: v.target, pairs: { ...v.pairs, final: Math.max(0, closeAt - v.finalPair) }, late: { ...v.late } };
+}

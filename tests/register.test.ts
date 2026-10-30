@@ -1,6 +1,6 @@
 // 访客登记簿的记录（src/ui/register.ts，2026-10-30「一夜」）：每个访客一行小故事——几点进来、怎么走的
-// （逃跑之前最后一个让他恐惧值上涨的事件）；钟点换算；页脚挑哪几句；重名、还在屋里；人太多时 andOthers；
-// 天亮自己走的（exit 带 calm）不算吓跑；穿哪套（联名两套的名字只在并进访客轮换时查得到）。
+// （逃跑之前让他恐惧值涨得最多的那一类来源，2026-10-30 路 GP；原来是最后一下）；钟点换算；页脚挑哪几句、收夜那一页的评语；
+// 重名、还在屋里；人太多时 andOthers；天亮自己走的（exit 带 calm）不算吓跑；穿哪套（联名两套的名字只在并进访客轮换时查得到）。
 // 前半用手写的事件一步一步摆；最后一组用真的模拟（World）跑几个场景，核对事件的先后和这里的归因对得上
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { PROPS, propCenter } from '../src/config/house';
@@ -12,7 +12,7 @@ import { idleManifest } from '../src/sim/manifest';
 import { GHOST_SOURCE } from '../src/sim/types';
 import type { Personality, SimEvent, Vec2, World, WorldState } from '../src/sim/types';
 import { createWorld } from '../src/sim/world';
-import { REGISTER, clockAt, createRegister, inWords, outfitName } from '../src/ui/register';
+import { REGISTER, clockAt, createRegister, inWords, outfitName, verdictOf } from '../src/ui/register';
 
 const R = STRINGS.register;
 const F = R.footer;
@@ -121,7 +121,7 @@ describe('数字写成英文单词', () => {
   });
 });
 
-describe('怎么走的：逃跑之前最后一个让他恐惧值上涨的事件', () => {
+describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来源（只有一类时就是它）', () => {
   test('物件的 startle → ranFrom（物件名小写），钟点是逃跑那一刻；和进门同在 pm 时第二个钟点不再写 pm', () => {
     const n = night();
     const mia = n.come(min(12), 'Mia', 'timid');
@@ -211,22 +211,103 @@ describe('怎么走的：逃跑之前最后一个让他恐惧值上涨的事件'
     expect(n.story(a)).toBe('came in at 9:10 pm; ran at 10:04 when someone screamed');
   });
 
-  test('只看最后一个：先被衣柜吓到、后来听见尖叫才跑 → scream；同一步里先现身、再后颈一凉 → coldBreath', () => {
+  /** 现身落下吓到 id、涨了 amount（模拟里同一步紧跟着一个 object = GHOST_SOURCE 的 startle） */
+  const drop = (id: number, amount: number): SimEvent[] => [
+    { type: 'manifest', phase: 'drop', pos: { x: 8, z: 9.5 }, scared: [id] },
+    { type: 'startle', npc: id, object: GHOST_SOURCE, amount, scream: amount >= 25 },
+  ];
+
+  test('critic S-4：两次现身吓到 95（+36、+38），最后几点是后颈一凉才跑 → saw you（原来只看最后一下，写成 felt a cold breath）', () => {
+    const n = night();
+    const june = n.come(min(2), 'June');
+    n.emit(min(7), ...drop(june, 36));
+    n.emit(min(27), ...drop(june, 38));
+    n.emit(min(30), { type: 'chill', npc: june, amount: 0.8, neck: false });
+    n.emit(min(34), { type: 'chill', npc: june, amount: 12, neck: true }, { type: 'startle', npc: june, object: GHOST_SOURCE, amount: 12, scream: false }, { type: 'flee', npc: june });
+    expect(n.story(june)).toBe(`${R.cameIn('9:02 pm')}; ${R.sawYou('9:34')}`);
+  });
+
+  test('物件的各件加在一起算一类，写其中涨得最多的那一件：摇椅 22 + 肖像 32（物件 54）比现身 40 多 → ran from the portrait', () => {
+    const n = night();
+    const a = n.come(min(10), 'Mia');
+    n.emit(min(20), { type: 'startle', npc: a, object: 'rocking-chair', amount: 22, scream: false });
+    n.emit(min(25), { type: 'startle', npc: a, object: 'portrait', amount: 32, scream: true });
+    n.emit(min(30), ...drop(a, 40), { type: 'flee', npc: a });
+    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.portrait, clockAt(min(30), false)));
+    // 对照：现身那一下更大（60 > 54）→ saw you
+    const m = night();
+    const b = m.come(min(10), 'Theo');
+    m.emit(min(20), { type: 'startle', npc: b, object: 'rocking-chair', amount: 22, scream: false });
+    m.emit(min(25), { type: 'startle', npc: b, object: 'portrait', amount: 32, scream: true });
+    m.emit(min(30), ...drop(b, 60), { type: 'flee', npc: b });
+    expect(m.story(b)).toContain(R.sawYou(clockAt(min(30), false)));
+  });
+
+  test('先被衣柜吓到（30）、后来听见尖叫（12）才跑 → 还是衣柜；尖叫传染加起来更多（3 × 12）→ scream', () => {
     const n = night();
     const a = n.come(min(10), 'June');
     n.emit(min(20), { type: 'startle', npc: a, object: 'wardrobe', amount: 30, scream: true });
     n.emit(min(30), { type: 'startle', npc: a, object: null, amount: 12, scream: false }, { type: 'flee', npc: a });
-    expect(n.story(a)).toContain(R.scream(clockAt(min(30), false)));
+    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.wardrobe, clockAt(min(30), false)));
+    const b = n.come(min(40), 'Sam');
+    n.emit(min(42), { type: 'startle', npc: b, object: 'wardrobe', amount: 30, scream: true });
+    for (const t of [44, 46, 48]) n.emit(min(t), { type: 'startle', npc: b, object: null, amount: 12, scream: false });
+    n.emit(min(48), { type: 'flee', npc: b });
+    expect(n.story(b)).toContain(R.scream(clockAt(min(48), false)));
+  });
+
+  test('一样多时最近涨过的那一类算：床 20、后颈一凉 20 → cold breath；倒过来 → bed', () => {
+    const n = night();
+    const a = n.come(min(10), 'Ada');
+    n.emit(min(20), { type: 'startle', npc: a, object: 'bed', amount: 20, scream: false });
+    n.emit(min(25), { type: 'chill', npc: a, amount: 20, neck: true }, { type: 'startle', npc: a, object: GHOST_SOURCE, amount: 20, scream: false }, { type: 'flee', npc: a });
+    expect(n.story(a)).toContain(R.coldBreath(clockAt(min(25), false)));
+    const b = n.come(min(30), 'Leo');
+    n.emit(min(35), { type: 'chill', npc: b, amount: 20, neck: true }, { type: 'startle', npc: b, object: GHOST_SOURCE, amount: 20, scream: false });
+    n.emit(min(40), { type: 'startle', npc: b, object: 'bed', amount: 20, scream: false }, { type: 'flee', npc: b });
+    expect(n.story(b)).toContain(R.ranFrom(STRINGS.propName.bed, clockAt(min(40), false)));
+  });
+
+  test('同一步里先现身（30）、再后颈一凉（18）：两笔各记各的（后颈一凉那个 GHOST_SOURCE startle 不重复加）→ saw you', () => {
+    const n = night();
     const b = n.come(min(40), 'Felix');
     n.emit(
       min(50),
-      { type: 'manifest', phase: 'drop', pos: { x: 8, z: 9.5 }, scared: [b] },
-      { type: 'startle', npc: b, object: GHOST_SOURCE, amount: 30, scream: true },
+      ...drop(b, 30),
       { type: 'chill', npc: b, amount: 18, neck: true },
       { type: 'startle', npc: b, object: GHOST_SOURCE, amount: 18, scream: false },
       { type: 'flee', npc: b },
     );
-    expect(n.story(b)).toContain(R.coldBreath(clockAt(min(50), false)));
+    expect(n.story(b)).toContain(R.sawYou(clockAt(min(50), false)));
+    // 后颈一凉（18）只算一次：再加一次现身以外的 13 就够超过它（18 + 13 > 30 才会变）
+    const c = n.come(min(60), 'Iris');
+    n.emit(min(70), ...drop(c, 30), { type: 'chill', npc: c, amount: 18, neck: true }, { type: 'startle', npc: c, object: GHOST_SOURCE, amount: 18, scream: false });
+    n.emit(min(72), { type: 'chill', npc: c, amount: 11, neck: false }, { type: 'flee', npc: c });
+    expect(n.story(c)).toContain(R.sawYou(clockAt(min(72), false)));
+  });
+
+  test('引诱类的 heard 按事件里的 amount 算进那件物件；手写的没有 amount 时按物件的基础恐惧值（SCARES）', () => {
+    const n = night();
+    const a = n.come(min(10), 'Nora');
+    // 厨房门 3 次各 10（30）比一次尖叫 25 多
+    for (const t of [20, 30, 40]) n.emit(min(t), { type: 'trigger', object: 'kitchen-door', scareType: 'door' }, { type: 'heard', npc: a, object: 'kitchen-door', amount: 10 });
+    n.emit(min(41), { type: 'startle', npc: a, object: null, amount: 25, scream: false }, { type: 'flee', npc: a });
+    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.door, clockAt(min(41), false)));
+    // 没有 amount：八音盒按 SCARES.musicBox.fear（4）算，比尖叫 7 少
+    const b = n.come(min(50), 'Otis');
+    n.emit(min(55), { type: 'heard', npc: b, object: 'music-box' });
+    n.emit(min(56), { type: 'startle', npc: b, object: null, amount: 7, scream: false }, { type: 'flee', npc: b });
+    expect(n.story(b)).toContain(R.scream(clockAt(min(56), false)));
+  });
+
+  test('同一件物件，机关发作的和自己附身的分开算，哪一笔多写哪一种', () => {
+    const n = night();
+    const a = n.come(min(10), 'Hugo');
+    n.emit(min(20), { type: 'trap', object: 'wardrobe', phase: 'sprung' }, { type: 'trigger', object: 'wardrobe', scareType: 'wardrobe' });
+    n.emit(min(21), { type: 'startle', npc: a, object: 'wardrobe', amount: 30, scream: true });
+    n.emit(min(60), { type: 'trigger', object: 'wardrobe', scareType: 'wardrobe' });
+    n.emit(min(61), { type: 'startle', npc: a, object: 'wardrobe', amount: 15, scream: false }, { type: 'flee', npc: a });
+    expect(n.story(a)).toContain(R.trap(STRINGS.propName.wardrobe, clockAt(min(61), false)));
   });
 
   test('逃跑那一刻就定下来：之后的事件（别人的尖叫之类）不改，exit 也不改钟点', () => {
@@ -419,6 +500,59 @@ describe('页脚：两三句，挑最有意思的', () => {
   test('没人来过：页脚是空的', () => {
     const n = night();
     expect(n.page()).toMatchObject({ lines: [], others: '', footer: [] });
+  });
+});
+
+describe('收夜那一页的评语（页脚第一句，2026-10-30 路 GP）：按这一夜吓跑的比例，克制，不打分', () => {
+  const V = R.verdict;
+
+  test('verdictOf：全跑了 / 至少一半 / 有人跑、不到一半 / 一个没跑；没人来过不写', () => {
+    expect(verdictOf(5, 5)).toBe(V.all);
+    expect(verdictOf(1, 1)).toBe(V.all);
+    expect(verdictOf(4, 5)).toBe(V.most);
+    expect(verdictOf(3, 6)).toBe(V.most);
+    expect(verdictOf(2, 6)).toBe(V.few);
+    expect(verdictOf(1, 8)).toBe(V.few);
+    expect(verdictOf(0, 6)).toBe(V.none);
+    expect(verdictOf(0, 0)).toBeNull();
+    // 文案：用户给的那几句，一句话、没有数字、没有感叹号
+    expect(V.all).toBe('Word will spread about this house.');
+    expect(V.most).toBe('Some of them will not come back.');
+    expect(V.none).toBe('They will say the house is only old.');
+    for (const line of Object.values(V)) expect(line).toMatch(/^[A-Z][^!0-9]*\.$/);
+  });
+
+  test('收夜那一页（closing）页脚第一句是评语，后面照旧；中途翻开（不给 closing）不写', () => {
+    const n = night();
+    const [a, b, c, d] = ['Ada', 'Leo', 'Mia', 'Sam'].map((name, i) => n.come(min(2 + 4 * i), name));
+    n.scare(min(40), a, 'portrait');
+    n.out(min(42), a);
+    n.scare(min(60), b, 'bed');
+    n.out(min(62), b);
+    n.scare(min(80), c, 'bed');
+    n.out(min(82), c);
+    n.out(NIGHT.dawn + min(3), d, true);
+    const mid = n.reg.page(n.state.time, 99);
+    expect(mid.footer[0]).toBe(F.cameRan('Four', 'Three'));
+    const closing = n.reg.page(n.state.time, 99, { closing: true });
+    expect(closing.footer[0]).toBe(R.verdict.most);
+    expect(closing.footer.slice(1)).toEqual(mid.footer);
+  });
+
+  test('评语不占页脚的句数：closing 时最多 REGISTER.footer + 1 句；一个没跑也写（They will say…），没人来过整个页脚是空的', () => {
+    const n = night();
+    const ids = Array.from({ length: 6 }, (_, i) => n.come(min(2 + 4 * i), `V${i + 1}`));
+    n.emit(min(30), { type: 'manifest', phase: 'drop', pos: { x: 8, z: 9.5 }, scared: [ids[0]] });
+    ids.slice(0, 3).forEach((id, i) => n.scare(min(40 + i), id, 'wardrobe'));
+    ids.slice(3).forEach((id, i) => n.out(NIGHT.dawn + min(i), id, true));
+    const p = n.reg.page(n.state.time, 99, { closing: true });
+    expect(p.footer[0]).toBe(R.verdict.most);
+    expect(p.footer.length).toBe(REGISTER.footer + 1);
+    const quiet = night();
+    const q = quiet.come(min(2), 'Gus', 'brave');
+    quiet.out(NIGHT.dawn + min(2), q, true);
+    expect(quiet.reg.page(quiet.state.time, 99, { closing: true }).footer[0]).toBe(R.verdict.none);
+    expect(night().reg.page(0, 99, { closing: true }).footer).toEqual([]);
   });
 });
 

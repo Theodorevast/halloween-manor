@@ -172,7 +172,8 @@ export function createRegisterView(root: HTMLElement, opts: RegisterViewOptions 
 
   // ── 翻开、合上 ─────────────────────────────────────
   function render() {
-    const p = reg.page(now);
+    // 收夜那一页：页脚第一句是评语（register.ts 的 verdictOf）；中途翻开的不写
+    const p = reg.page(now, undefined, { closing });
     list.replaceChildren(...p.lines.map(entry), ...(p.others ? [el('li', 'rg-others', p.others)] : []));
     foot.replaceChildren();
     if (p.footer.length) {

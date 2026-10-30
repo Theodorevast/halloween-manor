@@ -150,7 +150,7 @@ describe('机关：三种触发', () => {
     const { ev, before } = stepUntil(w, sprung('music-box'), 10);
     expect(ofType(before, 'heard')).toEqual([]);
     expect(ofType(ev, 'trigger').map((e) => e.object)).toEqual(['music-box']);
-    expect(ofType(ev, 'heard')).toEqual([{ type: 'heard', npc: n.id, object: 'music-box' }]);
+    expect(ofType(ev, 'heard')).toEqual([{ type: 'heard', npc: n.id, object: 'music-box', amount: expect.closeTo(SCARES.musicBox.fear * TRAP.fearMult, 9) }]);
     expect(n.fear).toBeCloseTo(SCARES.musicBox.fear * TRAP.fearMult, 9);
     expect(n.notice?.kind).toBe('sound');
   });

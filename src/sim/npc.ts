@@ -12,17 +12,21 @@
 // 鬼魂穿墙的声音也听得见（hearGhost）。
 // 主动现身（设计文档 3.2，world.ts 结算）：蓄力时被定住盯着（transfixPos），被吓到的人僵住结束后后退（retreat），
 // 之后一段时间寻路绕开那里（NpcCtx.avoid 里 who 有他的圈，圆里的格子代价高），闲逛也不挑那里的目标；没看见的人照常走
+// 2026-10-30 用户试玩以后（路 GP）：
+// - 被引诱的人走到声源旁以后，先盯着声源，再用手电把四周扫一圈，扫过看得见的惊吓物件时停一下（SCAN，见 startInvestigate）
+// - 收夜以后更容易被吓（WorldOptions.late）：world.ts 在 NpcCtx 里给 gain / decay，涨的每一下乘 gain（boost），回落乘 decay
 import { CELL, cellCenter, cellOf, FRONT_DOOR, GRID_H, idx, inGrid, ROOMS, roomAt, Tile } from '../config/house';
 import type { RoomId } from '../config/house';
-import { BEHAVIOR, CROWD, FEAR, GHOST, MOTION, NOTICE, PERSONALITIES, SPEED, TRAITS } from '../config/visitors';
+import { SCARES } from '../config/scares';
+import { BEHAVIOR, CROWD, FEAR, GHOST, MOTION, NOTICE, PERSONALITIES, SCAN, SPEED, TRAITS, VISION } from '../config/visitors';
 import { angleOf, wrapAngle } from '../lib/angle';
 import { Grid } from './grid';
 import { findPath, inZones } from './pathfind';
 import type { Rng } from './rng';
-import { windingUp } from './scares';
+import { facesToward, windingUp } from './scares';
 import type { ScareObject } from './scares';
 import { GHOST_SOURCE } from './types';
-import type { AvoidZone, NoticeKind, NpcState, Personality, ScareType, SimEvent, Vec2 } from './types';
+import type { AvoidZone, NoticeKind, NpcState, Personality, ScareObjectState, ScareType, SimEvent, Vec2 } from './types';
 
 // 以下几个手电摆动幅度是计划里给的定值（config 里没有），集中放在这里方便调
 /** 走路时手电在身体朝向两侧的小幅摆动（弧度），周期用 BEHAVIOR.sweepPeriod */
@@ -129,7 +133,18 @@ export interface NpcCtx {
    * 每个圈只管 who 里的人（被那一次现身吓到的）。可选只是为了测试里手写的沙盒；不给就是没有
    */
   avoid?: readonly AvoidZone[];
+  /** 屋里的物件（WorldState.objects）：被引诱的人查看时扫一圈，在看得见的惊吓物件上停一下（SCAN）。不给就是没有物件 */
+  props?: readonly ScareObjectState[];
+  /** 收夜以后（WorldOptions.late）：涨的每一下乘 gain、回落的速度乘 decay（见 boost、updateNpc）。不给就是 1 */
+  gain?: number;
+  decay?: number;
 }
+
+/**
+ * 这一下涨多少：amount × ctx.gain（收夜以后更容易被吓，WorldOptions.late；平常不给就是原数，一位不差）。
+ * 各处涨恐惧值之前先过它（物件、引诱、现身、尖叫传染、发毛、后颈一凉、穿墙声），事件里的 amount 也是过完的
+ */
+export const boost = (ctx: Pick<NpcCtx, 'gain'>, amount: number): number => (ctx.gain === undefined ? amount : amount * ctx.gain);
 
 /** 寻路要的那一点上下文：要绕开的圆和此刻的时间（都可以没有） */
 type PathCtx = Pick<NpcCtx, 'nav'> & Partial<Pick<NpcCtx, 'avoid' | 'now'>>;
@@ -183,6 +198,8 @@ export interface Npc {
   /** 逃跑：当前乱晃的目标偏角和保持时间 */
   jitter: number;
   jitterLeft: number;
+  /** 警觉查看（引诱以后）的手电时间表（见 scanPlan）：lookT 秒时手电指向哪里；不在查看时没用 */
+  scan: ScanFrame[] | null;
   /**
    * 被定住盯着的惊吓物件（它还在蓄势）：停下脚步、身体和手电转向它，路径和各种计时都暂停，
    * 惊吓落下后照常判定、照常恢复。不加恐惧值，NpcState 里只表现为 speed 0
@@ -259,6 +276,8 @@ export interface Npc {
   wallReadyAt: number;
   /** 天亮自己走出前门（leaving 走到了）：world.ts 发 exit 时带 calm、不算吓跑。逃跑出门的、还在屋里的都是 false */
   calm: boolean;
+  /** 最近一次查看的声源、开始查看的时刻（SCAN.again 秒内同一个地方再响，只回头看一眼，不再走过去）；没查看过为 null */
+  checked: { src: Vec2; at: number } | null;
 }
 
 export interface NpcInit {
@@ -305,6 +324,7 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     lastScareSrc: null,
     jitter: 0,
     jitterLeft: 0,
+    scan: null,
     transfixOn: null,
     transfixPos: null,
     pendingRetreat: null,
@@ -337,6 +357,7 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     litGhost: false,
     wallReadyAt: -Infinity,
     calm: false,
+    checked: null,
   };
   if (o.mode === 'entering') {
     const inside = { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z };
@@ -399,12 +420,12 @@ function addFear(npc: Npc, amount: number, now: number, scare = true) {
  * 受惊中再被吓：重新开始僵住，恢复目标不变。
  */
 export function startle(npc: Npc, ctx: NpcCtx, objectId: string, type: ScareType, objPos: Vec2, base: number): void {
-  startleWith(npc, ctx, objectId, exposure(npc, type, base, ctx.now), objPos);
+  startleWith(npc, ctx, objectId, boost(ctx, exposure(npc, type, base, ctx.now)), objPos);
   if (npc.s.mode === 'startled') npc.lastScareSrc = { x: objPos.x, z: objPos.z };
 }
 
 /**
- * startle 的后半段：已经算好这一下涨多少（后颈一凉先发 chill 再走这里）。
+ * startle 的后半段：已经算好这一下涨多少（后颈一凉先发 chill 再走这里；收夜以后的 boost 由调用方先乘好）。
  * 尖叫只留给吓破胆的时候（设计文档 2.4）：一次涨了 FEAR.screamAt 以上，或者这一下涨完到了 FEAR.dread（screamDread）
  */
 export function startleWith(npc: Npc, ctx: NpcCtx, objectId: string, amount: number, srcPos: Vec2): void {
@@ -457,14 +478,26 @@ function listen(npc: Npc, ctx: NpcCtx, amount: number, source: Vec2, event: SimE
     return;
   }
   if (leavingNow(npc)) return; // 天亮要走的人：恐惧值涨了，但不停下、不改道去查看
+  // 刚查看过这个地方（SCAN.again 秒内）：只回头看一眼，不再走过去
+  const again = checkedLately(npc, source, ctx.now);
   if (s.mode !== 'startled') {
     // 正在察觉更要紧的（现身蓄力）时不转过来，但声音记下了：那一拍完了照样去查看
     notice(npc, ctx, 'sound', source);
-    npc.afterNotice = { x: source.x, z: source.z };
+    if (!again) npc.afterNotice = { x: source.x, z: source.z };
     return;
   }
+  if (again) return;
   npc.resume ??= snapshot(npc);
   npc.resume.alertAt = { x: source.x, z: source.z };
+}
+
+/** 声源离上一次查看的地方不到这么远（米）就算同一个地方 */
+const SAME_SOURCE = 0.5;
+
+/** SCAN.again 秒内开始查看过 src 这个地方（见 Npc.checked） */
+function checkedLately(npc: Npc, src: Vec2, now: number): boolean {
+  const c = npc.checked;
+  return c !== null && now - c.at < SCAN.again && Math.hypot(c.src.x - src.x, c.src.z - src.z) < SAME_SOURCE;
 }
 
 // ——— 察觉那一拍 ———
@@ -599,7 +632,7 @@ export function feelGhost(npc: Npc, ctx: NpcCtx): void {
   if (npc.chillAcc > 0) {
     npc.chillT += dt;
     if (npc.chillT >= GHOST.chillEvery - 1e-9) {
-      const amount = npc.chillAcc;
+      const amount = boost(ctx, npc.chillAcc);
       npc.chillAcc = 0;
       npc.chillT = 0;
       if (canBeScared(npc)) {
@@ -625,7 +658,7 @@ export function feelGhost(npc: Npc, ctx: NpcCtx): void {
     if (npc.neckDwell >= GHOST.neckDwell - 1e-9) {
       npc.neckDwell = 0;
       npc.neckReadyAt = ctx.now + GHOST.neckCooldown;
-      const amount = exposure(npc, 'ghost', GHOST.neckFear, ctx.now);
+      const amount = boost(ctx, exposure(npc, 'ghost', GHOST.neckFear, ctx.now));
       ctx.events.push({ type: 'chill', npc: s.id, amount, neck: true });
       startleWith(npc, ctx, GHOST_SOURCE, amount, g);
       return;
@@ -663,7 +696,7 @@ export function hearGhost(npc: Npc, ctx: NpcCtx, amount: number, src: Vec2): voi
 export function hearGhostWall(npc: Npc, ctx: NpcCtx, src: Vec2): boolean {
   if (ctx.now < npc.wallReadyAt - 1e-9) return false;
   npc.wallReadyAt = ctx.now + GHOST.hearCooldown;
-  hearGhost(npc, ctx, exposure(npc, 'ghostWall', GHOST.hearFear, ctx.now), src);
+  hearGhost(npc, ctx, boost(ctx, exposure(npc, 'ghostWall', GHOST.hearFear, ctx.now)), src);
   return true;
 }
 
@@ -737,8 +770,10 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
   if (canBeScared(npc)) {
     // 正常只会在被吓时涨满；这里兜底（调试时直接改了恐惧值）。要在回落之前判断
     if (s.fear >= FEAR.max) beginFlee(npc, ctx);
-    // 连续 decayDelay 秒没被吓才开始回落；逃跑中不回落
-    else if (s.fear > 0 && ctx.now - npc.lastScare >= FEAR.decayDelay) s.fear = Math.max(0, s.fear - FEAR.decayRate * dt);
+    // 连续 decayDelay 秒没被吓才开始回落；逃跑中不回落。收夜以后（WorldOptions.late）回落得慢一点
+    else if (s.fear > 0 && ctx.now - npc.lastScare >= FEAR.decayDelay) {
+      s.fear = Math.max(0, s.fear - (ctx.decay === undefined ? FEAR.decayRate : FEAR.decayRate * ctx.decay) * dt);
+    }
   }
   s.nervous = s.fear >= FEAR.nervous;
 
@@ -800,15 +835,17 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
       if (npc.act === 'walk') {
         const r = walk(npc, ctx, SPEED.alert, true);
         lookToward(npc, dt, toSrc);
-        if (r === 'arrived') startInvestigate(npc);
+        if (r === 'arrived') startInvestigate(npc, ctx);
         else if (r === 'stuck') unstick(npc, ctx);
       } else {
+        // 查看：照时间表扫一圈（SCAN），身体跟着手电转；扫完回到闲逛
         stand(npc, ctx);
         npc.lookT += dt;
         npc.lookLeft -= dt;
         npc.noticeHome = null;
-        s.heading = turnToward(s.heading, toSrc, BEHAVIOR.turnRate * dt);
-        lookToward(npc, dt, toSrc + BEHAVIOR.investigateSweep * Math.sin((TAU * npc.lookT) / BEHAVIOR.sweepPeriod));
+        const want = npc.scan ? scanAt(npc.scan, npc.lookT) : toSrc;
+        s.heading = turnToward(s.heading, want, BEHAVIOR.turnRate * dt);
+        lookToward(npc, dt, want);
         if (npc.lookLeft <= 0) beginWander(npc, ctx);
       }
       break;
@@ -955,7 +992,7 @@ function resumeEntering(npc: Npc, ctx: NpcCtx, goal: Vec2): boolean {
   return true;
 }
 
-/** 警觉：按 alertPath 走过去（走到多近看性格：TRAITS.investigateDist）；已经在查看位置或寻路失败就原地查看 */
+/** 警觉：按 alertPath 走过去（走到多近看 investigateDist：按性格，门要站进门洞）；已经在查看位置或寻路失败就原地查看 */
 function beginAlert(npc: Npc, ctx: NpcCtx, source: Vec2) {
   const s = npc.s;
   s.mode = 'alert';
@@ -963,15 +1000,24 @@ function beginAlert(npc: Npc, ctx: NpcCtx, source: Vec2) {
   npc.source = { x: source.x, z: source.z };
   npc.retreatFrom = null;
   npc.afterRetreat = null; // 新听到的声音（或者接着查看的那一个）就是现在的目标
-  const path = alertPath(ctx.nav.grid, s.pos, source, TRAITS[s.personality].investigateDist, zonesOf(npc, ctx), ctx.now);
+  const path = alertPath(ctx.nav.grid, s.pos, source, investigateDist(s.personality, source, ctx.props), zonesOf(npc, ctx), ctx.now);
   if (path && path.length > 0) {
     setPath(npc, path);
     npc.act = 'walk';
-  } else startInvestigate(npc);
+  } else startInvestigate(npc, ctx);
 }
 
 /** 查看位置的采样间隔（米） */
 const ALERT_SAMPLE = 0.1;
+
+/**
+ * 警觉时走到离声源多近停下查看：按性格（TRAITS.investigateDist）；声源是门（props 里同一个位置的 door，厨房门）时站进门洞（SCAN.doorway），
+ * 往门里看得见。机器人（tests/bots.ts）预测「引过去以后会看见哪件」也用它
+ */
+export function investigateDist(personality: Personality, source: Vec2, props: readonly ScareObjectState[] = []): number {
+  const door = props.some((o) => o.type === 'door' && Math.abs(o.pos.x - source.x) < 1e-6 && Math.abs(o.pos.z - source.z) < 1e-6);
+  return door ? SCAN.doorway : TRAITS[personality].investigateDist;
+}
 
 /**
  * 警觉的路线（不含起点）：朝声源旁最近的可走格（一样近时挑自己这一侧的）走，
@@ -1000,12 +1046,78 @@ export function alertPath(grid: Grid, from: Vec2, source: Vec2, dist: number, av
   return path;
 }
 
-/** 警觉到达后：停 BEHAVIOR.investigate 秒，手电在声源方向两侧扫 */
-function startInvestigate(npc: Npc) {
-  npc.s.path = [];
+/**
+ * 警觉到达后：查看（SCAN，2026-10-30 路 GP）——先盯着声源 SCAN.glance 秒，再用手电把四周扫一圈，
+ * 扫过站在这里看得见的惊吓物件（scanStops）时停 SCAN.hold 秒，扫完回到闲逛（时间表见 scanPlan，查看多久就是它的最后一帧）。
+ * 记下查看的是哪里（checked）：SCAN.again 秒内那里再响，只回头看一眼
+ */
+function startInvestigate(npc: Npc, ctx: NpcCtx) {
+  const s = npc.s;
+  s.path = [];
   npc.act = 'look';
   npc.lookT = 0;
-  npc.lookLeft = BEHAVIOR.investigate;
+  const base = (npc.source && bearing(s.pos, npc.source)) ?? s.lookDir;
+  const stops = scanStops(ctx.nav.grid, s.pos, ctx.props ?? []).map((o) => angleOf(o.pos.x - s.pos.x, o.pos.z - s.pos.z));
+  npc.scan = scanPlan(base, stops);
+  npc.lookLeft = npc.scan[npc.scan.length - 1].t;
+  if (npc.source) npc.checked = { src: { x: npc.source.x, z: npc.source.z }, at: ctx.now };
+}
+
+/** 查看的手电时间表的一帧：t 秒（从查看开始算）时手电指向 a（弧度，扫一圈时连续累加、不折回 ±π）；两帧之间线性 */
+export interface ScanFrame { t: number; a: number }
+
+/**
+ * 站在 pos 扫一圈时会停下来看的惊吓物件：和 seenBy（眼睛图标）同一条规则，只是不看光锥（扫的时候手电会转过去）——
+ * 惊吓类、正面朝着他（肖像、镜子）、距离 ≤ min(物件的 range, VISION.range)、有视线。
+ * 机器人（tests/bots.ts）预测「引过去以后会看见哪件」也用它
+ */
+export function scanStops(grid: Grid, pos: Vec2, props: readonly ScareObjectState[]): ScareObjectState[] {
+  return props.filter((o) => {
+    const spec = SCARES[o.type];
+    if (spec.kind !== 'sight' || !facesToward(o, pos)) return false;
+    const r = Math.min(spec.range, VISION.range);
+    return (o.pos.x - pos.x) ** 2 + (o.pos.z - pos.z) ** 2 <= r * r && grid.lineOfSight(pos, o.pos);
+  });
+}
+
+/** 两件物件的方向差不到这么多（弧度）就只停一次：手电一停两件都照得到 */
+const SCAN_MERGE = 0.15;
+
+/**
+ * 扫一圈的时间表：base（声源方向）先盯 SCAN.glance 秒，再往离声源方向最近的那件物件那边（没有物件时往正方向）转一整圈，
+ * 每秒 SCAN.turn 弧度，转到 stops（各件物件的方向）时停 SCAN.hold 秒，转回 base 结束
+ */
+export function scanPlan(base: number, stops: readonly number[]): ScanFrame[] {
+  const rel = stops.map((a) => wrapAngle(a - base));
+  let dir = 1;
+  if (rel.length > 0) dir = rel.reduce((m, r) => (Math.abs(r) < Math.abs(m) ? r : m)) < 0 ? -1 : 1;
+  const along = rel.map((r) => (r * dir < 0 ? r * dir + TAU : r * dir)).sort((x, y) => x - y);
+  const frames: ScanFrame[] = [{ t: 0, a: base }, { t: SCAN.glance, a: base }];
+  let t = SCAN.glance, cur = 0, stopped = false;
+  for (const x of along) {
+    if (stopped && x - cur < SCAN_MERGE) continue;
+    t += (x - cur) / SCAN.turn;
+    frames.push({ t, a: base + dir * x });
+    t += SCAN.hold;
+    frames.push({ t, a: base + dir * x });
+    cur = x;
+    stopped = true;
+  }
+  t += (TAU - cur) / SCAN.turn;
+  frames.push({ t, a: base + dir * TAU });
+  return frames;
+}
+
+/** 时间表在 t 秒时手电要指的方向（超出两头就停在两头） */
+export function scanAt(frames: readonly ScanFrame[], t: number): number {
+  if (t <= frames[0].t) return frames[0].a;
+  for (let k = 1; k < frames.length; k++) {
+    const f = frames[k];
+    if (t > f.t) continue;
+    const p = frames[k - 1], span = f.t - p.t;
+    return span < 1e-9 ? f.a : p.a + ((f.a - p.a) * (t - p.t)) / span;
+  }
+  return frames[frames.length - 1].a;
 }
 
 /** 逃跑：寻路到前门两格中间，再直线走到门外；还在门外（进门途中）就直接回头 */
@@ -1655,13 +1767,13 @@ function unstick(npc: Npc, ctx: NpcCtx): void {
   if (s.mode !== 'fleeing' && remaining(s.pos.x, s.pos.z, s.path) <= CROWD.closeEnough) {
     s.path = [];
     if (s.mode === 'wander') lookAround(npc, ctx);
-    else if (s.mode === 'alert') startInvestigate(npc);
+    else if (s.mode === 'alert') startInvestigate(npc, ctx);
     else if (s.mode === 'entering') beginWander(npc, ctx);
     return;
   }
   if (replan(npc, ctx)) return;
   if (s.mode === 'wander') moveOn(npc, ctx);
-  else if (s.mode === 'alert') startInvestigate(npc);
+  else if (s.mode === 'alert') startInvestigate(npc, ctx);
 }
 
 /** 绕开身边的人重新寻路到原来的终点（逃跑、天亮出门：先到前门两格中间再出门）。在门外那一段、或者绕不开时返回 false */

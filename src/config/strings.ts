@@ -184,6 +184,16 @@ export const STRINGS = {
     ] as readonly string[],
     /** 钟点后面的上午 / 下午（register.ts 的 clockAt；registerView.ts 折行时把钟点和它粘在一起） */
     meridiem: { am: 'am', pm: 'pm' },
+    /**
+     * 收夜那一页页脚的第一句（2026-10-30 路 GP）：按这一夜吓跑的比例给一句克制的话，不打分、不评级、不写数字。
+     * all 全吓跑了；most 至少一半；few 有人跑、不到一半；none 一个都没跑
+     */
+    verdict: {
+      all: 'Word will spread about this house.',
+      most: 'Some of them will not come back.',
+      few: 'Most of them will sleep tonight.',
+      none: 'They will say the house is only old.',
+    },
     /** 页脚两三句：数字用英文单词写在句子里，不做大号数字、不做表格、不打分 */
     footer: {
       cameRan: (came: string, ran: string) => `${came} came in. ${ran} ran.`,

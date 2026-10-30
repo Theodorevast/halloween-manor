@@ -1,6 +1,7 @@
 // 手电照出鬼魂（设计文档 3.1）：访客的手电照到鬼魂只显形、不吓人——发 reveal（on / off）、愣一下（察觉 kind ghost），恐惧值不涨。
-// 主动现身（设计文档 3.2，config/visitors.ts 的 MANIFEST）：蓄力 → 落下 → 停留 → 收回 → 冷却的时间轴；蓄力时附近的人察觉；
-// 落下只吓看得见的人、吓多少；被吓的人后退、之后一段时间绕开那里
+// 主动现身（设计文档 3.2，config/visitors.ts 的 MANIFEST）：蓄力 → 落下 → 停留 → 收回 → 冷却的时间轴；
+// 蓄力时谁察觉、转过来（2026-10-30 路 GP：只有手电照着那里的、已经紧张又看得见那里的人）；
+// 落下只吓看得见的人、吓多少（按恐惧值加成）；被吓的人后退、之后一段时间绕开那里
 import { describe, expect, test } from 'vitest';
 import { createWorld } from '../src/sim/world';
 import { Grid } from '../src/sim/grid';
@@ -8,6 +9,7 @@ import { createNav, createNpc, walkTo } from '../src/sim/npc';
 import type { NpcCtx } from '../src/sim/npc';
 import { findPath } from '../src/sim/pathfind';
 import { createRng } from '../src/sim/rng';
+import { primedBy } from '../src/sim/manifest';
 import { cellCenter, cellOf, FRONT_DOOR } from '../src/config/house';
 import { BEHAVIOR, FEAR, MANIFEST, PERSONALITIES, TRAITS, VISION } from '../src/config/visitors';
 import { angleOf, wrapAngle } from '../src/lib/angle';
@@ -134,21 +136,68 @@ describe('主动现身（吓人、赶人）', () => {
     expect(w.manifest()).toBe(true);
   });
 
-  test('蓄力：MANIFEST.noticeRadius 米内的人察觉（kind manifest），手电很快对着那里，一直盯到落下；更远的不察觉', () => {
+  test('蓄力（2026-10-30 路 GP，critic F-1）：手电照着那里的人、已经紧张（恐惧值 ≥ FEAR.nervous）又看得见那里的人察觉，转过来盯到落下；平静又背对着的人不转身，隔着墙的人再紧张也不转', () => {
     const w = createWorld({ seed: 101, autoSpawn: false });
-    const near = w.spawn({ pos: { x: G.x + 2, z: G.z }, personality: 'average', lookDir: 0 }); // 2 米，背对着
-    const far = w.spawn({ pos: { x: G.x, z: G.z - 6.5 }, personality: 'average', lookDir: -Math.PI / 2 }); // 客厅里，6.5 米
+    const lit = w.spawn({ pos: { x: G.x - 2, z: G.z }, personality: 'average', lookDir: 0 }); // 2 米，手电照着那里
+    const calm = w.spawn({ pos: { x: G.x + 2, z: G.z }, personality: 'average', lookDir: 0 }); // 2 米，背对着，平静
+    const jumpy = w.spawn({ pos: { x: G.x, z: G.z + 1.5 }, personality: 'average', lookDir: Math.PI / 2 }); // 1.5 米，背对着，已经紧张
+    const walled = w.spawn({ pos: { x: G.x - 3.5, z: G.z }, personality: 'timid', lookDir: Math.PI }); // 卧室里，隔着门厅西墙
+    const far = w.spawn({ pos: { x: G.x, z: G.z - 6.5 }, personality: 'average', lookDir: -Math.PI / 2 }); // 客厅里，6.5 米，背对着
+    jumpy.fear = FEAR.nervous + 5;
+    walled.fear = 80;
+    far.fear = 80;
+    const grid = new Grid();
+    expect(grid.lineOfSight(jumpy.pos, G)).toBe(true);
+    expect(grid.lineOfSight(walled.pos, G)).toBe(false);
+    expect(dist(far.pos, G)).toBeGreaterThan(MANIFEST.noticeRadius);
     w.setGhost(G);
     w.manifest();
     const ev = w.step(DT);
-    expect(ofType(ev, 'notice')).toEqual([{ type: 'notice', npc: near.id, kind: 'manifest', src: G }]);
-    expect(far.notice ?? null).toBeNull();
+    expect(ofType(ev, 'notice').filter((e) => e.kind === 'manifest').map((e) => e.npc).sort()).toEqual([lit.id, jumpy.id].sort());
+    for (const n of [calm, walled, far]) expect(n.notice?.kind).not.toBe('manifest');
     for (let k = 0; k < Math.round(0.35 / DT); k++) w.step(DT);
-    expect(Math.abs(wrapAngle(near.lookDir - bearingTo(near.pos, G)))).toBeLessThan(0.1);
-    expect(near.speed).toBeLessThan(0.05);
-    // 落下前一步还在察觉
+    // 紧张的人手电很快对着那里、停住脚
+    expect(Math.abs(wrapAngle(jumpy.lookDir - bearingTo(jumpy.pos, G)))).toBeLessThan(0.1);
+    expect(jumpy.speed).toBeLessThan(0.05);
+    // 落下前一步还在察觉；落下时吓到的就是这两个
     for (let k = 0; k < Math.round((MANIFEST.windup - 0.35) / DT) - 2; k++) w.step(DT);
-    expect(near.notice?.kind).toBe('manifest');
+    expect(jumpy.notice?.kind).toBe('manifest');
+    const { ev: rest } = until(w, 'drop');
+    expect(ofType(rest, 'manifest').find((e) => e.phase === 'drop')!.scared.sort()).toEqual([lit.id, jumpy.id].sort());
+  });
+
+  test('原来「5 米内不管朝哪、隔不隔墙都转过来」的摆法（critic：站在 June 背后 123° 按 F 照样吓到）：平静的人背对着鬼魂，现身吓不到他', () => {
+    const w = createWorld({ seed: 111, autoSpawn: false });
+    const p = { x: G.x + 1.2, z: G.z + 0.8 };
+    // 他背对着现身的地方偏 123°
+    const june = w.spawn({ pos: p, personality: 'average', lookDir: bearingTo(p, G) + (123 * Math.PI) / 180 });
+    w.setGhost(G);
+    expect(w.manifest()).toBe(true);
+    const { ev } = until(w, 'drop', () => void (june.lookDir = bearingTo(p, G) + (123 * Math.PI) / 180));
+    expect(ofType(ev, 'notice').filter((e) => e.kind === 'manifest')).toEqual([]);
+    expect(ofType(ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([]);
+    expect(june.fear).toBe(0);
+  });
+
+  test('吓多少按此刻的恐惧值加成（MANIFEST.primed）：同一个位置、同一个朝向，恐惧值 60 的人这一下是平静时的 primedBy(60) / primedBy(0) 倍', () => {
+    const amount = (fear: number) => {
+      const w = createWorld({ seed: 112, autoSpawn: false });
+      const pos = { x: G.x - 2, z: G.z };
+      const n = w.spawn({ pos, personality: 'average', lookDir: bearingTo(pos, G) });
+      n.fear = fear;
+      w.setGhost(G);
+      w.manifest();
+      const { ev } = until(w, 'drop', () => void (n.lookDir = bearingTo(n.pos, G)));
+      return ofType(ev, 'startle').find((e) => e.npc === n.id && e.object === GHOST_SOURCE)!.amount;
+    };
+    expect(primedBy(0)).toBeCloseTo(MANIFEST.primed[0], 9);
+    expect(primedBy(FEAR.max)).toBeCloseTo(MANIFEST.primed[1], 9);
+    expect(primedBy(60)).toBeCloseTo(MANIFEST.primed[0] + 0.6 * (MANIFEST.primed[1] - MANIFEST.primed[0]), 9);
+    const calm = amount(0), primed = amount(60);
+    expect(primed / calm).toBeCloseTo(primedBy(60) / primedBy(0), 6);
+    // 平静时只是倒吸一口气（不到尖叫的 FEAR.screamAt），被吓到 60 以后这一下够尖叫
+    expect(calm).toBeLessThan(FEAR.screamAt);
+    expect(primed).toBeGreaterThanOrEqual(FEAR.screamAt);
   });
 
   /** 把这些人的手电按住（每步之前）：dir 返回要照的方向 */
@@ -182,7 +231,7 @@ describe('主动现身（吓人、赶人）', () => {
     expect(ofType(r2.ev, 'manifest').find((e) => e.phase === 'drop')!.scared).toEqual([d.id]);
   });
 
-  test('吓多少：1 米、光锥正中、在他的手电光里的 average = fear × 1.3 × 1.2 × 1.25；6 米、光锥边上（只是隐约看见）= fear × 0.6 × 0.9', () => {
+  test('吓多少（恐惧值 0 的人）：1 米、光锥正中、在他的手电光里的 average = fear × 1.3 × 1.2 × 1.25 × primed[0]；6 米、光锥边上（只是隐约看见）= fear × 0.6 × 0.9 × primed[0]', () => {
     const amount = (pos: Vec2, dir: (n: NpcState) => number) => {
       const w = createWorld({ seed: 103, autoSpawn: false });
       const n = w.spawn({ pos, personality: 'average', lookDir: bearingTo(pos, G) });
@@ -196,9 +245,9 @@ describe('主动现身（吓人、赶人）', () => {
     expect(PERSONALITIES.average.fearMult).toBe(1);
     // 容差按要的值的 2% 算（最终审查 S M9）：MANIFEST.fear 看样时还要调（20 / 30），绝对容差会跟着变松或变紧
     const near = (got: number, want: number) => expect(Math.abs(got - want)).toBeLessThanOrEqual(0.02 * want);
-    near(amount({ x: G.x - 1, z: G.z }, (n) => bearingTo(n.pos, G)), MANIFEST.fear * 1.3 * 1.2 * 1.25);
+    near(amount({ x: G.x - 1, z: G.z }, (n) => bearingTo(n.pos, G)), MANIFEST.fear * 1.3 * 1.2 * 1.25 * MANIFEST.primed[0]);
     const far = { x: G.x, z: G.z - 5.99 };
-    near(amount(far, (n) => bearingTo(n.pos, G) + VISION.halfAngle - 0.002), MANIFEST.fear * 0.6 * 0.9);
+    near(amount(far, (n) => bearingTo(n.pos, G) + VISION.halfAngle - 0.002), MANIFEST.fear * 0.6 * 0.9 * MANIFEST.primed[0]);
   });
 
   test('停留期间走进视线的人被定住（最终审查 S M6）：蓄力时在 noticeRadius 外没察觉、落下时在 range 外没被吓到，停留中走近看见了就停住盯着（speed 0、不挪），到 end 那一步放开接着走', () => {
@@ -430,9 +479,11 @@ describe('主动现身（吓人、赶人）', () => {
 
   test('进门途中被现身吓到：僵住完后退、照完，接着进门——走到门厅里进门后的位置，再开始闲逛（最终审查 S M7a）', () => {
     const w = createWorld({ seed: 108, autoSpawn: false });
-    // 调试位：放在走廊里、状态 entering（进门路线寻路走到门厅里进门后的位置）。现身在他身后 1 米（走廊北边），
-    // 他察觉、回头，被吓到，往南退：进门后的位置离那里 5 米多，在绕开圈外
+    // 调试位：放在走廊里、状态 entering（进门路线寻路走到门厅里进门后的位置）。现身在他身后 1 米（走廊北边）；
+    // 他已经紧张（恐惧值过了 FEAR.nervous，2026-10-30 起平静的人背后现身不回头），察觉、回头，被吓到，往南退：
+    // 进门后的位置离那里 5 米多，在绕开圈外
     const n = w.spawn({ pos: { x: 8, z: 6.0 }, mode: 'entering', personality: 'brave' });
+    n.fear = FEAR.nervous + 10;
     expect(n.path.at(-1)).toEqual(FRONT_DOOR.inside);
     for (let k = 0; k < 20; k++) w.step(DT);
     const spot = { x: n.pos.x, z: n.pos.z - 1.0 };

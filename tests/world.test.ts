@@ -3,12 +3,12 @@ import { createWorld } from '../src/sim/world';
 import { createRng } from '../src/sim/rng';
 import { Spawner, pickName } from '../src/sim/spawner';
 import { Grid } from '../src/sim/grid';
-import { createNav, createNpc, exposure, startle } from '../src/sim/npc';
+import { alertPath, createNav, createNpc, exposure, scanStops, startle } from '../src/sim/npc';
 import type { Npc, NpcCtx } from '../src/sim/npc';
 import { facesToward } from '../src/sim/scares';
 import { cellCenter, cellOf, FRONT_DOOR, inGrid, PROPS, propCenter } from '../src/config/house';
 import { SCARES } from '../src/config/scares';
-import { BEHAVIOR, FEAR, HIT_STOP, NAMES, NOTICE, PERSONALITIES, SPAWN, SPEED, TRAITS } from '../src/config/visitors';
+import { BEHAVIOR, FEAR, HIT_STOP, NAMES, NOTICE, PERSONALITIES, SCAN, SPAWN, SPEED, TRAITS } from '../src/config/visitors';
 import { angleOf, wrapAngle } from '../src/lib/angle';
 import type { NpcState, Personality, SimEvent, Vec2, World } from '../src/sim/types';
 
@@ -460,7 +460,8 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     expect(w.trigger('music-box')).toBe(true);
     // 先察觉那一拍（停下盯着声源），盯完才转入警觉：等待时间加上最长的那一拍
     const ev = w.step(0.1 + NOTICE.hold[1] * 1.5);
-    expect(ofType(ev, 'heard')).toEqual([{ type: 'heard', npc: a.id, object: 'music-box' }]);
+    // amount：这一下涨的恐惧值（登记簿按它算「哪一类来源涨得最多」）
+    expect(ofType(ev, 'heard')).toEqual([{ type: 'heard', npc: a.id, object: 'music-box', amount: 4 }]);
     expect(a.mode).toBe('alert');
     expect(a.fear).toBe(4);
     expect(b.mode).toBe('wander');
@@ -470,7 +471,7 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     expect(a.screaming).toBe(0);
   });
 
-  test('警觉：走到离八音盒 investigateDist（average）以内、看得见它的地方停下，手电一直指着它；查看后回到闲逛', () => {
+  test('警觉：走到离八音盒 investigateDist（average）以内、看得见它的地方停下，手电一直指着它；查看：先盯着它 SCAN.glance 秒，再把四周扫一圈，每件看得见的惊吓物件停 SCAN.hold 秒，扫完回到闲逛', () => {
     const w = createWorld({ seed: 8, autoSpawn: false });
     const a = w.spawn({ pos: A_POS, personality: 'average' });
     const mb = prop('music-box');
@@ -478,31 +479,131 @@ describe('World：引诱与尖叫传染（计划测试 6）', () => {
     w.step(DT + NOTICE.hold[1] * 1.5); // 先察觉那一拍，盯完才转入警觉
     expect(a.mode).toBe('alert');
     const grid = new Grid();
-    let arrivedAt = -1;
-    for (let k = 0; k < 60 * 10 && a.mode === 'alert'; k++) {
+    let arrivedAt = -1, turned = 0, last = 0, still = 0;
+    const pauses: number[] = [];
+    let stops: number[] = [];
+    for (let k = 0; k < 60 * 20 && a.mode === 'alert'; k++) {
       w.step(DT);
       if (a.mode !== 'alert') break;
-      if (a.speed > 0) {
+      if (arrivedAt < 0 && a.speed > 0) {
         expect(a.speed).toBeLessThanOrEqual(SPEED.alert + 1e-9);
         // 走动中手电朝向声源（转向限速，走了一小段后应该已经对准）
         if (k > 45) expect(Math.abs(wrapAngle(a.lookDir - angleTo(a.pos, mb)))).toBeLessThan(0.05);
       } else if (arrivedAt < 0 && a.path.length === 0) {
         arrivedAt = w.state.time;
+        last = a.lookDir;
         const d = Math.hypot(a.pos.x - mb.x, a.pos.z - mb.z);
         // 走到查看点（离声源 investigateDist 以内，按性格）的 arrive 范围里就算到了
         expect(d).toBeLessThanOrEqual(TRAITS.average.investigateDist + BEHAVIOR.arrive + 1e-6);
         expect(d).toBeGreaterThan(TRAITS.average.investigateDist - 0.5); // 不贴到声源跟前
         expect(grid.walkableAt(a.pos)).toBe(true);
         expect(grid.lineOfSight(a.pos, mb)).toBe(true);
-      }
-      if (arrivedAt >= 0) {
-        // 查看时手电在声源方向 ±investigateSweep 弧度内扫
-        expect(Math.abs(wrapAngle(a.lookDir - angleTo(a.pos, mb)))).toBeLessThanOrEqual(BEHAVIOR.investigateSweep + 0.05);
+        // 站在这里扫一圈会停下来看的物件（方向两两分得开，每件各停一次）
+        stops = scanStops(grid, a.pos, w.state.objects).map((o) => angleTo(a.pos, o.pos));
+        expect(stops.length).toBeGreaterThanOrEqual(2);
+        for (const x of stops) for (const y of stops) if (x !== y) expect(Math.abs(wrapAngle(x - y))).toBeGreaterThan(0.2);
+      } else if (arrivedAt >= 0) {
+        const since = w.state.time - arrivedAt;
+        // 先盯着声源
+        if (since > 0.25 && since < SCAN.glance - 0.05) expect(Math.abs(wrapAngle(a.lookDir - angleTo(a.pos, mb)))).toBeLessThan(0.05);
+        const step = Math.abs(wrapAngle(a.lookDir - last));
+        turned += step;
+        last = a.lookDir;
+        // 扫的时候停住不动的一段：记下它有多长（盯着声源那一段不算）
+        if (step < 1e-6 && since > SCAN.glance + 0.1) still += DT;
+        else if (still > 0) {
+          pauses.push(still);
+          still = 0;
+        }
       }
     }
+    if (still > 0) pauses.push(still);
     expect(arrivedAt).toBeGreaterThan(0);
     expect(a.mode).toBe('wander');
-    expect(w.state.time - arrivedAt).toBeCloseTo(BEHAVIOR.investigate, 1);
+    // 扫了整整一圈（手电转过的角度加起来）
+    expect(turned).toBeGreaterThan(2 * Math.PI - 0.3);
+    // 每件物件停一次，每次约 SCAN.hold 秒
+    const long = pauses.filter((x) => x > SCAN.hold - 0.15);
+    expect(long.length).toBe(stops.length);
+    for (const x of long) expect(x).toBeLessThanOrEqual(SCAN.hold + 0.05);
+    // 查看一共多久：盯声源 + 转一圈 + 每件停一下
+    expect(w.state.time - arrivedAt).toBeCloseTo(SCAN.glance + (2 * Math.PI) / SCAN.turn + stops.length * SCAN.hold, 1);
+  });
+
+  /** 跟着 a 走到他查看完（回到闲逛）：查看那一段里每个惊吓物件的眼睛有他（seenBy 有他）的总时长；顺便记下查看的位置 */
+  function watchScan(w: World, a: NpcState, maxSeconds = 25) {
+    const lit = new Map<string, number>();
+    let at: Vec2 | null = null;
+    for (let k = 0; k < Math.round(maxSeconds / DT); k++) {
+      w.step(DT);
+      if (a.mode === 'alert' && a.path.length === 0 && a.speed < 1e-6) at ??= { ...a.pos };
+      if (at && a.mode !== 'alert') break;
+      if (!at) continue;
+      for (const o of w.state.objects) if (o.seenBy.includes(a.id)) lit.set(o.id, (lit.get(o.id) ?? 0) + DT);
+    }
+    return { lit, at };
+  }
+
+  test('扫一圈时停在看得见的惊吓物件上约 SCAN.hold 秒，那段时间它的眼睛亮着（给玩家出手）：衣柜在声源方向背后 150° 左右，原来只在声源方向左右扫时照不到', () => {
+    const w = createWorld({ seed: 8, autoSpawn: false });
+    const a = w.spawn({ pos: A_POS, personality: 'average' });
+    w.trigger('music-box');
+    const { lit, at } = watchScan(w, a);
+    expect(at).not.toBeNull();
+    const mb = prop('music-box'), wardrobe = prop('wardrobe');
+    // 前提：衣柜在原来那一扫（声源方向 ±0.8 弧度，再加光锥半角）够不着的方向上
+    expect(Math.abs(wrapAngle(angleTo(at!, wardrobe) - angleTo(at!, mb)))).toBeGreaterThan(0.8 + Math.PI / 6 + 0.2);
+    expect(lit.get('wardrobe') ?? 0).toBeGreaterThanOrEqual(SCAN.hold - 0.05);
+    // 别的看得见的也都停过
+    for (const o of scanStops(new Grid(), at!, w.state.objects)) expect(lit.get(o.id) ?? 0).toBeGreaterThanOrEqual(SCAN.hold - 0.05);
+  });
+
+  test('厨房门：从走廊西头过来的人站进门洞（SCAN.doorway）查看，扫一圈时照得到厨房里的摇椅（原来停在门洞斜对面 1.5 米，隔着墙看不见它）', () => {
+    const grid = new Grid();
+    const from = { x: 8.25, z: 5.75 }; // 走廊西半段，听得见门响（9 米内有视线）
+    const door = prop('kitchen-door'), chair = prop('rocking-chair');
+    // 前提：按原来的 investigateDist 停下的地方看不见摇椅
+    const old = alertPath(grid, from, door, TRAITS.average.investigateDist)!;
+    expect(grid.lineOfSight(old[old.length - 1], chair)).toBe(false);
+    const w = createWorld({ seed: 14, autoSpawn: false });
+    const a = w.spawn({ pos: from, personality: 'average', lookDir: 0 });
+    w.trigger('kitchen-door');
+    const { lit, at } = watchScan(w, a);
+    expect(at).not.toBeNull();
+    expect(Math.hypot(at!.x - door.x, at!.z - door.z)).toBeLessThanOrEqual(SCAN.doorway + BEHAVIOR.arrive + 1e-6);
+    expect(lit.get('rocking-chair') ?? 0).toBeGreaterThanOrEqual(SCAN.hold - 0.05);
+  });
+
+  test('刚查看过的地方 SCAN.again 秒内又响：只回头看一眼（察觉 kind sound），不再走过去，恐惧值照涨；过了 again 秒再响，照常去查看', () => {
+    const w = createWorld({ seed: 15, autoSpawn: false });
+    const P = { x: 13.25, z: 10.75 }; // 浴室南边，和厨房门洞同一列，听得见门响
+    const a = w.spawn({ pos: P, personality: 'average' });
+    w.trigger('kitchen-door');
+    // 走过去查看，记下开始查看的时刻；查看完回到闲逛
+    let checkedAt = -1;
+    for (let k = 0; k < 60 * 30 && !(checkedAt > 0 && a.mode === 'wander'); k++) {
+      w.step(DT);
+      if (checkedAt < 0 && a.mode === 'alert' && a.path.length === 0 && a.speed < 1e-6) checkedAt = w.state.time;
+    }
+    expect(checkedAt).toBeGreaterThan(0);
+    expect(a.mode).toBe('wander');
+    // 门冷却好了、还在 again 秒以内：再响
+    while (obj(w, 'kitchen-door').cooldown > 0) w.step(DT);
+    expect(w.state.time - checkedAt).toBeLessThan(SCAN.again - 1);
+    const before = a.fear;
+    expect(w.trigger('kitchen-door')).toBe(true);
+    const ev = run(w, NOTICE.hold[1] * 1.5 + 1);
+    expect(ofType(ev, 'heard').map((e) => e.npc)).toEqual([a.id]);
+    expect(ofType(ev, 'notice').filter((e) => e.npc === a.id).map((e) => e.kind)).toContain('sound');
+    expect(a.fear).toBeGreaterThan(before);
+    expect(a.mode).toBe('wander');
+    // 过了 again 秒：拉回门边上（他闲逛可能走远了），再响就照常去查看
+    while (w.state.time - checkedAt < SCAN.again + 0.1 || obj(w, 'kitchen-door').cooldown > 0) w.step(DT);
+    a.pos.x = P.x;
+    a.pos.z = P.z;
+    expect(w.trigger('kitchen-door')).toBe(true);
+    run(w, NOTICE.hold[1] * 1.5 + 0.2);
+    expect(a.mode).toBe('alert');
   });
 
   test('引诱也算习惯化次数：门响过一个冷却再响，只恢复了一部分', () => {
