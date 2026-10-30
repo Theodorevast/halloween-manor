@@ -414,7 +414,15 @@ export const DISSOLVE = {
    * 竖直半径 radius × tall（盖住头顶到下摆）；沿面的法线只有 depth：身子（半宽约 0.3 米，含雾晕）真的贴上这个面才开始溶，
    * 一开就是一个够整个人过去的洞；飘在离墙半米的地方，背后的墙上不会出现一块黑斑
    */
-  ghost: { radius: 0.62, tall: 1.3, depth: 0.34, centerDy: -0.25 },
+  ghost: {
+    radius: 0.62, tall: 1.3, depth: 0.34, centerDy: -0.25,
+    /**
+     * 家具、物件、前门（dissolveAt 的 holeScale 不是 1）不按面的法线压扁，所有面用同一个椭球（面内半径 radius、竖直半径 radius × tall）：
+     * 薄的部件（门框的线脚、门芯板、门板的厚度）每个面法线都不一样，压扁的话每个面的洞都不一样大，洞口一圈全是错开的小台阶（试玩 S1 的锯齿）。
+     * 竖直方向和原来一样高（0.62 × 0.85 × 1.3 ≈ 0.69 米，盖住头顶到下摆）
+     */
+    solid: { radius: 0.42, tall: 1.65 },
+  },
   /** 家具上的洞按这个比例缩小：只在鬼魂真的碰到时溶开，飘过旁边不会把沙发啃掉一块 */
   furniture: 0.85,
   /**
@@ -441,7 +449,8 @@ export const DISSOLVE = {
    * 截面：洞口外 band 米这一圈，底色乘到 dark（紧贴洞口最暗，往外渐渐回到原色）：切开的墙、家具露出来的边，跟着材质自己的颜色、偏暗。
    * 离镜头 near[0]..near[1] 米的洞，截面按距离收窄（最窄 nearMin 倍）：贴着镜头的洞，同样宽的一圈在画面上会是一道粗黑框
    */
-  cut: { band: 0.035, dark: 0.4, near: [0.2, 1.6] as [number, number], nearMin: 0.25 },
+  /** thinDark：物件的压暗：门框、线脚这种细部件整根都落在这一圈里，按 dark 压就是一根黑刺 */
+  cut: { band: 0.05, dark: 0.25, thinDark: 0.5, near: [0.2, 1.6] as [number, number], nearMin: 0.25 },
   /**
    * 霜的底色（线性，冷白偏蓝）、霜自己的一点自发光：洞边已经不结霜了，留着给别处的霜用同一种颜色
    * （frost.ts 现身时地上的霜、props.ts 的范围外壳）
@@ -463,6 +472,7 @@ export const DISSOLVE = {
  * - outer：外墙（镜头退到屋外时看见的那一面）只给这么多：屋外不该比屋里亮
  * - ceiling：天花板只给这么多：天花板比墙暗一档，墙和天花板交界的那条线看得出
  * - floor：地板的倍数
+ * - props：可附身的物件（props.ts）、前门的倍数：底色多半是深色木头，乘 1 倍还是一块黑；稍微多给一点，门框、门板和墙一样读得出来（试玩 S1）
  * - corner：离两面墙都不到 radius 米的地方（竖着的墙角、地板和天花板的四角）底光往 level 倍收
  * - low / high：墙面、家具的高度：离地 low[1] 米以下往 low[0] 倍收（墙根），离地 high[1] 米到墙顶往 high[0] 倍收（墙顶）
  * - edge：地板、天花板离墙 edge[1] 米以内往 edge[0] 倍收
@@ -476,6 +486,7 @@ export const ROOM_FILL = {
   outer: 0.3,
   ceiling: 0.6,
   floor: 1,
+  props: 1.6,
   corner: { radius: 1.2, level: 0.25 },
   low: [0.55, 0.7] as [number, number],
   high: [0.55, 1.6] as [number, number],
@@ -622,7 +633,9 @@ export function holeFieldAt(
   const dn = dot3(g, N);
   const gp = { x: g.x - N.x * dn, y: g.y - N.y * dn, z: g.z - N.z * dn };
   const k = dn * (D.ghost.radius / D.ghost.depth);
-  const dGhost = Math.hypot(gp.x + N.x * k, gp.y / D.ghost.tall + N.y * k, gp.z + N.z * k) - D.ghost.radius * holeScale;
+  const dGhost = holeScale === 1
+    ? Math.hypot(gp.x + N.x * k, gp.y / D.ghost.tall + N.y * k, gp.z + N.z * k) - D.ghost.radius
+    : Math.hypot(g.x, g.y / D.ghost.solid.tall, g.z) - D.ghost.solid.radius;
   const seg = sub(ghost, cam);
   const segLen = Math.hypot(seg.x, seg.y, seg.z);
   const a = sub(P, cam);
@@ -652,7 +665,7 @@ export function holeFieldAt(
 /**
  * 片元 P（房屋坐标，N 是它所在面的法线）的溶解：keep = 不在洞里（给 maskNode），cut 0..1 截面那一圈（1 = 紧贴洞口）。
  * frost、rim 恒为 0（洞边不再结霜、不再发光；frontDoor.ts、props.ts 还读这两个名字）。
- * holeScale 只缩放鬼魂周围的洞（家具用 DISSOLVE.furniture）；视线胶囊不缩，隔着衣柜也要看得见鬼魂。
+ * holeScale 不是 1（家具、物件、前门给 DISSOLVE.furniture）：鬼魂周围的洞换成不看法线的那个椭球（DISSOLVE.ghost.solid，所有面的洞口对得上）；视线胶囊不缩，隔着衣柜也要看得见鬼魂。
  * nearCut：隔开镜头和鬼魂的面，鬼魂沿吊臂过了它 cutFrom 米以后从交点开洞往外长（DISSOLVE.sight；墙、窗、天花板、前门传 true，家具、物件不传）。
  * 噪声只在离洞 reach 米以内的片元上算（If 分支），离洞远的整片墙只多两次距离计算。
  * 分支外先把要用的量存进变量，分支里只赋值：避开「共享节点第一次在分支里生成，另一边读到 0」的坑（调研文档）
@@ -668,8 +681,9 @@ export function dissolveAt(
     const g = P.sub(u.ghost);
     const dn = dot(g, N);
     const gp = g.sub(N.mul(dn));
-    const dGhost = length(vec3(gp.x, gp.y.div(D.ghost.tall), gp.z).add(N.mul(dn.mul(D.ghost.radius / D.ghost.depth))))
-      .sub(u.ghostR.mul(holeScale));
+    const dGhost = holeScale === 1
+      ? length(vec3(gp.x, gp.y.div(D.ghost.tall), gp.z).add(N.mul(dn.mul(D.ghost.radius / D.ghost.depth)))).sub(u.ghostR)
+      : length(vec3(g.x, g.y.div(D.ghost.solid.tall), g.z)).sub(D.ghost.solid.radius);
     const a = P.sub(u.cam);
     const tr = dot(a, u.seg.xyz).mul(u.seg.w);
     const t = clamp(tr, 0, 1);
@@ -833,6 +847,20 @@ export function holeBoxes(tiles: Uint8Array): HoleBox[][] {
     }
   }
   return out;
+}
+
+/**
+ * 这一帧鬼魂周围的洞、视线胶囊会不会碰到这个矩形（水平面上，米；保守，量法和 holesNear 的家具一样）。
+ * 物件的幽光外壳用：外壳画的是背面，平时被物件自己挡住，只露出轮廓外一圈；物件一被挖开，透过洞就看见外壳里面那几个面，
+ * 成了灰白的多边形和月牙（试玩 S1）。所以被挖开的物件不画外壳（props.ts）
+ */
+export function holeTouchesBox(b: { x0: number; z0: number; x1: number; z1: number }, ghost: { x: number; z: number }, cam: { x: number; z: number }): boolean {
+  const S = DISSOLVE.sight, pad = HOLE_TEST.pad;
+  const box: HoleBox = { ...b, furniture: true, axis: -1 };
+  if (boxDist(ghost.x, ghost.z, box) < DISSOLVE.ghost.radius * DISSOLVE.furniture + pad) return true;
+  const c = segBox(cam.x, cam.z, ghost.x - cam.x, ghost.z - cam.z, box);
+  const r0 = S.camR + pad, r1 = S.ghostR + pad;
+  return c.d < r0 + (r1 - r0) * c.t;
 }
 
 /** 水平面上点到矩形的距离 */

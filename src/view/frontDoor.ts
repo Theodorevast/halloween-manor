@@ -21,7 +21,7 @@ import type { GhostRig, Module, RenderCore } from '../engine/types';
 import type { NpcMode, Vec2 } from '../sim/types';
 import { torchBounceAt } from './bounce';
 import { C, Parts, bodyMaterial, clamp01, inOutSine, lerp, mesh, outCubic, seg } from './props/kit';
-import { DISSOLVE, Side, dissolveAt, ghostDissolve, v3, wallFullness } from './walls';
+import { DISSOLVE, ROOM_FILL, Side, dissolveAt, ghostDissolve, roomFillAt, v3, wallFullness } from './walls';
 
 export interface FrontDoor extends Module {
   /** 门现在开着多少（0 = 关上，1 = 全开）：收夜检测「最后一个人走了、门关上了」用 */
@@ -267,7 +267,8 @@ export function createFrontDoor(core: RenderCore, rig: GhostRig | null): FrontDo
     material.maskShadowNode = bool(true);
     // 洞口一圈冷光、附近一点霜光；手电打在门厅地上、墙上反弹回来的光（bounce.ts，和墙一样乘底色：门的底色就是顶点色）
     const edge = v3(DISSOLVE.rimGlow).mul(d.rim).add(v3(DISSOLVE.frostGlow).mul(d.frost));
-    const bounce = attribute('color', 'vec3').mul(torchBounceAt(P, normalWorld));
+    // 再加屋里的底光（walls.ts 的 ROOM_FILL）：和墙一样亮，不然墙看得清、门板是一块黑（试玩 S1）
+    const bounce = attribute('color', 'vec3').mul(torchBounceAt(P, normalWorld).add(roomFillAt(P, ROOM_FILL.props)));
     material.emissiveNode = add((material.emissiveNode as THREE.Node<'vec3'> | null) ?? materialEmissive, edge.add(bounce));
   }
 
