@@ -128,6 +128,46 @@ export const PROPS: PropPlacement[] = [
   { id: 'wardrobe', type: 'wardrobe', cell: [8, 15], facing: S, room: 'bedroom' },
 ];
 
+/** 墙上挂画用的六张图（2026-10-30 恐怖画，素材中台生成；贴图在 public/assets/paintings/，见 view/paintings.ts 的 PAINTING_FILES） */
+export type PaintingArt = 'family' | 'moor' | 'girl' | 'house' | 'gentleman' | 'stillLife';
+
+export interface PaintingPlacement {
+  id: string;
+  art: PaintingArt;
+  room: RoomId;
+  /** 画的正面朝哪（方向角，朝房间里）。挂在 room 的哪面墙由它定：朝西就是这个房间的东墙 */
+  facing: number;
+  /** 画布中心沿墙的米坐标：朝南北的画是 x，朝东西的画是 z */
+  along: number;
+  /** 画布中心离地多高（米） */
+  y: number;
+  /** 画布宽、高（米），和贴图一样 2:3 */
+  size: [number, number];
+}
+
+/**
+ * 墙上的挂画（2026-10-30 试玩反馈「不够吓人，平面那里可以放真正的恐怖图片」）。画像（物件 portrait）以外的六幅，
+ * 每幅一张生成的维多利亚风格恐怖画；位置、画框、加载见 view/paintings.ts，规则 tests/paintings.test.ts 钉着：
+ * - 背后是实墙（不压窗、不跨门洞），离墙角、门框至少 0.15 米；前面 1 米内没有物件、没有比画框底边高的家具
+ * - 只挂内墙：两头的外墙（走廊东西两头）、客厅北墙壁炉西边、卧室衣柜旁是墙上多一个影子的落点（view/otherShadow.ts 的 OTHER_SPOTS），
+ *   别处的外墙不是窗就是被家具、物件挡着。娃娃屋俯视下内墙一直是 0.5 米的矮墙，画挂不住，所以娃娃屋不建（第三人称才有）
+ * - 高度：画布中心约 1.5 米（画框底边在护墙板腰线 0.9 米以上）
+ */
+export const PAINTINGS: PaintingPlacement[] = [
+  // 书房东墙，书桌背后的那面墙（从书房门进来往东看就是它）：老绅士，眼睛被人后来用黑漆涂掉
+  { id: 'study-gentleman', art: 'gentleman', room: 'study', facing: W, along: 2.75, y: 1.5, size: [0.52, 0.78] },
+  // 客厅西墙（整面空墙，和书房那幅隔着同一堵墙、错开半米）：静物，桌布底下伸出一只又长又白的手
+  { id: 'living-still-life', art: 'stillLife', room: 'living', facing: E, along: 2.25, y: 1.5, size: [0.52, 0.78] },
+  // 走廊北墙，书房门和客厅门之间：全家福，每张脸都被刀刮掉
+  { id: 'hall-family', art: 'family', room: 'hall', facing: S, along: 5.25, y: 1.5, size: [0.6, 0.9] },
+  // 走廊南墙，门厅门和浴室门之间（和全家福错开，一边一幅）：雾里的荒原，枯树下远远站着一个很高很瘦的白影
+  { id: 'hall-moor', art: 'moor', room: 'hall', facing: N, along: 10.5, y: 1.5, size: [0.6, 0.9] },
+  // 卧室东墙，正对床（床朝东，躺着就看见）：抱瓷娃娃的小女孩，两个都盯着你
+  { id: 'bedroom-girl', art: 'girl', room: 'bedroom', facing: W, along: 10.1, y: 1.45, size: [0.46, 0.69] },
+  // 门厅北墙，进门抬头就看见、走廊门洞的左边：夜里的老宅（就是这栋），楼上唯一亮着的窗里贴着一张脸
+  { id: 'foyer-house', art: 'house', room: 'foyer', facing: S, along: 6.4, y: 1.5, size: [0.5, 0.75] },
+];
+
 export const cellCenter = (i: number, j: number) => ({ x: (i + 0.5) * CELL, z: (j + 0.5) * CELL });
 export const cellOf = (x: number, z: number): [number, number] => [Math.floor(x / CELL), Math.floor(z / CELL)];
 export const inGrid = (i: number, j: number) => i >= 0 && j >= 0 && i < GRID_W && j < GRID_H;
