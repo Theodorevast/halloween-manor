@@ -8,12 +8,16 @@
 // 4. 脸按噪声一块块化开，化开的边缘有一圈很淡的冷光，不是一下子切掉；
 // 5. 脸化开的地方雾慢慢合拢；雾气和手印留在镜面上，几秒里从边缘往中间慢慢散掉。
 // 雾、手印都画在镜面自己的材质里（几个 uniform），脸是贴着镜面的一块面片；不在运行时新建任何材质、网格或灯。
+// 脸（2026-10-30 恐怖画）：素材中台生成的真实质感的脸（public/assets/paintings/mirror-face.webp：湿头发、双手按在起雾的玻璃上、黑底），
+// 下载不到时用原来程序画的那张。照片是不透明的：脸和指尖留着，黑底和外圈的头发化进雾里（faceAlpha），再按镜面的椭圆裁掉，
+// 雾、手印、时间线、亮度、冷光都照旧。
 // 镜子前面放一盏平时强度为 0 的冷光点光源，跟着脸一起亮：镜子背对镜头时也能看到浴室里闪了一下。
 import * as THREE from 'three/webgpu';
 import {
   abs, clamp, color, float, length, luminance, max, min, mix, mx_noise_float, positionLocal, smoothstep, texture, uniform, uv, vec2, vec3,
 } from 'three/tsl';
 import { PALETTE } from '../palette';
+import { paintingTexture } from '../paintings';
 import { C, Parts, bodyMaterial, inOutSine, lerp, mesh, outExpo, outQuad, seg, wobble, type PropFrame, type PropRig } from './kit';
 
 // 椭圆镜（米）：外框半轴、镜面半轴、中心高度、往后仰的角度
@@ -24,6 +28,20 @@ const TILT = -0.07;
 const POST_X = 0.34, POST_H = 1.62;
 /** 脸的面片：尺寸、中心在镜面上的高度（镜面坐标，原点在镜面中心） */
 const FACE_W = 0.36, FACE_H = 0.48, FACE_Y = 0.13;
+/** 脸的面片宽、高（米）：贴图按这个比例裁（tests/paintings.test.ts 查） */
+export const MIRROR_FACE = [FACE_W, FACE_H] as const;
+/**
+ * 照片怎么从雾里浮出来（照片是不透明的、黑底）：以脸的中心 center（面片 uv，下沿为 0）为圆心，横向乘 wide（椭圆往两边多伸一点，
+ * 按在玻璃上的手指留得住一半），椭圆距离 oval[0] 起淡、oval[1] 没；core 以内整块都在（整张脸：眼睛、嘴、贴在脸上的湿头发），
+ * 往外只留亮的地方（下巴、指尖：线性亮度 key 之间过渡），黑底和外圈的头发化进雾里。原来按圆角矩形淡出，深色的头发在发白的雾上
+ * 留下一圈方方的边，像镜子上贴了一张照片；只留亮处、圈太小时眼睛也被抠掉，成了一张没眼睛的白面具（看样发现）。
+ * edge：面片最外这么宽的一圈也淡到 0（贴图在边上被夹住，面片外面不能拖出边上的像素）。
+ * eyes：照片里两只眼睛的高度，化开时眼睛一带最后才没
+ */
+const FACE_FADE = {
+  center: [0.5, 0.56] as [number, number], wide: 0.8, oval: [0.62, 1.05] as [number, number], core: [0.45, 0.75] as [number, number],
+  key: [0.03, 0.22] as [number, number], edge: 0.04, eyes: 0.69,
+};
 
 /** 表演的时间线（秒，从 trigger 算起） */
 export const MIRROR_T = {
@@ -94,7 +112,7 @@ const CONDENSE = {
  * 眼窝、嘴、头发处不抹（取模糊的 mip 级 blur，印子是软的，不是一缕缕头发）。之后 settle 秒里雾回来，剩 keep。
  * keep 取 0：脸化开以后留下的脸印在截图里像一块污渍、认不出是脸，只留手印当「来过」的痕迹
  */
-const IMPRINT = { scale: 1.24, clear: 0.9, luma: [0.25, 0.65] as [number, number], settle: 1.6, keep: 0, blur: 2.5 };
+const IMPRINT = { scale: 1.24, clear: 0.9, luma: [0.25, 0.65] as [number, number], settle: 1.6, keep: 0, blur: 4 };
 
 /** 手印：在镜面上的中心、大小（米，贴图的整个框）、转角；手印里雾被抹掉的比例、边上被挤起的一圈雾 */
 const HAND = { x: 0.1, y: -0.2, w: 0.14, h: 0.21, rot: -0.2, clear: 0.92, ridge: 0.35 };
@@ -108,7 +126,10 @@ const sample = (tab: [number, number][], t: number) => {
   return v;
 };
 
-/** 用 Canvas 画镜子里的脸：长脸、深陷的黑眼窝、张大的嘴，边缘渐隐到透明（像从镜子深处浮出来） */
+/**
+ * 用 Canvas 画镜子里的脸：长脸、深陷的黑眼窝、张大的嘴，边缘渐隐到透明（像从镜子深处浮出来）。
+ * 2026-10-30 起只是备用：生成的照片（mirror-face.webp）下载不到时用它
+ */
 function paintFace(): HTMLCanvasElement {
   const W = 256, H = 340;
   const cv = document.createElement('canvas');
@@ -269,6 +290,23 @@ const ellipseShape = (a: number, b: number, hole?: [number, number]) => {
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
 
+/** 面片 uv（0..1，下沿 v = 0）到脸中心的椭圆距离（FACE_FADE.center、wide；脸的上下沿约 ±1） */
+const faceR = (fuv: V2): F => length(fuv.sub(vec2(...FACE_FADE.center)).mul(vec2(2 * FACE_FADE.wide, 2)));
+/** 面片 uv 处照片的轮廓（FACE_FADE 的椭圆 × 面片边上那一圈；不看颜色）：面片外面是 0 */
+function faceOval(fuv: V2): F {
+  const E = FACE_FADE.edge;
+  const rect = smoothstep(0, E, min(min(fuv.x, float(1).sub(fuv.x)), min(fuv.y, float(1).sub(fuv.y))));
+  return rect.mul(float(1).sub(smoothstep(FACE_FADE.oval[0], FACE_FADE.oval[1], faceR(fuv))));
+}
+/** 面片 uv 处照片留多少：轮廓里，core 以内整块留，往外只留亮的地方（rgb 是这一点的颜色，线性） */
+function faceAlpha(fuv: V2, rgb: THREE.Node<'vec3'>): F {
+  const keep = smoothstep(FACE_FADE.key[0], FACE_FADE.key[1], luminance(rgb));
+  const core = float(1).sub(smoothstep(FACE_FADE.core[0], FACE_FADE.core[1], faceR(fuv)));
+  return faceOval(fuv).mul(mix(keep, float(1), core));
+}
+/** 脸的贴图在面片 uv 处的颜色：贴图不翻转（paintings.ts），第 0 行是照片的上沿 */
+const faceAt = (tex: THREE.Texture, fuv: V2, level?: F) => (level ? texture(tex, vec2(fuv.x, float(1).sub(fuv.y)), level) : texture(tex, vec2(fuv.x, float(1).sub(fuv.y))));
+
 /**
  * 镜面上的雾（镜面和脸的材质共用）：p 是镜面坐标（米，原点在镜面中心）。
  * spread：雾漫开的进度（散去时倒着走：从边上先散）；press：手印按下去的进度。
@@ -301,8 +339,8 @@ function condensation(p: V2, spread: F, press: F, imprint: F, handTex: THREE.Tex
 
   // 脸印：按扑上来那一刻的位置和大小，在脸贴图里取样
   const fuv = vec2(p.x.div(FACE_W * IMPRINT.scale), p.y.sub(FACE_Y).div(FACE_H * IMPRINT.scale)).add(0.5);
-  const fs = texture(faceTex, fuv, float(IMPRINT.blur));
-  const skin = fs.a.mul(smoothstep(IMPRINT.luma[0], IMPRINT.luma[1], luminance(fs.rgb)));
+  const fs = faceAt(faceTex, fuv, float(IMPRINT.blur));
+  const skin = faceOval(fuv).mul(fs.a).mul(smoothstep(IMPRINT.luma[0], IMPRINT.luma[1], luminance(fs.rgb)));
   cover = cover.mul(float(1).sub(skin.mul(imprint).mul(IMPRINT.clear)));
   return min(cover, 1);
 }
@@ -345,8 +383,8 @@ export function createMirror(): PropRig {
   const imprint = uniform(0);
   const handTex = new THREE.CanvasTexture(paintHand());
   handTex.colorSpace = THREE.NoColorSpace;
-  const faceTex = new THREE.CanvasTexture(paintFace());
-  faceTex.colorSpace = THREE.SRGBColorSpace;
+  // 镜中人脸：生成的照片（全页共用的贴图，paintings.ts 下载）；下载不到时换上程序画的那张
+  const faceTex = paintingTexture('mirrorFace', paintFace);
 
   // 镜面：近黑、很光滑；加一道很淡的斜向高光和上亮下暗的月光色，让它读得出是玻璃。
   // 起雾的地方变成乳白、粗糙、不再像金属那样反光（雾把镜面的反光打散成一片均匀的微光），手电照上去会亮
@@ -371,21 +409,25 @@ export function createMirror(): PropRig {
   /** 面片在镜面坐标里的位置 x、y 和缩放：脸的着色器据此找到自己盖着的那块雾 */
   const faceXf = uniform(new THREE.Vector3(0, FACE_Y, 1));
   const faceMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false });
-  const ft = texture(faceTex);
   const fUv = uv();
+  const ft = faceAt(faceTex, fUv);
   // 化开的噪声：眼睛一带最后才化（偏置），外圈先没
   const dn = mx_noise_float(vec3(fUv.x.mul(5.5), fUv.y.mul(7), 11.3)).mul(0.5)
     .add(mx_noise_float(vec3(fUv.x.mul(15), fUv.y.mul(19), 4.2)).mul(0.22));
-  const bias = float(1).sub(length(vec2(fUv.x.sub(0.5).mul(1.3), fUv.y.sub(0.58))).mul(1.6));
+  const bias = float(1).sub(length(vec2(fUv.x.sub(0.5).mul(1.3), fUv.y.sub(FACE_FADE.eyes))).mul(1.6));
   const n01 = clamp(dn.add(bias.mul(0.35)).mul(0.6).add(0.45), 0, 1);
   const above = n01.sub(dissolve.mul(1 + EDGE.width + 0.04).sub(EDGE.width));
   const alive = smoothstep(0, 0.03, above);
   const dissolving = smoothstep(0, 0.02, dissolve);
   const edge = float(1).sub(smoothstep(0.02, EDGE.width, above)).mul(alive).mul(dissolving);
-  const faceCover = condensation(vec2(faceXf.x, faceXf.y).add(positionLocal.xy.mul(faceXf.z)), spread, press, imprint, handTex, faceTex);
+  const onGlass = vec2(faceXf.x, faceXf.y).add(positionLocal.xy.mul(faceXf.z));
+  const faceCover = condensation(onGlass, spread, press, imprint, handTex, faceTex);
   const seen = float(1).sub(faceCover.mul(veil));
-  const aFace = ft.a.mul(faceAmt.min(1)).mul(alive).mul(seen);
-  const aEdge = ft.a.mul(edge).mul(seen).mul(0.85);
+  // 照片留多少：边缘渐隐 × 贴图的 alpha（备用的 Canvas 有）× 镜面的椭圆以内（扑上来放大时面片的上下角伸出镜面）
+  const inGlass = float(1).sub(smoothstep(0.93, 1, length(vec2(onGlass.x.div(GA), onGlass.y.div(GB)))));
+  const fa = faceAlpha(fUv, ft.rgb).mul(ft.a).mul(inGlass);
+  const aFace = fa.mul(faceAmt.min(1)).mul(alive).mul(seen);
+  const aEdge = fa.mul(edge).mul(seen).mul(0.85);
   const share = aEdge.div(max(aFace.add(aEdge), 0.001));
   // 苍白里带一点幽绿；> 1 的部分交给泛光
   faceMat.colorNode = mix(ft.rgb.mul(vec3(0.95, 1.05, 1.0)).mul(faceAmt.mul(1.5)), vec3(EDGE.color.r, EDGE.color.g, EDGE.color.b).mul(EDGE.gain), share);
