@@ -52,9 +52,9 @@ export const TORCH = {
   aim: 3.5,
   /**
    * 停下来看画像、镜子、挂画时（TorchPose.lift = 1）光轴抬起来，对着 aim 米外这么高（米）的地方：手在 0.8 米高、站在 1.5–2.5 米外时，
-   * 光轴正好落在画布上（平时照地面，光锥上沿只擦到画框底下，playtest.md S2）。tests/browse.test.ts 按 PAINTINGS 核对
+   * 光轴正好落在画布上（平时照地面，光锥上沿碰不到画，playtest.md S2）。tests/browse.test.ts 按 PAINTINGS 核对
    */
-  gazeY: 1.85,
+  gazeY: 2.4,
   shadow: {
     size: { high: 1024, low: 512 } as Record<Quality, number>,
     near: 0.1,
