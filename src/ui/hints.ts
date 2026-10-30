@@ -8,6 +8,10 @@
 //   那一行同一时刻只放一句（bottomLine）：开场的操作说明（hud.ts）还挂着时，提示先等它淡完；等到的时候已经不算数了
 //   （准星移开了、不再被照着、过了新鲜期）就不出，留到下一次碰到。暂停中（Click to resume 挂着）不出新的
 // - 做不到时的回应（refused）：挂在准星下面一点，斜体灰烬色，很快淡掉；同一种 HINT.refuseGap 秒内不重复
+// 看玩家已经会了的（2026-10-30 试玩 P2-3：玩家 0:06 就用 F 吓到了人，Right-click or F to appear 还在 0:29 出）：
+// - 现身吓到过人（manifest drop 的 scared 不空）：firstRevealed 不再排，已经排上的也撤掉
+// - 玩家自己附身过（trigger，机关发作的那一下不算）：firstAim 只说后半句 Hold to set a trap（textOf）——附身是会了，
+//   按住设机关是最难自己发现的那一个，提示正好在准星对着物件、能设的时候出；附身过也设过机关：firstAim 不出
 // 判断都在纯函数 createHintCore / createMissWatch 里（tests/hints.test.ts 直接测），createHints 只管 DOM。
 // main.ts 只调这里，不自己拼文案
 import { SCARES } from '../config/scares';
@@ -168,9 +172,14 @@ export function createHintCore() {
   const sprung = new Set<string>();
   /** 每种「做不到」上一次回应的时刻 */
   const refusedAt = new Map<Refusal, number>();
+  /** 玩家已经会了的（不用再教）：现身吓到过人 → firstRevealed */
+  const learned = new Set<HintKey>();
+  /** 玩家自己附身过（机关发作的那一下不算）、设过机关：firstAim 只说后半句 / 不出 */
+  let possessed = false;
+  let trapped = false;
 
   const want = (key: HintKey, now: number) => {
-    if (shown.has(key) || cur?.key === key) return;
+    if (shown.has(key) || learned.has(key) || cur?.key === key) return;
     const q = queue.find((x) => x.key === key);
     if (q) q.at = now; // 又碰到一次：重新算新鲜
     else queue.push({ key, at: now });
@@ -180,7 +189,7 @@ export function createHintCore() {
   const still = (q: { key: HintKey; at: number }, now: number, s: Readonly<WorldState>, env: HintEnv) => {
     switch (q.key) {
       case 'firstAim':
-        return env.ghost && env.aiming;
+        return env.ghost && env.aiming && !(possessed && trapped);
       case 'firstRevealed':
         return env.ghost && lit.size > 0 && manifestReady(s);
       case 'firstMiss':
@@ -213,13 +222,24 @@ export function createHintCore() {
           break;
         case 'trap':
           if (e.phase === 'sprung') sprung.add(e.object);
-          else if (e.phase === 'armed' && cur?.key === 'firstAim') cur.done = true;
+          else if (e.phase === 'armed') {
+            trapped = true;
+            if (cur?.key === 'firstAim') cur.done = true;
+          }
           break;
         case 'trigger':
-          if (!sprung.delete(e.object) && cur?.key === 'firstAim') cur.done = true;
+          if (sprung.delete(e.object)) break;
+          possessed = true;
+          if (cur?.key === 'firstAim') cur.done = true;
           break;
         case 'manifest':
           if (e.phase === 'windup' && cur?.key === 'firstRevealed') cur.done = true;
+          // 现身吓到了人：会了，firstRevealed 不再排（排上了的撤掉；正在显示的照旧，windup 时已经标了 done）
+          if (e.phase === 'drop' && e.scared.length > 0) {
+            learned.add('firstRevealed');
+            const i = queue.findIndex((q) => q.key === 'firstRevealed');
+            if (i >= 0) queue.splice(i, 1);
+          }
           break;
       }
     },
@@ -251,6 +271,11 @@ export function createHintCore() {
         return q.key;
       }
       return null;
+    },
+
+    /** 这一句提示此刻写什么：firstAim 在玩家附身过以后只说后半句（STRINGS.onboarding.aimTrapOnly），别的照 STRINGS.onboarding.hints */
+    textOf(key: HintKey): string {
+      return key === 'firstAim' && possessed ? STRINGS.onboarding.aimTrapOnly : STRINGS.onboarding.hints[key];
     },
 
     /** 做不到：返回这一次要写的那句话；同一种 HINT.refuseGap 秒内再来返回 null（不重复） */
@@ -352,7 +377,7 @@ export function createHints(root: HTMLElement): Hints {
       if (key !== showing) {
         showing = key;
         if (key) {
-          setSegments(line, STRINGS.onboarding.hints[key]);
+          setSegments(line, core.textOf(key));
           line.classList.add('is-on');
           markLineEnds(line);
         } else {

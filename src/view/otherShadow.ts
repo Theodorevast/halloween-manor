@@ -19,8 +19,15 @@
 //   一次出现最长 OTHER_SHADOW.maxShown 秒：到了就在 OTHER_LOOK.fade 秒里慢慢化掉（uShadow 往下降，侵蚀阈值抬高，影子一缕缕散掉），
 //   不管有没有被照着——这是唯一一种在光里消失的情形，所以只能慢、只能单调（不抖，不算「暗一下」）
 //
+// 积极玩的时候也要有机会出现（2026-10-30 试玩 P1-2：放手不玩的那一夜出现了，一直跟着访客的两夜都没有）：
+// - ghostCalm 1.5 → 0.5 秒（积极玩的人几乎每隔几秒就被某支手电扫到）
+// - 过了 OTHER_SHADOW.after 还没出现过的，到 OTHER_SHADOW.widenAt 放宽「玩家看得见」：镜头（或鬼魂）所在的房间和隔壁房间的墙都算（nearView）
+// - 这一夜出现了几次挂在 ?debug 的 __haunt.night().otherShadow 上（main.ts 接）
+// - 没做：「鬼魂被照着」只算会扫到站位的那支手电（要每个站位各记一个 calm、每支手电各算照没照到鬼魂，改动面大，见 lane-PL 报告）
+//
 // ?noother：不建（看样对比、量开销）；?debug：window.__otherShadow（state() / place(id) / clear() / inView()），截图、手动看样用
 import * as THREE from 'three/webgpu';
+import { DOORWAYS, cellOf, roomAt, type RoomId } from '../config/house';
 import { OTHER_SHADOW } from '../config/night';
 import { ghostSees } from '../engine/ghostRig';
 import { isGhostRig, type CameraRig, type FrameCtx, type Module, type RenderCore } from '../engine/types';
@@ -84,8 +91,11 @@ export const OTHER_LOOK = {
    * 嫌最后那一截空着可以把它往上调到 0.6 左右（代价是最后撤掉时可能少几粒很小的碎点）
    */
   fadeFloor: 0.5,
-  /** 玩家的鬼魂不再被照着以后，至少过这么久（秒，真实时间）才放：它自己的影子刚从墙上消失 */
-  ghostCalm: 1.5,
+  /**
+   * 玩家的鬼魂不再被照着以后，至少过这么久（秒，真实时间）才放：它自己的影子刚从墙上消失。
+   * 原来 1.5 秒：积极玩的人几乎每隔几秒就被某支手电扫到，很难等满（2026-10-30 试玩 P1-2）
+   */
+  ghostCalm: 0.5,
   /** 没放着的时候，多久找一次站位（秒） */
   scan: 0.25,
   /**
@@ -229,6 +239,11 @@ export interface OtherFrame {
   ghostLit: boolean;
   /** 玩家此刻看不看得见这个站位那面墙；没给 = 不管 */
   inView?: (s: OtherSpot) => boolean;
+  /**
+   * 放宽以后也算（过了 OTHER_SHADOW.widenAt 还没出现过，见 createOtherDirector）：这个站位在镜头（或鬼魂）所在的房间、隔壁房间。
+   * 没给 = 不放宽
+   */
+  nearView?: (s: OtherSpot) => boolean;
 }
 
 export interface OtherDirector {
@@ -293,6 +308,13 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
     return Math.hypot(p.x - a.x - ux * k, p.z - a.z - uz * k);
   };
 
+  /**
+   * 玩家看不看得见站位 s 那面墙（没给 inView = 不管）。过了 rule.widenAt 还没出现过：附近的房间（nearView）也算——
+   * 保证一夜至少有一次，出现过一次以后照旧
+   */
+  const viewable = (s: OtherSpot, f: OtherFrame) =>
+    !f.inView || f.inView(s) || (appeared === 0 && f.time >= rule.widenAt - 1e-9 && (f.nearView?.(s) ?? false));
+
   /** 挑一个站位（见上面「放在哪」）；没有合适的返回 null */
   const pick = (f: OtherFrame): OtherSpot | null => {
     let best: OtherSpot | null = null, bestSoon = -Infinity;
@@ -300,7 +322,7 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
       if (used.has(s.id)) continue;
       if (f.ghost && dist(f.ghost, s) < look.ghostClear) continue;
       if (nearestTo(s, f) < look.clear) continue;
-      if (f.inView && !f.inView(s)) continue;
+      if (!viewable(s, f)) continue;
       let soon = -Infinity, blocked = false;
       for (const t of f.torches) {
         if (t.power < look.litPower || dist(t, s) > look.promise || !ghostSees(t, s)) continue;
@@ -372,7 +394,7 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
           : f.ghostLit || (f.ghost !== null && dist(f.ghost, s) < look.ghostClear) ? 'ghost'
           : null;
         const soft: OtherWhy | null = shown || forcedHere ? null
-          : f.inView && !f.inView(s) ? 'view'
+          : !viewable(s, f) ? 'view'
           : f.time - placedAt > look.wait ? 'wait'
           : null;
         const why = sticky ?? soft;
@@ -400,6 +422,20 @@ export function createOtherDirector(spots: readonly OtherSpot[] = OTHER_SPOTS, r
       return ev;
     },
   };
+}
+
+/**
+ * 这几个房间和它们的隔壁（和其中某一间有门洞相通的房间）；null（墙里、门洞上、屋外）跳过。
+ * 放宽「玩家看得见」用（P1-2）：镜头常常隔着一面溶开的墙跟在鬼魂后面，所以镜头和鬼魂所在的房间都给
+ */
+export function nearRooms(rooms: readonly (RoomId | null)[]): Set<RoomId> {
+  const out = new Set<RoomId>();
+  for (const r of rooms) {
+    if (r === null) continue;
+    out.add(r);
+    for (const d of DOORWAYS) if (d.rooms.includes(r)) for (const x of d.rooms) out.add(x);
+  }
+  return out;
 }
 
 // ───────────────────────── 画面 ─────────────────────────
@@ -480,10 +516,19 @@ export function createOtherShadow(core: RenderCore, opts: OtherShadowOptions = {
     }
     return s.nx * rig.viewDir.x + s.nz * rig.viewDir.z >= OTHER_LOOK.faceMin;
   };
+  /** 站位在哪个房间（不变，先算好） */
+  const spotRoom = new Map(OTHER_SPOTS.map((s) => [s.id, roomAt(...cellOf(s.x, s.z))]));
+  /** 放宽以后（P1-2）：站位在镜头或鬼魂所在的房间、隔壁房间（第三人称才有；娃娃屋俯视整栋都看得见，不放宽）。每帧算一次附近的房间 */
+  let near = new Set<RoomId>();
+  const nearView = (s: OtherSpot) => {
+    const r = spotRoom.get(s.id);
+    return r !== undefined && r !== null && near.has(r);
+  };
 
   const visitors: Vec2[] = [];
   const frame: OtherFrame = { time: 0, scaredOff: 0, dt: 0, torches, visitors, ghost: null, ghostLit: false };
   if (rig) frame.inView = inView;
+  if (ghostRig) frame.nearView = nearView;
   let placements = 0;
   /** 调试：最近几次撤掉的是哪个站位、为什么、出现过没有（「站位:理由+seen」） */
   const withdrawals: string[] = [];
@@ -542,6 +587,9 @@ export function createOtherShadow(core: RenderCore, opts: OtherShadowOptions = {
       frame.ghost = ghostRig ? ghostRig.ghost : null;
       frame.ghostLit = ghostRevealAmount() > OTHER_LOOK.ghostLit || phase === 'windup' || phase === 'hold';
       if (rig) prepareView(rig);
+      if (ghostRig && frame.time >= OTHER_SHADOW.widenAt && director.appeared === 0) {
+        near = nearRooms([roomAt(...cellOf(cam.x, cam.z)), roomAt(...cellOf(ghostRig.ghost.x, ghostRig.ghost.z))]);
+      }
       for (const e of director.step(frame)) apply(e);
       // 满 maxShown 秒以后慢慢化掉：uShadow 跟着 level 从 1 线性降到 fadeFloor（化完撤掉时 apply 已经设成 0）
       if (director.spot && director.level < 1) u.shadow.value = OTHER_LOOK.fadeFloor + (1 - OTHER_LOOK.fadeFloor) * director.level;

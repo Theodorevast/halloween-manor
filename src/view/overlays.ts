@@ -12,6 +12,9 @@
 //   物件在冷却中时眼睛是灰的（人在范围里，但还不能出手）。现身蓄力、停留、冷却时不亮；收夜以后的静场、光收回、登记簿那几段屋里没人，自然没有
 // - FEEL-3 结果写在准星对着的地方：附身以后准星还对着它时，标签第二行先报结果（谁跳了、谁听见了、没人看见），停 OUTCOME.hold 秒再回到冷却秒数
 // - FEEL-7 够不着：准星对着 4–10 米外看得见的物件（拾取器发的 GhostUi.aimFar），标签写名字和 Too far away.
+// 试玩之后的打磨（2026-10-30 第一轮试玩 P1-1 建议 3：物件上的眼睛一次亮的时长中位数只有 0.65 秒，一闪一闪的）：
+// 眼睛亮起照旧，灭的时候用 WATCH_LINGER 秒淡掉（styles.css 的 .ov-eye）；标签第二行的「X is watching」同样留 WATCH_LINGER 秒再换
+// （createWatchLinger）。只是画面，模拟不变
 import { CHARACTER } from '../config/character';
 import { SCARES } from '../config/scares';
 import { STRINGS } from '../config/strings';
@@ -59,6 +62,8 @@ const REACH_EVERY = 0.1;
  * 之后回到冷却秒数
  */
 export const OUTCOME = { hold: 1.6 };
+/** 物件上的眼睛灭的时候淡多久、标签第二行的「X is watching」灭的时候留多久（秒，真实时间）：和 styles.css 的 .ov-eye 一致 */
+export const WATCH_LINGER = 0.45;
 
 const BONE = [220, 210, 189];
 const EMBER = [255, 122, 26];
@@ -140,6 +145,25 @@ export function tipState(
   }
   if (first === null) return { text: STRINGS.onboarding.noOneWatching, tone: 'unseen' };
   return { text: count === 1 ? STRINGS.onboarding.watching(first) : STRINGS.onboarding.watchingMany(first, count - 1), tone: 'ready' };
+}
+
+/**
+ * 标签第二行的「X is watching」灭的时候先留 hold 秒再换成 No one is watching（2026-10-30 试玩 P1-1 建议 3）：
+ * 访客的手电一直在扫，谁看得见物件每一步都在变，原来标签跟着一帧一帧地换。只拖「有人看着 → 没人看着」这一种，
+ * 留着的时候写最后那个名字；又有人看着就马上写新的。结果、够不着、机关、冷却这几种照旧马上换（tipState 的优先级不变），
+ * 换了物件也不拖。用法：每帧 linger(物件 id, tipState(...), 真实时间)
+ */
+export function createWatchLinger(hold = WATCH_LINGER) {
+  let last: { id: string; st: { text: string; tone: TipTone }; at: number } | null = null;
+  return (id: string, st: { text: string; tone: TipTone }, now: number): { text: string; tone: TipTone } => {
+    if (st.tone === 'ready' && st.text !== STRINGS.ready) {
+      last = { id, st, at: now };
+      return st;
+    }
+    if (last && last.id === id && st.text === STRINGS.onboarding.noOneWatching && now - last.at < hold) return last.st;
+    last = null;
+    return st;
+  };
 }
 
 /**
@@ -288,6 +312,8 @@ export function createOverlays(
   });
   /** 附身的结果（FEEL-3） */
   const outcomes = createOutcomeWatch();
+  /** 标签第二行的「X is watching」灭的时候留一会儿（试玩 P1-1 建议 3） */
+  const watchLinger = createWatchLinger();
   /** 最近一帧的真实时间：事件在 update 之前分发，按它记 */
   let now = 0;
   const plateY = ghost ? GHOST_PLATE_Y : PLATE_Y;
@@ -544,7 +570,8 @@ export function createOverlays(
     }
     const name = STRINGS.propName[o.type];
     // 刚附身过、结果还挂着（FEEL-3）：第二行先报结果
-    const st = tipState(o, npcs, { outcome: outcomes.current(o.id, now), far });
+    // 「X is watching」灭的时候留 WATCH_LINGER 秒再换（和眼睛淡掉一样长）
+    const st = watchLinger(o.id, tipState(o, npcs, { outcome: outcomes.current(o.id, now), far }), now);
     let measure = false;
     if (name !== tipNameText) {
       tipNameText = name;

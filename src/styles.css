@@ -200,21 +200,16 @@ body {
   }
 }
 
-/* 玩法说明排成书页底部的版权行：小型大写、字距拉开 */
+/* 玩法说明（这一局的目标）：挂在 Click to begin 上面一行，正常字号（2026-10-30 试玩 P2-11：原来排成书页底部的版权行，
+ * 小型大写、整页最小最淡，两轮试玩都说没人看）。比按钮小、比 Put on headphones 亮一点，不抢按钮 */
 .hud-hint {
-  position: absolute;
-  z-index: 1;
-  left: 0;
-  right: 0;
-  bottom: 52px;
-  margin: 0;
-  padding: 0 40px;
+  max-width: 34rem;
+  margin: 0.2rem 0 0.9rem;
   text-align: center;
-  font-variant-caps: all-small-caps;
-  letter-spacing: 0.13em;
-  font-size: 1.05rem;
-  line-height: 1.4;
-  color: #a69d8c;
+  text-wrap: balance;
+  font-size: 1.22rem;
+  line-height: 1.45;
+  color: #c9bfa9;
 }
 
 /* 触屏竖屏（hud.ts 给 #hud 加 is-touch）：玩法说明下面另起一行「把手机横过来」，同样的小型大写（2026-10-30 试玩报告 P1-6 c） */
@@ -315,6 +310,12 @@ body {
 .hud-line.is-flee {
   font-family: var(--face-display);
   font-size: 1.22rem;
+}
+
+/* 收夜、天亮那两句（hud.ts 的 sayLine，2026-10-30 试玩 P2-2）：亮度和 exit 一档（骨白），旁白的斜体；不加短剑号、不发光，停得久一点（TICKER.night） */
+.hud-line.is-night {
+  font-style: italic;
+  color: var(--bone);
 }
 
 /* 讣告里的短剑号：这个人从今晚的名单上划掉了 */
@@ -563,13 +564,19 @@ body {
   height: 12px;
   margin: -6px 0 0 -10px;
   color: var(--ash);
+  opacity: 0;
   transform: scaleY(0);
-  transition: transform 0.16s ease-out;
+  /* 灭的时候（2026-10-30 试玩 P1-1 建议 3）：睁着淡掉 0.45 秒（overlays.ts 的 WATCH_LINGER），淡完才收起；不一帧开一帧关，
+   * 读起来是「这个人的手电在扫过去」。淡的途中又有人看着：直接亮回来，不先闭上 */
+  transition: opacity 0.45s ease-in, transform 0s linear 0.45s;
   filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.95));
 }
 
+/* 亮起照旧：0.16 秒睁开 */
 .ov-mark.is-seen .ov-eye {
+  opacity: 1;
   transform: scaleY(1);
+  transition: transform 0.16s ease-out, opacity 0.08s linear;
 }
 
 .ov-mark.is-ready .ov-eye {
@@ -582,7 +589,9 @@ body {
 .ov-mark.is-armed .ov-eye {
   color: rgb(190, 205, 224);
   filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.95));
+  opacity: 1;
   transform: scaleY(1);
+  transition: transform 0.16s ease-out, opacity 0.08s linear;
 }
 
 /* 悬停标签：标本签，用一根细线挂在物件上 */
@@ -664,9 +673,7 @@ body {
   }
 
   .hud-hint {
-    bottom: 36px;
-    padding: 0 28px;
-    font-size: 0.98rem;
+    font-size: 1.08rem;
   }
 
   .hud-counter {
@@ -714,6 +721,16 @@ body {
   .ov-ring,
   .ov-plate-mark {
     transition: none;
+  }
+
+  /* 物件上的眼睛：不做睁开的缩放，只保留淡入淡出（灭的时候照旧淡 0.45 秒） */
+  .ov-mark .ov-eye {
+    transition: opacity 0.45s ease-in, transform 0s linear 0.45s;
+  }
+
+  .ov-mark.is-seen .ov-eye,
+  .ov-mark.is-armed .ov-eye {
+    transition: opacity 0.08s linear;
   }
 
   .hud-btn:active {
@@ -807,6 +824,17 @@ body {
 
 .hud-cool.is-on {
   opacity: 1;
+}
+
+/* 收夜以后、光收回前门那几秒（hud.ts 的 setNightPhase，2026-10-30 试玩 P2-1）：准星和冷却环慢慢淡掉，不闪；Keep haunting 以后回来 */
+.hud-play.is-closing .hud-aim {
+  opacity: 0;
+  transition: opacity 1.2s ease;
+}
+
+.hud-play.is-closing .hud-cool {
+  opacity: 0;
+  transition: opacity 1.2s ease;
 }
 
 /* 一行说明（.hud-note）：开场的操作说明、情境提示、「Click to resume」下面那一行，都是这一种排法（2026-10-30 试玩报告 P1-3）。
@@ -939,6 +967,24 @@ body {
 @media (max-width: 640px) {
   .hud-seg {
     white-space: normal;
+  }
+}
+
+/* 触屏横屏（2026-10-30 试玩 P2-7）：放在计数下面那一行横穿房子的上方，压在物件的眼睛和冷却环上。
+ * 娃娃屋横过来以后四个角只有右上角空着（左上计数、左下播报、右下按钮），情境提示挪到那里，靠右、窄一点、折成几行均匀的。
+ * 横屏没有开场那一句（.hud-keys 只在竖屏说「把手机横过来」），所以只挪 .hud-hintline */
+@media (pointer: coarse) and (orientation: landscape) {
+  .hud-hintline {
+    top: max(14px, env(safe-area-inset-top));
+    right: max(20px, env(safe-area-inset-right));
+    left: auto;
+    bottom: auto;
+    transform: none;
+  }
+
+  .hud-hintline.hud-note {
+    max-width: min(36vw, 22rem);
+    text-align: right;
   }
 }
 

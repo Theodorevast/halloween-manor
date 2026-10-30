@@ -15,7 +15,7 @@ import { angleOf } from '../src/lib/angle';
 import { createWorld } from '../src/sim/world';
 import type { ManifestState, ScareObjectState, SimEvent, Vec2, World, WorldState } from '../src/sim/types';
 import { HINT, bottomLine, createHintCore, createMissWatch, manifestRefusal, trapsFull, type HintEnv } from '../src/ui/hints';
-import { KEYS, TICKER, beginLabel, hudLines, pushLine, type TickerRow } from '../src/ui/hud';
+import { KEYS, TICKER, beginLabel, hudLines, lifeOf, pushLine, sayLine, type TickerRow } from '../src/ui/hud';
 
 const DT = 1 / 60;
 const prop = (id: string) => propCenter(PROPS.find((p) => p.id === id)!);
@@ -678,5 +678,149 @@ describe('够不着（picking 判断：准星对着一个物件，但够不着�
     setGhostUi({ held: true });
     far.press();
     expect(far.far).toEqual([]);
+  });
+});
+
+// ── 试玩之后的打磨（2026-10-30 第一轮试玩 qa-playtest.md 的 P1-1、P2-1、P2-2、P2-3、P2-4）──────────────────
+
+// tsconfig 的 types 里没有 node 的类型：同 overlays.test.ts，用变量当模块名取 node:fs
+const fsIdPL = 'node:fs';
+const { readFileSync: readPL } = (await import(/* @vite-ignore */ fsIdPL)) as { readFileSync(path: URL, encoding: 'utf8'): string };
+const cssPL = readPL(new URL('../src/styles.css', import.meta.url), 'utf8');
+/** 样式表里「只有这一个选择器」的那条规则的声明块；没有就是 null */
+const rulePL = (selector: string): string | null => {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(cssPL)?.[1] ?? null;
+};
+
+describe('第一次落空的提示把套路说出来（P1-1 建议 2）', () => {
+  it('firstMiss：要有人看着；先弄出点声音，或者等眼睛', () => {
+    expect(H.firstMiss).toBe('Scares only work when someone is watching. Make a sound first, or wait for the eye.');
+  });
+});
+
+describe("收夜以后出门不写 Who's next?（P2-1）", () => {
+  const s = calmState();
+  it('收夜以后（closed）：{name} is gone.，照样是讣告那一档、计数照跳', () => {
+    expect(STRINGS.ticker.exitClosed('Maeve')).toBe('Maeve is gone.');
+    expect(hudLines({ type: 'exit', npc: 4, name: 'Maeve', total: 5 }, s, { closed: true })).toEqual({
+      lines: [{ text: 'Maeve is gone.', tone: 'exit' }],
+      count: 5,
+    });
+  });
+  it("收夜以前照旧 Who's next?；天亮自己走的照旧 walked out into the morning", () => {
+    expect(hudLines({ type: 'exit', npc: 4, name: 'Maeve', total: 5 }, s, { closed: false }).lines[0].text).toBe(STRINGS.ticker.exit('Maeve'));
+    expect(hudLines({ type: 'exit', npc: 4, name: 'Maeve', total: 5, calm: true }, s, { closed: true }).lines[0].text).toBe(STRINGS.ticker.leftCalm('Maeve'));
+  });
+  it('光收回那几秒准星和冷却环收起来：.hud-play.is-closing 下 opacity 0、慢慢淡（不闪）', () => {
+    for (const sel of ['.hud-play.is-closing .hud-aim', '.hud-play.is-closing .hud-cool']) {
+      const body = rulePL(sel);
+      expect(body, sel).not.toBeNull();
+      expect(body ?? '').toMatch(/opacity:\s*0\s*;/);
+      const t = /transition:\s*opacity\s+([\d.]+)s/.exec(body ?? '');
+      expect(Number(t?.[1])).toBeGreaterThanOrEqual(0.8);
+    }
+  });
+});
+
+describe('收夜、天亮那两句（P2-2）：exit 那一档的亮度、停约 10 秒', () => {
+  it('sayLine：收夜、天亮那两句是 night 口气；别的（最后一位、平常的 say）照旧', () => {
+    expect(sayLine(STRINGS.ticker.lastCall)).toEqual({ text: STRINGS.ticker.lastCall, tone: 'night' });
+    expect(sayLine(STRINGS.ticker.dawn)).toEqual({ text: STRINGS.ticker.dawn, tone: 'night' });
+    expect(sayLine(STRINGS.ticker.lastArrival('Ada'))).toEqual({ text: STRINGS.ticker.lastArrival('Ada'), tone: 'quiet' });
+    expect(sayLine('x', 'scare').tone).toBe('scare');
+  });
+  it('停 9–11 秒（别的行照旧 TICKER.life）', () => {
+    expect(lifeOf('night')).toBeGreaterThanOrEqual(9);
+    expect(lifeOf('night')).toBeLessThanOrEqual(11);
+    expect(lifeOf('quiet')).toBe(TICKER.life);
+    expect(lifeOf('exit')).toBe(TICKER.life);
+  });
+  it('亮度和 exit 一档（骨白，不是安静行的灰烬色），不加讣告的短剑号、不发光', () => {
+    const body = rulePL('.hud-line.is-night') ?? '';
+    expect(body).toMatch(/color:\s*var\(--bone\)\s*;/);
+    expect(body).not.toMatch(/shadow|glow|animation/);
+    expect(rulePL('.hud-line.is-night::before')).toBeNull();
+  });
+  it('播报满了先挤安静的行：收夜那一句不是安静行，留到自然淡出', () => {
+    const rows: TickerRow[] = [];
+    pushLine(rows, sayLine(STRINGS.ticker.lastCall), 0);
+    for (let k = 0; k < TICKER.max + 2; k++) pushLine(rows, { text: `q${k}`, tone: 'quiet' }, 0.1 * (k + 1));
+    expect(rows.some((r) => r.text === STRINGS.ticker.lastCall)).toBe(true);
+  });
+});
+
+describe('情境提示看玩家已经会了的（P2-3）', () => {
+  it('现身吓到过人：firstRevealed（Right-click or F to appear）不再排；被照着、现身就绪也不出', () => {
+    const core = createHintCore();
+    const env = ghostEnv({ aiming: false });
+    const s = calmState();
+    core.onEvent({ type: 'manifest', phase: 'drop', pos: { x: 3, z: 6 }, scared: [1] }, s, 1);
+    core.onEvent({ type: 'reveal', npc: 2, on: true }, s, 5);
+    expect(core.tick(5, s, env)).toBeNull();
+    expect(core.tick(9, s, env)).toBeNull();
+    expect(core.shown.has('firstRevealed')).toBe(false);
+  });
+  it('现身落空（没吓到人）不算会了：照样出 firstRevealed', () => {
+    const core = createHintCore();
+    const env = ghostEnv({ aiming: false });
+    const s = calmState();
+    core.onEvent({ type: 'manifest', phase: 'drop', pos: { x: 3, z: 6 }, scared: [] }, s, 1);
+    core.onEvent({ type: 'reveal', npc: 2, on: true }, s, 5);
+    expect(core.tick(5, s, env)).toBe('firstRevealed');
+  });
+  it('已经排上、还在等那一行的 firstRevealed：这时现身吓到了人，就不出了', () => {
+    const core = createHintCore();
+    const env = ghostEnv({ aiming: false });
+    const s = calmState();
+    expect(bottomLine.claim('keys')).toBe(true);
+    core.onEvent({ type: 'reveal', npc: 2, on: true }, s, 1);
+    expect(core.tick(1, s, env)).toBeNull();
+    core.onEvent({ type: 'manifest', phase: 'drop', pos: { x: 3, z: 6 }, scared: [2] }, s, 2);
+    bottomLine.release('keys');
+    expect(core.tick(3, s, env)).toBeNull();
+    expect(core.shown.has('firstRevealed')).toBe(false);
+  });
+  it('附身过（玩家点的，不算机关自己发作）：firstAim 只说按住设机关那半句；附身过也设过机关：不出', () => {
+    const core = createHintCore();
+    const env = ghostEnv();
+    const s = calmState();
+    expect(core.textOf('firstAim')).toBe(H.firstAim);
+    // 用引诱类（八音盒）：这里的状态不跟着走，惊吓类会被当成落空、另出一句 firstMiss
+    core.onEvent({ type: 'trigger', object: 'music-box', scareType: 'musicBox' }, s, 1);
+    core.aimed(2, env);
+    expect(core.tick(2, s, env)).toBe('firstAim');
+    expect(core.textOf('firstAim')).toBe('Hold to set a trap');
+    expect(STRINGS.onboarding.aimTrapOnly).toBe('Hold to set a trap');
+
+    const both = createHintCore();
+    both.onEvent({ type: 'trigger', object: 'music-box', scareType: 'musicBox' }, s, 1);
+    both.onEvent({ type: 'trap', object: 'bed', phase: 'armed' }, s, 1.5);
+    both.aimed(2, env);
+    expect(both.tick(2, s, env)).toBeNull();
+    expect(both.shown.has('firstAim')).toBe(false);
+  });
+  it('机关自己发作的那一下（trap sprung 紧跟着的 trigger）不算玩家附身过：firstAim 照旧整句', () => {
+    const core = createHintCore();
+    const env = ghostEnv();
+    const s = calmState();
+    core.onEvent({ type: 'trap', object: 'bed', phase: 'sprung' }, s, 1);
+    core.onEvent({ type: 'trigger', object: 'bed', scareType: 'bed' }, s, 1);
+    core.aimed(2, env);
+    expect(core.tick(2, s, env)).toBe('firstAim');
+    expect(core.textOf('firstAim')).toBe(H.firstAim);
+  });
+});
+
+describe('机关没人来、失效了（P2-4）：播报一行安静的', () => {
+  const s = calmState();
+  it('trap expired：The {物件} stopped waiting.（物件名用显示名、小写），安静的灰字；设下、发作不播', () => {
+    expect(hudLines({ type: 'trap', object: 'bed', phase: 'expired' }, s)).toEqual({
+      lines: [{ text: 'The bed stopped waiting.', tone: 'quiet' }],
+      count: null,
+    });
+    expect(hudLines({ type: 'trap', object: 'wardrobe', phase: 'expired' }, s).lines[0].text).toBe('The wardrobe stopped waiting.');
+    expect(hudLines({ type: 'trap', object: 'bed', phase: 'armed' }, s).lines).toEqual([]);
+    expect(hudLines({ type: 'trap', object: 'bed', phase: 'sprung' }, s).lines).toEqual([]);
   });
 });
