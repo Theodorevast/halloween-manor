@@ -17,19 +17,20 @@ afterEach(() => {
 });
 
 describe('联名皮肤进不进访客轮换', () => {
-  it('不带 ?collab（node 里没有 location 也一样）：只有公开的四套', async () => {
-    expect(names((await load(null)).VISITOR_SPECS)).toEqual(['vampire', 'lantern-explorer', 'witch', 'skeleton']);
-    expect(names((await load('?debug')).VISITOR_SPECS)).toEqual(['vampire', 'lantern-explorer', 'witch', 'skeleton']);
+  it('带 ?nocollab：只有公开的四套', async () => {
+    expect(names((await load('?nocollab')).VISITOR_SPECS)).toEqual(['vampire', 'lantern-explorer', 'witch', 'skeleton']);
+    expect(names((await load('?debug&nocollab')).VISITOR_SPECS)).toEqual(['vampire', 'lantern-explorer', 'witch', 'skeleton']);
   });
 
-  it('带 ?collab（开发服务器、COLLAB=1 构建）：两套联名插在第一套后面——开场照旧是公开的那一套，第 2、3 个进门的人穿联名', async () => {
-    const c = await load('?debug&collab');
+  it('默认（2026-10-30 起公开构建也带）：两套联名插在第一套后面——开场照旧是公开的那一套，第 2、3 个进门的人穿联名；node 里没有 location 也一样', async () => {
+    expect(names((await load(null)).VISITOR_SPECS)).toEqual(['vampire', 'jotaro', 'dio', 'lantern-explorer', 'witch', 'skeleton']);
+    const c = await load('?debug');
     expect(names(c.VISITOR_SPECS)).toEqual(['vampire', 'jotaro', 'dio', 'lantern-explorer', 'witch', 'skeleton']);
     expect(c.VISITOR_SPECS[1]).toBe(c.COLLAB_SPECS[0]);
     expect(c.VISITOR_SPECS[2]).toBe(c.COLLAB_SPECS[1]);
   });
 
-  it('默认构建（__COLLAB__ 为 false）：带 ?collab 也不并', async () => {
-    expect(names((await load('?collab', false)).VISITOR_SPECS)).toEqual(['vampire', 'lantern-explorer', 'witch', 'skeleton']);
+  it('COLLAB=0 构建（__COLLAB__ 为 false）：不并', async () => {
+    expect(names((await load('?debug', false)).VISITOR_SPECS)).toEqual(['vampire', 'lantern-explorer', 'witch', 'skeleton']);
   });
 });

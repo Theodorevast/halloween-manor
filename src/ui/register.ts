@@ -60,7 +60,7 @@ export function inWords(n: number, capital = false): string {
 /**
  * 造型 id（view/characters.ts 的 outfitOf 给的，地址的文件名）→ 登记簿上写的名字。
  * 公开的几套写在 STRINGS.register.outfit；联名两套用 config/character.ts 里 COLLAB_SPECS 自己的 label，
- * 只从 VISITOR_SPECS 里找：并进访客轮换（开发服务器、COLLAB=1 构建，地址带 ?collab）时才找得到，默认构建里 COLLAB_SPECS 连同名字整个被摇掉。
+ * 只从 VISITOR_SPECS 里找：并进访客轮换时才找得到（2026-10-30 起默认并进；地址带 ?nocollab 不并），COLLAB=0 构建里 COLLAB_SPECS 连同名字整个被摇掉。
  * 给不出（还没建好角色、穿备用小人）时是空串：这一项不写
  */
 export function outfitName(id: string | undefined): string {

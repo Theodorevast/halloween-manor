@@ -3,7 +3,7 @@
 //   document.querySelector('[data-start]').click()   关掉开场遮罩
 //   window.__ui.demo()                                 塞 4 条播报、让两个物件进入冷却、悬停一个物件
 //   window.__ui.hover('portrait') / .error() / .exit('Priya')
-// 访客登记簿（2026-10-30「一夜」）：假的一夜，十二个访客、各种走法、一套联名（地址带 ?collab 才写得出联名的名字）：
+// 访客登记簿（2026-10-30「一夜」）：假的一夜，十二个访客、各种走法、一套联名（默认就写得出联名的名字，地址带 ?nocollab 不写）：
 //   window.__ui.register()                               收夜时翻开（Keep haunting · Another night）
 //   window.__ui.register({ closing: false, until: 180 }) 半夜翻开（还有人在屋里；Back to the manor）
 //   window.__ui.register({ other: true })                墙上多一个影子出现过（页脚最后一句）

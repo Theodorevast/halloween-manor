@@ -85,7 +85,7 @@
 
 ## 9. 联名皮肤（新，授权确认前只在本机看）
 
-- **在哪看**：开发服务器的地址加 `?collab`，第 2、3 个进门的人就是翠宝穿承太郎、DIO 的衣服（第一个还是公开的那一套；这两套在后台下载、编好才加进轮换，网速慢时会晚几个人）；单看动作开 `/dev/characters.html?visitor=jotaro&collab`
+- **在哪看**：2026-10-30 起默认就有（地址不用加参数；`?nocollab` 关掉），第 2、3 个进门的人就是翠宝穿承太郎、DIO 的衣服（第一个还是公开的那一套；这两套在后台下载、编好才加进轮换，网速慢时会晚几个人）；单看动作开 `/dev/characters.html?visitor=jotaro&collab`
 - **已改**：承太郎的手套改回灰色、大衣提亮到和吸血鬼的斗篷一样亮；精修时分配权重看距离，承太郎、吸血鬼走路时鞋后跟不再拉长，骷髅、DIO、女巫也重新导出；吸血鬼、探险家的手套换成不会发黑的材质；
   女巫走、跑、逃跑时两只鞋之间拉出的长条去掉了（左鞋底有一块被自动绑到右脚，删掉了；代价是从背后贴地看抬起的左鞋底会露出鞋里面一小块，游戏里光暗基本看不见，看一眼）
 - **要定**：DIO 的头发（从背后看是一整片金色）；承太郎大衣的颜色；像不像；承太郎的大衣下摆有几块现在跟着腿动（修鞋跟的代价），跑、逃跑时看一眼
@@ -134,7 +134,7 @@
 ## 14. 访客登记簿（新）
 
 - **在哪看**：正式游戏玩到收夜，或者 `__haunt.endNight()`；半夜随时点右下角按钮栏左边的本子（开局以后才出现；第三人称要先 Esc 放开鼠标才点得到）。不想玩一夜、只看版式和句子：开发页 `/dev/ui.html?collab`，点开场（控制台 `document.querySelector('[data-start]').click()`）后 `__ui.register()`（收夜那一页）、`__ui.register({ closing: false, until: 180 })`（半夜翻开）、`__ui.register({ other: true })`（墙上影子那一句）、`__ui.register({ crowd: true })`（二十个人）
-- **已改**（RG、集成）：每个访客一条（重名各一行）：名字 · 性格 · 穿哪套，第二行写几点进来、怎么走的，比如 "came in at 9:12 pm; ran from the wardrobe at 9:15"；页脚最多三句（"Five came in. One ran." 一类）；天亮自己走的写 "walked out at 6:04 am, as the sky paled"；被别人的尖叫带跑的写 "ran at 10:04 when someone screamed"；人多时只写前 12 个，剩下的 "and eight others"。钟点由模拟时间换算（晚 9 点到早 6 点，`NIGHT.clock`，一秒两分钟）。联名的两套只在 `?collab` 才出现，默认构建里没有
+- **已改**（RG、集成）：每个访客一条（重名各一行）：名字 · 性格 · 穿哪套，第二行写几点进来、怎么走的，比如 "came in at 9:12 pm; ran from the wardrobe at 9:15"；页脚最多三句（"Five came in. One ran." 一类）；天亮自己走的写 "walked out at 6:04 am, as the sky paled"；被别人的尖叫带跑的写 "ran at 10:04 when someone screamed"；人多时只写前 12 个，剩下的 "and eight others"。钟点由模拟时间换算（晚 9 点到早 6 点，`NIGHT.clock`，一秒两分钟）。联名的两套默认就在（`?nocollab` 关掉；`COLLAB=0` 构建里没有）
 - **要定**
   - 联名两套的名字（`src/config/character.ts` 里 `COLLAB_SPECS` 的 `label`）：现在暂定 `Jotaro`、`DIO`，一行里是 "THEO · skeptic · Jotaro"；另一种写法是 "as Jotaro" / "in Jotaro's coat"（`lane-RG-report.md` 文案建议 1）
   - 天亮那句（`STRINGS.register.leftAtDawn`，`src/config/strings.ts`）：被吓过一下、只是没跑的人也写这一句，只写天色、不评价恐惧，够不够准

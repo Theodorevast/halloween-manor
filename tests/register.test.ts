@@ -465,7 +465,7 @@ describe('穿哪套', () => {
     ]);
     for (const id of ['vampire', 'lantern-explorer', 'witch', 'skeleton', 'fox']) expect(outfitName(id)).toBe(R.outfit[id]);
     expect(outfitName(undefined)).toBe('');
-    expect(outfitName('jotaro')).toBe(''); // node 里没有 location：联名没并进来
+    expect(outfitName('jotaro')).toBe('Jotaro'); // 2026-10-30 起默认并进联名（node 里没有 location 也一样）
   });
 
   test('outfitOf 一开始给不出（角色还没建好）、后来给得出：翻开时再问一次', () => {
@@ -477,9 +477,9 @@ describe('穿哪套', () => {
     expect(n.line(a).outfit).toBe('the skeleton');
   });
 
-  test('联名两套：用 COLLAB_SPECS 自己的 label，只在并进访客轮换（开发服务器、COLLAB=1 构建，地址带 ?collab）时查得到', async () => {
+  test('联名两套：用 COLLAB_SPECS 自己的 label，并进访客轮换时查得到（2026-10-30 起默认并进）', async () => {
     vi.resetModules();
-    vi.stubGlobal('location', { search: '?collab' });
+    vi.stubGlobal('location', { search: '' });
     const c = await import('../src/config/character');
     const r = await import('../src/ui/register');
     const labels = c.COLLAB_SPECS.map((s) => s.label);
@@ -489,9 +489,13 @@ describe('穿哪套', () => {
     expect(c.VISITOR_SPECS.filter((s) => !c.COLLAB_SPECS.includes(s)).map((s) => s.label)).toEqual([undefined, undefined, undefined, undefined]);
   });
 
-  test('默认构建（__COLLAB__ 为 false）：带 ?collab 也查不到联名的名字', async () => {
+  test('COLLAB=0 构建（__COLLAB__ 为 false）、或者地址带 ?nocollab：查不到联名的名字', async () => {
     vi.resetModules();
-    vi.stubGlobal('location', { search: '?collab' });
+    vi.stubGlobal('location', { search: '?nocollab' });
+    const r0 = await import('../src/ui/register');
+    expect(r0.outfitName('jotaro')).toBe('');
+    vi.resetModules();
+    vi.stubGlobal('location', { search: '' });
     vi.stubGlobal('__COLLAB__', false);
     const r = await import('../src/ui/register');
     expect(r.outfitName('jotaro')).toBe('');
