@@ -33,7 +33,8 @@ function stripCollab(): Plugin {
 export default defineConfig(({ command }) => ({
   base: './',
   build: { target: 'es2022', chunkSizeWarningLimit: 1500 },
-  server: { host: '127.0.0.1' },
+  // watch.ignored：开发服务器默认监视整个目录，.logs、.superpowers 里写一个 .html / .ts，所有打开的游戏页面都会整页刷新（2026-10-30 一小时 183 次）
+  server: { host: '127.0.0.1', watch: { ignored: ['**/.logs/**', '**/.superpowers/**', '**/assets/**', '**/assets-src/**', '**/shots/**', '**/dist/**'] } },
   // 开发服务器、COLLAB=1 构建时为 true，默认构建为 false（见上面）；类型声明在 src/env.d.ts，vitest.config.ts 另给一份
   define: { __COLLAB__: JSON.stringify(command === 'serve' || COLLAB) },
   plugins: [stripCollab()],
