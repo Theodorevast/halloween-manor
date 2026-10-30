@@ -5,10 +5,13 @@
 // - 外形（buildGhostGeometry，唯一建网格的地方）：程序化的旋转体，兜帽、肩、垂到下摆的长袍，椭圆截面、下摆有褶。
 //   以后换成 Tripo 生成的模型时只换这个函数，材质（createGhostMaterial）不依赖 uv 或特定属性，任何网格都能用：
 //   只要模型局部坐标 y 向上、正面朝 +z，按包围盒给 GhostLook 的 bottom / top
-// - 材质：不受光照、加法混合（双重曝光就是加法），两层：
-//   身体（双面：背面叠在正面后面，中间厚、边上薄，像一团有体积的雾）+ 外面一层放大一点、更淡更散的「雾晕」，看着发虚。
-//   不透明度 = 朝向镜头的程度（轮廓边缘自然变淡，看着模糊）× 往上飘的噪声侵蚀（越往下摆、越靠轮廓侵蚀越多，散成一缕一缕）
-//   × 下摆淡出 × 镜头太近时淡出（不挡视线）。顶点上有很慢的飘动，走动时下摆往后拖
+// - 材质：不受光照，两层：身体 + 外面一层放大一点、更淡更散的「雾晕」（加法），看着发虚。
+//   形状 = 朝向镜头的程度（轮廓边缘自然变淡）× 往上飘的噪声侵蚀（越往下摆、越靠轮廓侵蚀越多，散成一缕一缕）
+//   × 下摆淡出 × 镜头太近时淡出（不挡视线）。顶点上有很慢的飘动，走动时下摆往后拖。
+//   2026-10-30 用户试玩（路 GH）：「太透明」「我老以为它朝着我」。身体原来是双面、加法混合（双重曝光），背面那层叠在正面后面，
+//   从背后看兜帽正面那个深洞也透过来，背影像正脸。改成只画正面、预乘的普通混合：发光照旧，同时挡住身后（GHOST.body 的 cover）；
+//   兜帽背面是有布褶明暗的浅色料子（GHOST.fold），正面兜帽里是挡光的深洞，只有从正面看得到洞里两点很淡的冷光（GHOST.eyes）；
+//   飘动时按速度往前倾、下摆和袖口往后拖（GHOST.tilt、GHOST.lean）；镜头贴近时雾晕淡掉（GHOST.hazeNear）
 // - 冷雾（实例化精灵，一次绘制）：走动时从下摆不断飘出、往后落、慢慢沉、散开；穿墙那一刻（rig.ghost.inWall 变成 true）
 //   在墙面两侧喷一团（同一个缓冲、同一个材质，运行时不建任何新东西）
 // - 墙、家具在鬼魂周围溶开由 house.ts / walls.ts 负责（DISSOLVE），这里只管鬼魂自己
@@ -21,16 +24,17 @@
 //   「实」的那份标了 deferCompile，开场按钮可用之后由 main.ts 预编译
 // - 挡住访客时自己淡下去（2026-10-30，手感 FEEL-5，参数见 GHOST.occlude）：朝人飘过去时他就在鬼魂身后，贴近发毛、现身落下被吓的人、
 //   吓跑的人都被鬼魂自己挡住。每帧把鬼魂和比它离镜头更远的访客投到屏幕上，访客被鬼魂的矩形盖住得多就把 u.fade 乘一个小于 1 的数
-//   （平时 0.35、现身的实体 0.5、正被手电照出来 0.6），变淡快、回来慢；只是 uniform 的值，不加材质。只算看得见的访客（隔着墙的不算）
+//   （平时 0.6、现身的实体 0.7、正被手电照出来 0.75；路 GH 从 0.35 / 0.5 / 0.6 上调），变淡快、回来慢；只是 uniform 的值，不加材质。
+//   只算看得见的访客（隔着墙的不算）
 // ?noghostfx：不画鬼魂（量开销的对照，和 house.ts 一致）
 import * as THREE from 'three/webgpu';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
-  abs, acos, attribute, clamp, cos, dot, exp, float, floor, instancedDynamicBufferAttribute, length, max, min, mix, modelViewMatrix,
-  mx_noise_float, mx_noise_vec3, normalView, normalWorld, positionLocal, positionViewDirection, positionWorld,
-  pow, sin, smoothstep, uniform, uv, varying, vec2, vec3, vec4,
+  abs, acos, atan, attribute, cameraPosition, clamp, cos, dot, exp, float, floor, instancedDynamicBufferAttribute, length, max, min, mix,
+  modelViewMatrix, modelWorldMatrix, mx_noise_float, mx_noise_vec3, normalView, normalWorld, positionGeometry, positionLocal,
+  positionViewDirection, positionWorld, pow, sin, smoothstep, uniform, uv, varying, vec2, vec3, vec4,
 } from 'three/tsl';
 import { CHARACTER } from '../config/character';
 import { GHOST_MODEL } from '../config/ghost';
@@ -83,9 +87,19 @@ export const GHOST_BODY = {
   /** 长袍的褶：几道、下摆处的深度（米） */
   folds: 9,
   foldDepth: 0.02,
-  /** 网格密度：一圈几段、从头到下摆几圈 */
-  segments: 40,
-  rings: 44,
+  /**
+   * 兜帽里的脸洞（2026-10-30 路 GH，和 GLB 一样：「兜帽里的脸推成深洞」）：正面（方位角 ±w 弧度）、高度 y ± h 的椭圆里往中轴推，
+   * 中间推 depth 米、边上不动（(1 − r²)^0.75，r 是到椭圆中心的归一化距离）；洞里的遮蔽 occl 跟着暗下去（中心 0、边上 1）。
+   * 背面没有洞，兜帽背面的遮蔽全是 1
+   */
+  face: { y: 0.25, h: 0.08, w: 0.62, depth: 0.065 },
+  /** 两只眼睛（GHOST.eyes）：洞里离正面 ±th 弧度、比脸中心高 dy 米，贴着洞底再往前 lift 米（procGhostEyes） */
+  eye: { th: 0.3, dy: 0.012, lift: 0.004 },
+  /** 长袍褶子凹进去的那一侧暗一点（遮蔽 occl 最多压掉这么多，「布褶明暗」；GLB 的褶子由烘的 _OCCL 管） */
+  foldShade: 0.3,
+  /** 网格密度：一圈几段、从头到下摆几圈（脸洞要几圈才看得出形状：原来 40 × 44） */
+  segments: 48,
+  rings: 72,
 };
 
 /** 外观：颜色（线性）、两层的浓淡与噪声。ghost.y 处的身体约 2.4 米外看过去，要认得出是个人，又不抢画面 */
@@ -94,16 +108,61 @@ export const GHOST = {
   core: new THREE.Color(0.62, 0.7, 0.82).multiplyScalar(0.44),
   edge: new THREE.Color(0.36, 0.48, 0.66).multiplyScalar(0.44),
   /**
-   * 身体一层（双面）+ 外面一层雾晕（同一个网格沿法线外扩）。inflate 外扩（米）、density 最浓处的不透明度、noise 每米几个起伏、
+   * 身体一层 + 外面一层雾晕（同一个网格沿法线外扩）。inflate 外扩（米）、density 最浓处发光的量、noise 每米几个起伏、
    * rise 烟往上飘的速度（米/秒）、erode 侵蚀阈值 [头部, 下摆]（越大散得越多）、
-   * soft：朝向镜头的程度在这两个值之间淡入（轮廓边缘一圈渐隐；几层叠起来，轮廓就是糊的）
+   * soft：朝向镜头的程度在这两个值之间淡入（轮廓边缘一圈渐隐）。
+   * 2026-10-30 用户试玩（路 GH）：「太透明」「我老以为它朝着我」。原来身体是双面、加法混合：背面那层叠在正面后面，身后的东西全透出来，
+   * 从背后看兜帽正面那个深洞（烘的遮蔽是 0）也透过来，背影和正脸一模一样（看样报告 eye.md G-2）。改成：
+   * - side：身体只画正面（朝镜头的那层），背面的洞、褶子不再透过来；
+   * - cover：预乘的普通混合，颜色是发光（乘过浓淡），alpha 是挡住身后多少（最浓处 cover，被手电照着往 reveal.cover 走；
+   *   跟着雾的浓淡不匀一起变，幅度比发光小（coverCloud）：薄的地方又暗又透一点，亮的背景前不成一块灰斑，也不透出一个个洞）。
+   *   发光照旧（暗房间里看着和原来一样亮），身后的灯、墙、人被挡掉一大半，不再像一层叠上去的光。
+   *   兜帽里的洞挡得更多（hollow）：洞是一团黑，不是透过去看见身后的窗。
+   *   不写深度（写了 AO 会把它当实物，墙根、身后出黑晕），自己前后叠着的几层靠画的顺序：三角形按遮蔽排，里面的先画、外面的后画
+   *   （ensureGhostAttributes），从背后看，盖在最上面的不会是兜帽洞里的暗面；
+   * - density 0.22 → 0.42：原来正反两层各 0.22 叠起来，现在只有一层；soft 收紧一点（轮廓外面那圈糊的交给雾晕）；
+   * - erode 头部那一端 0.24 → 0.12：原来兜帽、肩膀上也被噪声蚀出一个个透的洞，看着像一团散开的烟；现在上半身是整块的布，
+   *   往下摆才散成一缕一缕（轮廓附近照旧多蚀一点）。
+   * 雾晕还是加法（cover 不写 = 0）、只画正面，近处由 hazeNear 淡掉
    */
-  body: { inflate: 0, density: 0.22, noise: 3.4, rise: 0.2, erode: [0.24, 0.86], soft: [0.12, 1.0] } as GhostLayer,
+  body: {
+    inflate: 0, density: 0.42, noise: 3.4, rise: 0.2, erode: [0.12, 0.86], soft: [0.08, 0.8], side: THREE.FrontSide, cover: 0.88,
+  } as GhostLayer,
+  /**
+   * 兜帽里的洞挡住身后多少：两只眼睛中点附近（鬼魂局部坐标的椭球，半径 radius 米，外面 30% 渐渐淡出）、遮蔽低的地方（× (1 − occl)）
+   * 从 cover 往 alpha 走。只认眼睛附近：这个模型别处的褶子、帽檐里也有一块块遮蔽低的三角形，都加厚的话成了一块块黑斑。
+   * 只在从正面看时（hollowGate：dot(片元 → 镜头, 鬼魂的正面) 过 gate，偏 60° 以内满、偏 81° 以外没有）：洞里朝侧面、朝后的那些面
+   * 从旁边、后面看不是洞，加厚了就是身上一道道黑条。比眼睛的范围（GHOST.eyes.gate）宽：看得到眼睛的角度，洞一定是黑的
+   */
+  hollow: { alpha: 1, radius: [0.075, 0.1, 0.09] as [number, number, number], gate: [0.15, 0.5] as [number, number] },
   haze: [
-    { inflate: 0.065, density: 0.1, noise: 1.9, rise: 0.14, erode: [0.27, 0.77], soft: [0.0, 1.0], octaves: 1 },
+    { inflate: 0.065, density: 0.1, noise: 1.9, rise: 0.14, erode: [0.27, 0.77], soft: [0.0, 1.0], octaves: 1, side: THREE.FrontSide },
   ] as GhostLayer[],
-  /** 身体里浓淡不匀（像一团雾而不是一块磨砂玻璃）：噪声低处只剩这个比例 */
-  cloud: 0.55,
+  /**
+   * 身体里浓淡不匀（像一团雾而不是一块磨砂玻璃）：噪声低处发光只剩 cloud 这个比例，挡住身后多少只剩 coverCloud（窗户、台灯照亮的地方最亮，
+   * 挡的量跟着发光一起掉到六成的话，亮处一块块透出来，又成了「太透明」）；兜帽洞里都不乘
+   */
+  cloud: 0.6,
+  coverCloud: 0.82,
+  /**
+   * 布褶明暗（路 GH：兜帽背面「浅一些、有布褶明暗的料子」）：不受光照的材质上加一盏跟着镜头的主光（视图空间里从左上、偏镜头这边打过来），
+   * 半兰伯特：发光 × mix(1 − amount, 1, dot(法线, key) × 0.5 + 0.5)。褶子朝左上的那面亮、朝右下的那面暗，从哪个方向看都读得出布料的起伏；
+   * 只乘发光，不改挡住多少。
+   * back：这个模型的背面几乎是光滑的，没有褶子给主光照，所以背面那半边（鬼魂局部 z 从 z[1] 到 z[0] 渐渐算上，离中轴 r 米之间渐渐算上，
+   * 头顶不收成一个点）再按方位角叠一层竖褶的明暗：count、count2 两组正弦（和程序化人形的褶同一个式子，warp 让褶子随高度歪一点），
+   * 暗处压掉 amount。不多一次噪声；正面的褶子是模型自己的，不叠
+   */
+  fold: {
+    key: [-0.45, 0.75, 0.48] as [number, number, number], amount: 0.32,
+    back: { count: 11, count2: 5, warp: 2.4, amount: 0.45, z: [-0.05, 0.02] as [number, number], r: [0.03, 0.11] as [number, number] },
+  },
+  /**
+   * 眼睛（路 GH：「正面的兜帽里是深的空洞，只有从正面才看得到两点很淡的冷光」）：模型兜帽洞里两个点（GhostLook.eyes，鬼魂局部坐标，
+   * GLB 的在 config/ghost.ts，程序化的见 procGhostEyes），离点 radius 米处按高斯淡下去，颜色 color × glow，不受遮蔽（洞里也亮）。
+   * 看得见的程度 = smoothstep(gate, dot(片元 → 镜头, 鬼魂的正面))：正对着满，偏 30° 还是满，偏 63° 以外没有，背后、侧面都是 0；
+   * 加上身体只画正面（背后看，洞底那面是背面，不画），从背后怎么都看不到。灯不新加，只是身体、实体那两份材质里多几行
+   */
+  eyes: { radius: 0.0055, glow: 0.16, color: new THREE.Color(0.55, 0.7, 1.0), gate: [0.45, 0.85] as [number, number] },
   /** 下摆淡出：从最底下到身高的这个比例之间淡入 */
   hemFade: 0.4,
   /** 头和肩略浓一点（身高比例 [起, 满]、多浓） */
@@ -111,20 +170,39 @@ export const GHOST = {
   /** 很慢的整体明暗起伏（像呼吸）：周期秒、幅度 */
   breathe: { period: 4.6, amount: 0.08 },
   /**
-   * 镜头离鬼魂身体中部 near[0] 米以内只剩 minAlpha，near[1] 米以外完整。滚轮拉到最近（身后 1 米）时离身体中部约 1.2 米，
-   * 仍然完整；只有镜头被挤进鬼魂身子里时才淡掉，不挡视线
+   * 镜头离鬼魂身体中部 near[0] 米以内只剩 minAlpha，near[1] 米以外完整（nearFade）。滚轮拉到最近（身后 1 米）时离身体中部约 1.2 米，
+   * 仍然完整；只有镜头被挤进鬼魂身子里时才淡掉，不挡视线。
+   * minAlpha 0.08 → 0.3（路 GH，「太透明」：天花板压短吊臂、镜头贴着鬼魂时原来只剩一层影子）。身体只画正面以后，镜头整个进到身子里时
+   * 一面都不画，不会糊一屏
    */
-  near: [0.35, 0.95] as [number, number],
-  minAlpha: 0.08,
+  near: [0.3, 0.9] as [number, number],
+  minAlpha: 0.3,
+  /**
+   * 雾晕近处淡掉（hazeFade，路 GH，看样报告 S-3「近距离的鬼魂不要加重影和模糊」）：镜头离身体中部 hazeNear[0] 米以内没有雾晕，
+   * hazeNear[1] 米以外完整（默认吊臂约 2.5 米）。近看时外扩 6.5 厘米的那层壳和身体错开，像重影
+   */
+  hazeNear: [0.9, 1.7] as [number, number],
   /** 顶点飘动：幅度（米，头部 base、下摆 base + low）、噪声频率、飘动速度 */
   sway: { base: 0.006, low: 0.05, freq: 1.3, speed: 0.3 },
-  /** 走动时下摆往后拖：每 (米/秒) 拖多少米、最多多少 */
-  lean: { perSpeed: 0.07, max: 0.2 },
+  /**
+   * 走动时往后拖：每 (米/秒) 拖多少米、最多多少。拖的权重（trailWeight）：下摆 (1 − 身高比例)²；
+   * 袖口（路 GH）：离中轴 cuff.r 米之间渐渐算上、身高比例在 cuff.h 的 [0]–[1] 淡入、[2]–[3] 淡出的那一段，按 cuff.k 拖（GLB 的袖子垂在
+   * 身体两侧，离中轴约 0.25 米；程序化的人形那一段是肩膀和上臂）
+   */
+  lean: { perSpeed: 0.07, max: 0.2, cuff: { r: [0.14, 0.24] as [number, number], h: [0.3, 0.45, 0.62, 0.78] as [number, number, number, number], k: 0.6 } },
+  /**
+   * 飘动时前倾（路 GH：「飘动时身体往前倾（按速度，最多约 8°）」，朝向一眼看出）：角度 = min(max, 速度 × perSpeed)，往运动的方向倾
+   * （往前飘往前倾，倒着飘往后倾，横着飘往旁边倾），绕身高 pivot 处的水平轴（小角度按剪切算，见 swayAndLean）。
+   * 速度用平滑过的那个（velTau），倾斜再平滑 tau 秒，起停不顿。墙上的影子跟着倾，现身的实体不动不倾
+   */
+  tilt: { max: (8 * Math.PI) / 180, perSpeed: (5 * Math.PI) / 180, pivot: 0.45, tau: 0.2 },
   /** 朝向平滑（秒）：身子比镜头晚一点点转过去 */
   turnTau: 0.09,
   /** 速度平滑（秒） */
   velTau: 0.15,
-  /** 画在雾（1.5）、手电光锥（2）之后；冷雾在它前面一点 */
+  /**
+   * 画在雾（1.5）、手电光锥（2）之后；冷雾在它后面一点（路 GH：身体现在挡住身后，冷雾大多飘在鬼魂和镜头之间，先画的话会被它盖住）
+   */
   renderOrder: 2.7,
   /**
    * 被手电照出（G1）。片元在第 i 支手电的光锥里的程度 =
@@ -141,7 +219,8 @@ export const GHOST = {
    * 混进冷蓝的身体里偏粉）
    */
   reveal: {
-    density: 3, soft: 0.55, warm: 0.22, edge: 0.35,
+    /** cover：照满时挡住身后多少（路 GH，平时 GHOST.body.cover） */
+    density: 3, cover: 0.92, soft: 0.55, warm: 0.22, edge: 0.35,
     far: 0.7,
     near: [0.5, 1.4] as [number, number],
     warmColor: new THREE.Color(0.9, 0.86, 0.8).multiplyScalar(0.5),
@@ -214,10 +293,13 @@ export const GHOST = {
   shadow: { on: [0.15, 0.3] as [number, number], hemCut: 0.12 },
   /**
    * 遮蔽（2026-10-29，换成网格模型）：几何体每个顶点带一个 occl（0..1，1 = 敞开；scripts/blender/ghost_cleanup.py 打射线烘的，
-   * GLB 里叫 _OCCL）。平时的鬼魂不透明度 × mix(1, occl, body)，「实」的那份颜色（含手电照的那一面）× mix(1, occl, solid)：
-   * 兜帽里那个洞、褶子深处暗下去，洞读成一团黑，不是一张脸。程序化的人形和没带 occl 的模型全是 1，和原来一样
+   * GLB 里叫 _OCCL）。平时的鬼魂发光 × mix(1, occl, k)（挡住身后多少不乘：洞里是暗的、不是透的），「实」的那份颜色（含手电照的那一面）
+   * × mix(1, occl, solid)：兜帽里那个洞、褶子深处暗下去，洞读成一团黑，不是一张脸。程序化的人形的脸洞、褶子在 buildGhostGeometry 里
+   * 自己算 occl（路 GH）；没带 occl 的模型全是 1。
+   * k：兜帽洞里（GHOST.hollow 的范围）压满 1，别处 body = 0.55（路 GH）。身体只画正面以后，这个模型帽檐、褶子里一块块遮蔽为 0 的
+   * 三角形成了一块块锯齿状的黑斑（原来背面那层叠上来把它们盖住了），压一半，褶子还是暗一点
    */
-  occlusion: { body: 1, solid: 1 },
+  occlusion: { body: 0.55, solid: 1 },
   /**
    * 挡住访客时自己淡下去（手感 FEEL-5）。朝人飘过去时他就在鬼魂身后（鬼魂离镜头近、他远，过肩只偏 0.32 米，2 米外的人正好落在鬼魂身宽的投影里），
    * 贴近发毛、现身落下被吓的人、吓跑的人都被鬼魂自己挡住，画面里约四成的人看不见。做法：每帧用 GhostRig.toScreen 投出鬼魂的屏幕矩形
@@ -225,11 +307,14 @@ export const GHOST = {
    * （visitorBox：脚到 CHARACTER.targetHeight + top 米，左右各 half 米；没走的都算，吓跑的也算——吓跑那一下正是要看清他的时候），
    * 算访客的矩形被鬼魂的矩形盖住的比例（重叠面积 ÷ 访客的面积），取最大的（每帧只看离镜头最近的 people 个）：overlap。
    * cover = smoothstep(from, to, overlap)，再平滑：cover 往上走（挡住了，鬼魂要淡）用 in 秒，往下走（让开了）用 out 秒，指数逼近。
-   * u.fade 再乘 lerp(1, k, cover)：k 平时 alpha，现身的实体 solid（吓人的那一下，留一半），正被手电照着（revealNow > lit）revealed
-   * （「被照出来」的显形要看得见）；k 自己的切换也按 out 秒平滑，不跳。只改 uniform 的值：墙上的影子那份网格只进手电阴影图，不受影响
+   * u.fade 再乘 lerp(1, k, cover)：k 平时 alpha，现身的实体 solid（吓人的那一下），正被手电照着（revealNow > lit）revealed
+   * （「被照出来」的显形要看得见）；k 自己的切换也按 out 秒平滑，不跳。只改 uniform 的值：墙上的影子那份网格只进手电阴影图，不受影响。
+   * 2026-10-30 路 GH（用户：「太透明」）：0.35 / 0.5 / 0.6 → 0.6 / 0.7 / 0.75。实体、被照着照比例上调：淡掉的那一截（1 − k）
+   * 和平时同一个比例缩（0.4 / 0.65）。u.fade 现在同时乘发光和挡住身后多少：挡在人前时，身子最浓处挡掉人 GHOST.body.cover（0.88）
+   * × 雾的浓淡（coverCloud 0.82–1）× 0.6 ≈ 四到五成，人还看得见
    */
   occlude: {
-    alpha: 0.35, solid: 0.5, revealed: 0.6, from: 0.15, to: 0.5, in: 0.12, out: 0.35,
+    alpha: 0.6, solid: 0.7, revealed: 0.75, from: 0.15, to: 0.5, in: 0.12, out: 0.35,
     ghostBox: { y: [0.55, 2.05] as [number, number], half: 0.32 },
     visitorBox: { top: 0.15, half: 0.25 },
     range: 8,
@@ -312,8 +397,12 @@ export const GHOST_MIST = {
   near: [0.35, 1.1] as [number, number],
 };
 
-/** 换模型时告诉材质：模型局部 y 的范围（下摆完全散掉的地方、头顶） */
-export interface GhostLook { bottom: number; top: number }
+/** 换模型时告诉材质：模型局部 y 的范围（下摆完全散掉的地方、头顶）；眼睛的位置（GHOST.eyes，鬼魂局部坐标，没有就不画） */
+export interface GhostLook {
+  bottom: number;
+  top: number;
+  eyes?: readonly (readonly [number, number, number])[] | null;
+}
 /** 一层的参数（见 GHOST.body / GHOST.haze） */
 export interface GhostLayer {
   inflate: number;
@@ -324,6 +413,10 @@ export interface GhostLayer {
   soft: [number, number];
   /** 噪声几层（雾晕本来就糊，一层就够，省一半噪声） */
   octaves?: 1 | 2;
+  /** 画哪一面（不写 = 正面） */
+  side?: THREE.Side;
+  /** 挡住身后多少（> 0：预乘的普通混合，见 GHOST.body；不写 / 0：加法混合，只发光） */
+  cover?: number;
 }
 
 // ───────────────────────── 外形 ─────────────────────────
@@ -351,8 +444,42 @@ function profileAt(y: number): [number, number, number] {
 }
 
 /**
- * 鬼魂的网格（唯一建形状的地方，换模型时换这里）：头顶到下摆的旋转体，下摆敞口。
- * 圈按弧长均匀分布（头部弯得急的地方圈更密），法线平滑
+ * 程序化人形表面上方位角 th（弧度，0 = 正面 +z，往 +x 转）、高度 y 处的点和遮蔽（buildGhostGeometry、procGhostEyes 共用）：
+ * 兜帽（头的后侧鼓出来）、长袍的竖褶（往下越来越深，带一点不对称）、脸洞（GHOST_BODY.face，往中轴推）。
+ * 遮蔽：脸洞里中心 0、边上 1；长袍褶子凹进去的那一侧压掉最多 foldShade
+ */
+function ghostSurface(th: number, y: number, face = true): { x: number; y: number; z: number; occl: number } {
+  const B = GHOST_BODY, F = B.face;
+  const [r, sx, sz] = profileAt(y);
+  const headK = smooth01(0.1, 0.2, y); // 1 = 头部
+  const robeK = smooth01(-0.2, -1.0, y); // 1 = 下摆
+  const c = Math.cos(th), sn = Math.sin(th);
+  const hood = 1 + B.hood * headK * Math.max(0, -c) ** 1.5;
+  const wave = Math.sin(th * B.folds + y * 3.1) * 0.7 + Math.sin(th * 4 + 1.3) * 0.3;
+  const fold = B.foldDepth * robeK * wave;
+  // 脸洞：r² 是到椭圆中心的归一化距离的平方，bowl = 1 − r²（中心 1、边上 0）
+  const fr2 = (wrapAngle(th) / F.w) ** 2 + ((y - F.y) / F.h) ** 2;
+  const bowl = face ? Math.max(0, 1 - fr2) : 0;
+  const rr = r * hood + fold - F.depth * bowl ** 0.75;
+  const occl = (1 - smooth01(0, 0.45, bowl)) * (1 - B.foldShade * robeK * Math.max(0, -wave));
+  return { x: sn * rr * sx, y, z: c * rr * sz + B.headForward * headK, occl };
+}
+
+/**
+ * 程序化人形的两只眼睛（GhostLook.eyes，鬼魂局部坐标）：脸洞里离正面 ±eye.th、比脸中心高 eye.dy，贴着洞底再往前 eye.lift 米
+ * （网格是折线，比曲面靠前一点点，不抬一点眼睛会埋在面后面）
+ */
+export function procGhostEyes(): [number, number, number][] {
+  const B = GHOST_BODY, E = B.eye;
+  return [1, -1].map((s) => {
+    const p = ghostSurface(E.th * s, B.face.y + E.dy);
+    return [p.x, p.y, p.z + E.lift] as [number, number, number];
+  });
+}
+
+/**
+ * 鬼魂的网格（唯一建形状的地方，换模型时换这里）：头顶到下摆的旋转体，下摆敞口，正面有脸洞（ghostSurface）。
+ * 圈按弧长均匀分布（头部弯得急的地方圈更密），法线平滑；顶点带遮蔽 occl（材质读它，见 GHOST.occlusion）
  */
 export function buildGhostGeometry(): THREE.BufferGeometry {
   const B = GHOST_BODY;
@@ -377,20 +504,18 @@ export function buildGhostGeometry(): THREE.BufferGeometry {
 
   const seg = B.segments;
   const pos: number[] = [];
+  /** 不推脸洞时的位置：只拿来算雾晕外扩的方向（见下面的 inflate） */
+  const plain: number[] = [];
+  const occl: number[] = [];
   const index: number[] = [];
   for (let i = 0; i <= B.rings; i++) {
-    const y = ys[i];
-    const [r, sx, sz] = profileAt(y);
-    const headK = smooth01(0.1, 0.2, y); // 1 = 头部
-    const robeK = smooth01(-0.2, -1.0, y); // 1 = 下摆
     for (let j = 0; j <= seg; j++) {
       const th = (j / seg) * Math.PI * 2;
-      const c = Math.cos(th), sn = Math.sin(th);
-      // 兜帽：头的后侧鼓出来；长袍：往下越来越深的竖褶，带一点不对称
-      const hood = 1 + B.hood * headK * Math.max(0, -c) ** 1.5;
-      const fold = B.foldDepth * robeK * (Math.sin(th * B.folds + y * 3.1) * 0.7 + Math.sin(th * 4 + 1.3) * 0.3);
-      const rr = r * hood + fold;
-      pos.push(sn * rr * sx, y, c * rr * sz + B.headForward * headK);
+      const s = ghostSurface(th, ys[i]);
+      pos.push(s.x, s.y, s.z);
+      occl.push(s.occl);
+      const q = ghostSurface(th, ys[i], false);
+      plain.push(q.x, q.y, q.z);
     }
   }
   for (let i = 0; i < B.rings; i++) {
@@ -400,21 +525,32 @@ export function buildGhostGeometry(): THREE.BufferGeometry {
       index.push(a, cc, b, b, cc, d);
     }
   }
+  /** 按位置算平滑的法线：首尾两列在同一条接缝上取平均（不出折痕），头顶那一圈退化的三角形直接朝上（不然头顶有个暗点） */
+  const normalsOf = (p: number[]) => {
+    const t = new THREE.BufferGeometry();
+    t.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+    t.setIndex(index);
+    t.computeVertexNormals();
+    const n = t.getAttribute('normal') as THREE.BufferAttribute;
+    for (let i = 0; i <= B.rings; i++) {
+      const a = i * (seg + 1), b = a + seg;
+      const nx = n.getX(a) + n.getX(b), ny = n.getY(a) + n.getY(b), nz = n.getZ(a) + n.getZ(b);
+      const l = Math.hypot(nx, ny, nz) || 1;
+      n.setXYZ(a, nx / l, ny / l, nz / l);
+      n.setXYZ(b, nx / l, ny / l, nz / l);
+    }
+    for (let j = 0; j <= seg; j++) n.setXYZ(j, 0, 1, 0);
+    t.dispose();
+    return n;
+  };
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('occl', new THREE.Float32BufferAttribute(occl, 1));
   g.setIndex(index);
-  g.computeVertexNormals();
-  // 首尾两列在同一条接缝上：法线取平均，接缝处不出现一道折痕
-  const n = g.getAttribute('normal') as THREE.BufferAttribute;
-  for (let i = 0; i <= B.rings; i++) {
-    const a = i * (seg + 1), b = a + seg;
-    const nx = n.getX(a) + n.getX(b), ny = n.getY(a) + n.getY(b), nz = n.getZ(a) + n.getZ(b);
-    const l = Math.hypot(nx, ny, nz) || 1;
-    n.setXYZ(a, nx / l, ny / l, nz / l);
-    n.setXYZ(b, nx / l, ny / l, nz / l);
-  }
-  // 头顶那一圈几乎缩成一个点，三角形是退化的，算出来的法线乱指：直接朝上（不然头顶有个暗点）
-  for (let j = 0; j <= seg; j++) n.setXYZ(j, 0, 1, 0);
+  g.setAttribute('normal', normalsOf(pos));
+  // 雾晕外扩的方向（ensureGhostAttributes 的 inflate）：按没推脸洞的形状算。脸洞里的法线往中间收，沿它外扩的那层壳在洞口
+  // 自己折叠，出一道道亮线（GLB 的 _INFLATE 是反复平均过的方向，同一个道理）
+  g.setAttribute('inflate', normalsOf(plain));
   g.computeBoundingSphere();
   return g;
 }
@@ -432,6 +568,10 @@ export function makeGhostUniforms() {
     fade: uniform(1),
     /** 下摆往后拖的量（模型局部 x, z，米） */
     lean: uniform(new THREE.Vector2(0, 0)),
+    /** 飘动时前倾（GHOST.tilt）：模型局部 x, z = 倾的方向 × tan(角度) */
+    tilt: uniform(new THREE.Vector2(0, 0)),
+    /** 雾晕还剩多少（hazeFade：镜头贴近时没有雾晕） */
+    haze: uniform(1),
     /** 手电（G1，TORCH_COUNT 支）：xyz 位置（世界坐标）、w 照多远（米）；光轴（单位向量）、w = cos(半角)；强度 × 中间没有墙 */
     torchPos: Array.from({ length: TORCH_COUNT }, () => uniform(new THREE.Vector4(0, -1000, 0, 1))),
     torchDir: Array.from({ length: TORCH_COUNT }, () => uniform(new THREE.Vector4(0, 0, 1, 1))),
@@ -451,13 +591,63 @@ export function makeGhostUniforms() {
   };
 }
 
-/** 顶点：很慢的飘动（下摆飘得多）+ 走动时下摆往后拖（模型局部坐标）。画面上的身体、雾晕和影子共用 */
-function swayAndLean(u: GhostUniforms, P0: V3n, low2: F): V3n {
-  const S = GHOST.sway;
+/**
+ * 顶点：很慢的飘动（下摆飘得多）+ 走动时往后拖（下摆、袖口，权重见 trailWeight）+ 飘动时前倾（GHOST.tilt：绕身高 pivot 处的水平轴，
+ * 小角度按剪切算：离 pivot 每高 1 米往倾的方向挪 tan(角度) 米；8° 时和真的转差不到 1%）。模型局部坐标，h 是身高比例。
+ * 画面上的身体、雾晕和影子共用
+ */
+function swayAndLean(u: GhostUniforms, look: GhostLook, P0: V3n, h: F): V3n {
+  const S = GHOST.sway, C = GHOST.lean.cuff;
+  const low = float(1).sub(h);
+  const low2 = low.mul(low);
   const swayN = mx_noise_vec3(vec3(P0.x.mul(S.freq), P0.y.mul(S.freq).sub(u.time.mul(S.speed)), P0.z.mul(S.freq)));
   const sway = swayN.mul(low2.mul(S.low).add(S.base));
-  const lean = vec3(u.lean.x, 0, u.lean.y).mul(low2);
-  return sway.add(lean) as V3n;
+  const cuff = smoothstep(C.r[0], C.r[1], length(vec2(P0.x, P0.z)))
+    .mul(smoothstep(C.h[0], C.h[1], h)).mul(float(1).sub(smoothstep(C.h[2], C.h[3], h))).mul(C.k);
+  const lean = vec3(u.lean.x, 0, u.lean.y).mul(max(low2, cuff));
+  const pivot = look.bottom + (look.top - look.bottom) * GHOST.tilt.pivot;
+  const tilt = vec3(u.tilt.x, 0, u.tilt.y).mul(P0.y.sub(pivot));
+  return sway.add(lean).add(tilt) as V3n;
+}
+
+/** 往后拖的权重（swayAndLean 里着色器那份的 CPU 版，测试用）：radial 离中轴多远（米），h 身高比例。下摆 (1 − h)²，袖口 cuff.k */
+export function trailWeight(radial: number, h: number): number {
+  const C = GHOST.lean.cuff;
+  const cuff = smooth01(C.r[0], C.r[1], radial) * smooth01(C.h[0], C.h[1], h) * (1 - smooth01(C.h[2], C.h[3], h)) * C.k;
+  return Math.max((1 - h) ** 2, cuff);
+}
+
+/**
+ * 飘动时前倾（GHOST.tilt）：速度 (vx, vz)（房屋坐标，米/秒）、模型的 rotation.y → 模型局部坐标里的 (x, z) = 倾的方向 × tan(角度)，
+ * 角度 = min(max, 速度 × perSpeed)，方向 = 速度的方向（往前飘往前倾）。换算和下摆往后拖一样：世界 → 局部绕 y 轴转 −rotY
+ */
+export function tiltFor(vx: number, vz: number, rotY: number): { x: number; z: number } {
+  const T = GHOST.tilt;
+  const speed = Math.hypot(vx, vz);
+  if (!(speed > 1e-4)) return { x: 0, z: 0 };
+  const k = Math.tan(Math.min(T.max, speed * T.perSpeed)) / speed;
+  const c = Math.cos(rotY), s = Math.sin(rotY);
+  return { x: (vx * c - vz * s) * k, z: (vx * s + vz * c) * k };
+}
+
+/** 平时的鬼魂离镜头 d 米（到身体中部）时的不透明度倍数：near[0] 以内 minAlpha，near[1] 以外 1（GHOST.near） */
+export function nearFade(d: number): number {
+  return lerp(GHOST.minAlpha, 1, smooth01(GHOST.near[0], GHOST.near[1], d));
+}
+
+/** 雾晕离镜头 d 米（到身体中部）时还剩多少：hazeNear[0] 以内 0，hazeNear[1] 以外 1（GHOST.hazeNear） */
+export function hazeFade(d: number): number {
+  return smooth01(GHOST.hazeNear[0], GHOST.hazeNear[1], d);
+}
+
+/** 眼睛看得见的程度（GHOST.eyes.gate，着色器里那份的 CPU 版）：front = dot(片元 → 镜头的方向, 鬼魂的正面) */
+export function eyeGate(front: number): number {
+  return smooth01(GHOST.eyes.gate[0], GHOST.eyes.gate[1], front);
+}
+
+/** 兜帽洞的加厚、压暗算不算（GHOST.hollow.gate，着色器里那份的 CPU 版）：front 同上 */
+export function hollowGate(front: number): number {
+  return smooth01(GHOST.hollow.gate[0], GHOST.hollow.gate[1], front);
 }
 
 /** 顶点：现身时头那一段绕脖子（身高 GHOST.solid.neck 处、过身体中轴）的 x 轴转 u.head，往下 neckBlend 内渐变。「实」的那份和影子共用 */
@@ -486,10 +676,34 @@ const occlusion = (): F => attribute('occl', 'float') as unknown as F;
 const inflateDir = (): V3n => attribute('inflate', 'vec3') as unknown as V3n;
 
 /**
+ * 三角形按平均遮蔽从小到大排（原地改索引，排过一遍再排结果不变）。身体是普通混合、不写深度，同一个网格里后画的盖在先画的上面，
+ * 不管谁离镜头近：兜帽洞里的暗面要是排在后面，从背后看就印在兜帽背面上，成一道道黑印（路 GH，tests/ghost-look.test.ts 打射线查）。
+ * 遮蔽正好说明一个面被包得多深：里面的先画、外面的后画，从哪个方向看，盖在最上面的都是敞开的那层。
+ * 只有一次绘制、不多一遍深度（写深度 AO 会把它当实物）。没有索引的几何体不排（蒙皮模型一般都有）
+ */
+function sortTrianglesInsideOut(g: THREE.BufferGeometry): void {
+  const index = g.getIndex();
+  const occl = g.getAttribute('occl');
+  if (!index || !occl) return;
+  const src = Array.from(index.array);
+  const n = Math.floor(src.length / 3);
+  const key = new Float32Array(n);
+  for (let t = 0; t < n; t++) key[t] = occl.getX(src[t * 3]) + occl.getX(src[t * 3 + 1]) + occl.getX(src[t * 3 + 2]);
+  const order = Array.from({ length: n }, (_, t) => t).sort((a, b) => key[a] - key[b] || a - b);
+  order.forEach((t, k) => {
+    index.setX(k * 3, src[t * 3]);
+    index.setX(k * 3 + 1, src[t * 3 + 1]);
+    index.setX(k * 3 + 2, src[t * 3 + 2]);
+  });
+  index.needsUpdate = true;
+}
+
+/**
  * 保证几何体有鬼魂材质要读的两个属性（程序化的人形、换上的模型、蒙皮网格都要先过一遍，createGhostView 里做）：
  * - occl（GHOST.occlusion）：GLB 里的 _OCCL（three 读成 _occl），没有就用顶点色的 r，再没有就全是 1（和原来一样）
  * - inflate：雾晕沿它外扩。GLB 里的 _INFLATE（scripts/blender/ghost_cleanup.py 把法线反复平均过：模型的褶子、帽檐折角多，
  *   沿法线外扩的雾晕会自己折叠出一道道亮条），没有就是法线（和原来一样）
+ * 顺便把三角形排成里面先画、外面后画（sortTrianglesInsideOut）
  */
 export function ensureGhostAttributes(g: THREE.BufferGeometry): THREE.BufferGeometry {
   const n = g.getAttribute('position').count;
@@ -503,6 +717,7 @@ export function ensureGhostAttributes(g: THREE.BufferGeometry): THREE.BufferGeom
     if (!g.getAttribute('normal')) g.computeVertexNormals();
     g.setAttribute('inflate', (g.getAttribute('_inflate') ?? g.getAttribute('normal')).clone());
   }
+  sortTrianglesInsideOut(g);
   return g;
 }
 
@@ -588,14 +803,83 @@ export function torchRevealAt(t: TorchSample, los: number, x: number, y: number,
 export type GhostRole = 'body' | 'haze';
 
 /**
- * 鬼魂的材质（任何网格都能用，见文件头）：不受光照、加法混合、不写深度。layer 决定这一层的浓淡和噪声（GHOST.body / GHOST.haze），
+ * 布褶明暗（GHOST.fold）：视图空间里一盏跟着镜头的主光，半兰伯特 → mix(1 − amount, 1, ·)。只乘发光
+ */
+function foldShade(): F {
+  const k = new THREE.Vector3(...GHOST.fold.key).normalize();
+  const l = clamp(dot(normalView, vec3(k.x, k.y, k.z)).mul(0.5).add(0.5), 0, 1);
+  return mix(float(1 - GHOST.fold.amount), float(1), l) as F;
+}
+
+/** 背面的布褶明暗（GHOST.fold.back）：乘在发光上，背面那半边在 1 − amount 到 1 之间起伏，别处是 1。rest 是 restPosition() */
+function backFolds(rest: V3n): F {
+  const B = GHOST.fold.back;
+  const th = atan(rest.x, rest.z);
+  const wave = sin(th.mul(B.count).add(rest.y.mul(B.warp))).mul(0.7).add(sin(th.mul(B.count2).add(1.3)).mul(0.3)).mul(0.5).add(0.5);
+  const where = float(1).sub(smoothstep(B.z[0], B.z[1], rest.z)).mul(smoothstep(B.r[0], B.r[1], length(vec2(rest.x, rest.z))));
+  return float(1).sub(wave.mul(where).mul(B.amount)) as F;
+}
+
+/** 片元在没动过的网格上的位置（positionGeometry 的插值：飘动、前倾、现身时转头，眼睛和洞的范围都跟着表面走）。每份材质建一个 */
+const restPosition = (): V3n => varying(positionGeometry, 'vGhostRest') as unknown as V3n;
+
+/** 镜头在鬼魂正面的哪一边：dot(片元 → 镜头, 鬼魂的正面)。1 = 正对着，0 = 正侧面，−1 = 正背后。眼睛和兜帽洞共用（eyeGate、hollowGate） */
+function frontness(): F {
+  const fwd = modelWorldMatrix.mul(vec4(0, 0, 1, 0)).xyz.normalize();
+  const toCam = cameraPosition.sub(positionWorld).normalize();
+  return dot(toCam, fwd) as F;
+}
+
+/**
+ * 眼睛（GHOST.eyes）：片元离 look.eyes 里最近那个点的距离按高斯淡下去 × 看得见的程度（dot(片元 → 镜头, 鬼魂正面) 过 gate）× u.fade。
+ * rest 是 restPosition()。look 里没有眼睛时返回 null
+ */
+function eyeGlow(u: GhostUniforms, look: GhostLook, rest: V3n): V3n | null {
+  if (!look.eyes?.length) return null;
+  const E = GHOST.eyes;
+  let d2: F | null = null;
+  for (const [x, y, z] of look.eyes) {
+    const d = rest.sub(vec3(x, y, z));
+    const q = dot(d, d) as F;
+    d2 = d2 ? (min(d2, q) as F) : q;
+  }
+  const spot = exp(d2!.mul(-1 / (E.radius * E.radius)));
+  const gate = smoothstep(E.gate[0], E.gate[1], frontness());
+  const c = E.color;
+  return vec3(c.r, c.g, c.b).mul(spot.mul(gate).mul(E.glow).mul(u.fade)) as V3n;
+}
+
+/**
+ * 兜帽洞的范围（GHOST.hollow）：没动过的网格坐标离两只眼睛中点的归一化距离 → 中间 1、椭球外面 0（外面 30% 渐渐淡出），
+ * 再乘只有从正面看才算（hollowGate）。look 里没有眼睛时返回 null（不加厚）
+ */
+function hollowK(look: GhostLook, rest: V3n): F | null {
+  if (!look.eyes?.length) return null;
+  const n = look.eyes.length;
+  const c = look.eyes.reduce((s, e) => [s[0] + e[0] / n, s[1] + e[1] / n, s[2] + e[2] / n], [0, 0, 0]);
+  const [rx, ry, rz] = GHOST.hollow.radius;
+  const q = rest.sub(vec3(c[0], c[1], c[2])).div(vec3(rx, ry, rz));
+  const G = GHOST.hollow.gate;
+  return float(1).sub(smoothstep(0.7, 1, length(q))).mul(smoothstep(G[0], G[1], frontness())) as F;
+}
+
+/**
+ * 鬼魂的材质（任何网格都能用，见文件头）：不受光照、不写深度。layer 决定这一层的浓淡、噪声、画哪一面、挡不挡身后（GHOST.body / GHOST.haze）：
+ * - layer.cover > 0（身体）：预乘的普通混合（src 1、dst 1 − srcAlpha）：颜色 = 发光（冷白 × 浓淡 × 布褶明暗 + 眼睛），
+ *   alpha = 挡住身后多少（形状 × cover，被手电照着往 reveal.cover 走）。形状（轮廓、侵蚀、下摆、u.fade）两边都乘，浓淡不匀两边都有
+ *   （发光 cloud、挡住多少 coverCloud），头肩略浓、遮蔽只乘发光：兜帽里的洞是暗的、不是透的；
+ * - 没有 cover（雾晕）：加法混合，只发光，乘 u.haze（镜头贴近时淡掉）。
  * role 决定被手电照着时变不变浓（见 GHOST.reveal）
  */
 export function createGhostMaterial(
-  u: GhostUniforms, look: GhostLook, layer: GhostLayer, side: THREE.Side, role: GhostRole = 'body',
+  u: GhostUniforms, look: GhostLook, layer: GhostLayer, role: GhostRole = 'body',
 ): THREE.MeshBasicNodeMaterial {
+  const cover = layer.cover ?? 0;
   const m = new THREE.MeshBasicNodeMaterial({
-    transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, side, fog: false,
+    transparent: true, depthWrite: false, depthTest: true, side: layer.side ?? THREE.FrontSide, fog: false,
+    ...(cover > 0
+      ? { blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor }
+      : { blending: THREE.AdditiveBlending }),
   });
   // 不受光照：灯的数量变了也不重编（和 fog.ts 一样）
   m.lights = false;
@@ -603,10 +887,9 @@ export function createGhostMaterial(
   const P0 = positionLocal;
   const h = clamp(P0.y.sub(look.bottom).div(span), 0, 1);
   const low = float(1).sub(h);
-  const low2 = low.mul(low);
 
-  // —— 顶点：很慢的飘动（下摆飘得多）+ 走动时下摆往后拖 + 这一层的外扩 ——
-  m.positionNode = P0.add(inflateDir().mul(layer.inflate)).add(swayAndLean(u, P0, low2));
+  // —— 顶点：很慢的飘动（下摆飘得多）+ 走动时下摆、袖口往后拖 + 前倾 + 这一层的外扩 ——
+  m.positionNode = P0.add(inflateDir().mul(layer.inflate)).add(swayAndLean(u, look, P0, h));
 
   // —— 片元 ——
   // 被手电照着的程度（G1）：变浓、轮廓收紧、偏暖
@@ -623,14 +906,37 @@ export function createGhostMaterial(
   const hem = smoothstep(0, GHOST.hemFade, h);
   const head = smoothstep(GHOST.head.from, GHOST.head.to, h).mul(GHOST.head.boost).add(1);
   // 浓淡不匀：同一个噪声再调一次身体里的密度
-  const cloud = mix(float(GHOST.cloud), float(1), smoothstep(0.25, 0.75, n));
+  const thick = smoothstep(0.25, 0.75, n);
+  const cloud = mix(float(GHOST.cloud), float(1), thick);
   const dense = role === 'body' ? mix(float(1), float(R.density), reveal) : float(1);
-  // 遮蔽（GHOST.occlusion）：兜帽里、褶子深处淡下去（加法混合，淡 = 暗）
-  const shade = mix(float(1), occlusion(), GHOST.occlusion.body);
-  const alpha = soft.mul(wisp).mul(cloud).mul(hem).mul(head).mul(layer.density).mul(dense).mul(u.fade).mul(shade);
+  // 兜帽洞的范围（GHOST.hollow：两只眼睛中点附近）；inside：片元有多在洞里（范围 × 遮蔽低）
+  const rest = restPosition();
+  const hole = hollowK(look, rest);
+  const inside = hole ? hole.mul(float(1).sub(occlusion())) : null;
+  // 遮蔽（GHOST.occlusion）：兜帽里、褶子深处暗下去（只乘发光）。洞里压满，别处压 occlusion.body 这么多；
+  // 洞里再乘 1 − inside（≈ 遮蔽的平方）：洞壁遮蔽 0.2 的地方被手电照着 ×3 时不会亮成一圈，读成一个眼眶
+  const occlK = hole ? mix(float(GHOST.occlusion.body), float(1), hole) : float(GHOST.occlusion.body);
+  const shadeBase = mix(float(1), occlusion(), occlK);
+  const shade = inside ? shadeBase.mul(float(1).sub(inside)) : shadeBase;
+  // 形状：轮廓渐隐 × 侵蚀成缕 × 下摆淡出 × 总倍数（镜头太近、挡住访客、呼吸、跟着灯暗）
+  const shape = soft.mul(wisp).mul(hem).mul(u.fade);
+  const glow = shape.mul(cloud).mul(head).mul(layer.density).mul(dense).mul(shade);
   const c0 = GHOST.edge, c1 = GHOST.core, cw = R.warmColor;
-  m.colorNode = mix(mix(vec3(c0.r, c0.g, c0.b), vec3(c1.r, c1.g, c1.b), soft), vec3(cw.r, cw.g, cw.b), reveal.mul(R.warm));
-  m.opacityNode = alpha;
+  const color = mix(mix(vec3(c0.r, c0.g, c0.b), vec3(c1.r, c1.g, c1.b), soft), vec3(cw.r, cw.g, cw.b), reveal.mul(R.warm));
+  if (cover > 0) {
+    const eyes = role === 'body' ? eyeGlow(u, look, rest) : null;
+    const lit = color.mul(glow.mul(foldShade()).mul(backFolds(rest)));
+    m.colorNode = eyes ? lit.add(eyes) : lit;
+    // 挡住身后多少：平时 cover、照满 reveal.cover，薄的地方透一点（coverCloud）；兜帽洞里（眼睛附近、遮蔽低）往 hollow 走：
+    // 不乘浓淡不匀、侵蚀 wisp，也不乘按朝向镜头算的轮廓渐隐 soft（洞壁很陡，从正面看几乎是侧着的，乘了就透过去，看得见身后的窗），只跟着总倍数淡
+    const k = mix(float(cover), float(Math.max(cover, R.cover)), reveal).mul(mix(float(GHOST.coverCloud), float(1), thick));
+    const covered = shape.mul(k);
+    m.opacityNode = inside ? mix(covered, max(covered, hem.mul(u.fade).mul(GHOST.hollow.alpha)), inside) : covered;
+  } else {
+    // 雾晕乘 u.haze（镜头贴近时淡掉）。shade 里已经把洞里压到底：外扩的那层壳蒙在洞口上，默认吊臂处洞就发灰，中间亮一块，像一只大眼睛
+    m.colorNode = color;
+    m.opacityNode = role === 'haze' ? glow.mul(u.haze) : glow;
+  }
   // 不用 particles/common.ts 的 protectMRT：现在场景 pass 没有 MRT，它保护不了什么；后处理建不起来、直接画到画布时
   // 它会让管线编不过（输出结构体是空的），鬼魂整个不见
   return m;
@@ -662,7 +968,12 @@ export function createGhostSolidMaterial(u: GhostUniforms, look: GhostLook): THR
   const erode = mix(float(S.erode[0]), float(S.erode[1]), pow(low, 1.6)).add(float(1).sub(facing).mul(0.22));
   const wisp = smoothstep(erode.sub(0.1), erode.add(0.24), n);
   const hem = smoothstep(0, S.hemFade, h);
-  m.opacityNode = soft.mul(wisp).mul(hem).mul(S.opacity).mul(u.fade).mul(u.solid);
+  // 兜帽洞里（GHOST.hollow，路 GH）：洞壁从正面看几乎是侧着的，按 soft、侵蚀算会被深度门槛丢掉、透出身后（眼睛也跟着没了），洞里两样都不乘
+  const rest = restPosition();
+  const hole = hollowK(look, rest);
+  const edge = soft.mul(wisp);
+  const form = hole ? mix(edge, float(1), hole.mul(float(1).sub(occlusion()))) : edge;
+  m.opacityNode = form.mul(hem).mul(S.opacity).mul(u.fade).mul(u.solid);
   // 写深度（V-M1，见 GHOST.solid.depthCut）：不透明度不到门槛的片元丢掉（alpha ≤ 门槛就丢），不写深度。门槛和不透明度乘同样的
   // opacity × fade × solid，丢不丢只看形状；uSolid = 0（平时藏着，main.ts 暖机那几帧显示出来编管线）时门槛、不透明度都是 0，
   // 整个丢掉，什么深度都不留，不挡身体、雾晕和冷雾
@@ -672,7 +983,10 @@ export function createGhostSolidMaterial(u: GhostUniforms, look: GhostLook): THR
   const base = mix(vec3(c0.r, c0.g, c0.b), vec3(c1.r, c1.g, c1.b), soft).mul(u.solidDark);
   // 遮蔽（GHOST.occlusion）连手电照的那一面一起压：兜帽洞里照不进去（没有自阴影，靠它近似）
   const shade = mix(float(1), occlusion(), GHOST.occlusion.solid);
-  m.colorNode = base.add(torchIrradiance(u, positionWorld, normalWorld).mul(S.albedo / Math.PI)).mul(shade);
+  const lit = base.add(torchIrradiance(u, positionWorld, normalWorld).mul(S.albedo / Math.PI)).mul(shade);
+  // 眼睛（GHOST.eyes，路 GH）：暗色剪影的兜帽洞里那两点冷光，和平时同一个式子（只有正面看得到）
+  const eyes = eyeGlow(u, look, rest);
+  m.colorNode = eyes ? lit.add(eyes) : lit;
   return m;
 }
 
@@ -688,7 +1002,7 @@ export function createGhostShadowMaterial(u: GhostUniforms, look: GhostLook): TH
   const P0 = positionLocal;
   const h = clamp(P0.y.sub(look.bottom).div(span), 0, 1);
   const low = float(1).sub(h);
-  m.positionNode = mix(P0.add(swayAndLean(u, P0, low.mul(low))), headPose(u, look, P0, h), u.solid);
+  m.positionNode = mix(P0.add(swayAndLean(u, look, P0, h)), headPose(u, look, P0, h), u.solid);
   const n = smokeNoise(u, positionLocal, B, true);
   const lowK = pow(low, 1.6);
   const erode = mix(mix(float(B.erode[0]), float(B.erode[1]), lowK), mix(float(S.erode[0]), float(S.erode[1]), lowK), u.solid);
@@ -756,7 +1070,8 @@ function createMist(time: THREE.UniformNode<'float', number>) {
   mat.opacityNode = vAlpha.mul(shape);
   mat.alphaTest = 0.002;
 
-  const object = makeSprite(mat, N, 'ghost-mist', GHOST.renderOrder - 0.05);
+  // 画在身体、雾晕之后（GHOST.renderOrder）：身体挡住身后，冷雾大多在它和镜头之间；「实」的那份写深度，照样挡住它身后的雾
+  const object = makeSprite(mat, N, 'ghost-mist', GHOST.renderOrder + 0.05);
   let head = 0;
   let lastBirth = -1000;
   const emit = (x: number, y: number, z: number, t0: number, vx: number, vy: number, vz: number, tauS: number,
@@ -866,7 +1181,8 @@ export async function loadGhostModel(spec: typeof GHOST_MODEL = GHOST_MODEL): Pr
   console.log(`[ghost] ${spec.url}：缩放 ${k.toPrecision(3)}，不动的网格 ${statics.length} 个，蒙皮网格 ${skinned.length} 个${clip ? `，片段 ${clip.name}` : ''}`);
   return {
     geometry, root: skinned.length ? root : null, skinned, clip: skinned.length ? clip : null,
-    look: { bottom: GHOST_BODY.bottom, top: GHOST_BODY.top },
+    // 眼睛（GHOST.eyes）：config 里量好的鬼魂局部坐标（模型按包围盒摆好以后的），没写就不画
+    look: { bottom: GHOST_BODY.bottom, top: GHOST_BODY.top, eyes: spec.eyes ?? null },
     headPitch: spec.headPitch ?? null,
   };
 }
@@ -1080,7 +1396,7 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
   // 外形：没换模型就是程序化的人形；换了模型（loadGhostModel）就是它合成的那个不动的几何体，加上每个蒙皮网格。
   // 坐标都是鬼魂的局部坐标，GhostLook 一样，材质大家共用
   const model = fx.model ?? null;
-  const look: GhostLook = model?.look ?? { bottom: GHOST_BODY.bottom, top: GHOST_BODY.top };
+  const look: GhostLook = model?.look ?? { bottom: GHOST_BODY.bottom, top: GHOST_BODY.top, eyes: procGhostEyes() };
   const ownGeometry = model ? null : buildGhostGeometry();
   const parts: { geometry: THREE.BufferGeometry; skin: THREE.SkinnedMesh | null }[] = [
     ...(ownGeometry ? [{ geometry: ownGeometry, skin: null }] : []),
@@ -1089,9 +1405,9 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
   ];
   // 材质都读 occl、inflate（ensureGhostAttributes）：程序化的人形、蒙皮网格没有就补上
   for (const p of parts) ensureGhostAttributes(p.geometry);
-  // 身体双面（背面叠在正面后面：中间厚、边上薄）；雾晕只画正面
-  const bodyMat = createGhostMaterial(u, look, GHOST.body, THREE.DoubleSide);
-  const hazeMats = GHOST.haze.map((l) => createGhostMaterial(u, look, l, THREE.FrontSide, 'haze'));
+  // 身体只画正面、挡住身后（路 GH，GHOST.body 的 side / cover）；雾晕只画正面、加法
+  const bodyMat = createGhostMaterial(u, look, GHOST.body, 'body');
+  const hazeMats = GHOST.haze.map((l) => createGhostMaterial(u, look, l, 'haze'));
   const solidMat = createGhostSolidMaterial(u, look);
   const shadowMat = createGhostShadowMaterial(u, look);
   const figure = new THREE.Group();
@@ -1133,7 +1449,7 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
     });
     // 现身停留时换上的「实」的那份（G2）：同一个网格。平时藏着；不进开场那次阻塞的预编译，
     // main.ts 在开场按钮可用之后再编（那几帧里 uSolid = 0，片元全丢，不画也不写深度），第一次现身时不卡。
-    // 普通混合、写深度，画在冷雾（renderOrder − 0.05）之前：往下淌的雾落在它前面时盖得住，身后的雾被深度挡住（V-M1）
+    // 普通混合、写深度，画在冷雾（renderOrder + 0.05）之前：往下淌的雾落在它前面时盖得住，身后的雾被深度挡住（V-M1）
     const sm = make(p, solidMat, `ghost-solid${sfx}`);
     sm.visible = false;
     sm.userData.deferCompile = true;
@@ -1165,6 +1481,8 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
   let puffReadyAt = 0;
   let emitAcc = 0;
   let puffs = 0;
+  /** 平滑后的前倾（GHOST.tilt，模型局部 x, z） */
+  const tiltS = { x: 0, z: 0 };
   const camPos = new THREE.Vector3();
   const tmp = new THREE.Vector3();
   const rand = (r: readonly [number, number]) => r[0] + Math.random() * (r[1] - r[0]);
@@ -1327,6 +1645,7 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
         reveal: +revealNow.toFixed(3), torchPow: u.torchPow.map((p) => +p.value.toFixed(3)),
         solid, swapPending: swap !== null, head: +((u.head.value * 180) / Math.PI).toFixed(2), follow: +follow.toFixed(3), pours,
         overlap: +overlapNow.toFixed(3), cover: +coverS.toFixed(3), occK: +kS.toFixed(3),
+        tiltDeg: +((Math.atan(Math.hypot(tiltS.x, tiltS.z)) * 180) / Math.PI).toFixed(2), haze: +u.haze.value.toFixed(3),
         clipTime: clipPose ? +clipPose.time.toFixed(3) : null, clipDuration: model?.clip ? +model.clip.duration.toFixed(3) : null,
       }),
       uniforms: u,
@@ -1393,13 +1712,20 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       // 世界 → 局部：绕 y 轴转 −ry
       const lx = vel.x * cr - vel.z * sr, lz = vel.x * sr + vel.z * cr;
       u.lean.value.set(-lx * k, -lz * k);
+      // 前倾（GHOST.tilt，路 GH）：按平滑过的速度往运动方向倾，再平滑 tau 秒，起停不顿
+      const tt = tiltFor(vel.x, vel.z, ry);
+      const kt = dt > 0 ? 1 - Math.exp(-dt / GHOST.tilt.tau) : 0;
+      tiltS.x += (tt.x - tiltS.x) * kt;
+      tiltS.z += (tt.z - tiltS.z) * kt;
+      u.tilt.value.set(tiltS.x, tiltS.z);
 
       // 镜头太近时淡出；整体很慢地明暗起伏
       rig.camera.getWorldPosition(camPos);
       core.houseRoot.updateWorldMatrix(true, false);
       core.houseRoot.worldToLocal(camPos);
       const dCam = camPos.distanceTo(tmp.set(g.x, g.y - 0.27, g.z));
-      const near = smooth01(GHOST.near[0], GHOST.near[1], dCam);
+      // 雾晕近处淡掉（hazeFade，S-3：近看时外扩的那层壳像重影）
+      u.haze.value = hazeFade(dCam);
       const B = GHOST.breathe;
       const breathe = 1 - B.amount * (0.5 + 0.5 * Math.sin((t * Math.PI * 2) / B.period));
       // 平时的鬼魂自己发光，跟着附近灯的明暗一起暗（借暗下去的那一下出入）；「实」的那份不呼吸、不跟（它本来就暗，挡光）
@@ -1416,7 +1742,7 @@ export function createGhostView(core: RenderCore, rig: GhostRig, fx: GhostFx = {
       } else overlapNow = 0;
       coverS = approachCover(coverS, coverOf(overlapNow), dt);
       if (dt > 0) kS += (occludeK(solid, revealNow > GHOST.occlude.lit) - kS) * (1 - Math.exp(-dt / GHOST.occlude.out));
-      u.fade.value = lerp(GHOST.minAlpha, 1, near) * lerp(1, kS, coverS) * (solid ? 1 : breathe * lerp(1, follow, M.follow));
+      u.fade.value = nearFade(dCam) * lerp(1, kS, coverS) * (solid ? 1 : breathe * lerp(1, follow, M.follow));
 
       // 手电照出（houseRoot 的世界矩阵上面已经更新过）；墙上的影子跟着被照出的程度出现，现身时整个都在
       writeTorches(dt);
