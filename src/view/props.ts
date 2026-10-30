@@ -2,8 +2,8 @@
 // 每个物件挂在 houseRoot 下（位置 propCenter、朝向 yawFor(facing)，模型正面朝局部 +z），
 // 自己的模型和惊吓动画在 src/view/props/*.ts；这里统一管：事件分发、幽光（可附身时呼吸、悬停变亮放大）、拾取盒。
 // trigger 事件原样交给物件（rig.trigger(state, e)）：有变体的物件（衣柜的手指）按 e.variant 挑，和声音挑的是同一个
-// 第三人称（dissolve）：鬼魂穿过物件时，物件和家具一样在它周围溶开、洞口一圈冷光（walls.ts 的 DISSOLVE），
-// 不然飘进摇椅里就是直接穿模（2026-10-28 第二次试玩）
+// 第三人称（dissolve）：鬼魂穿过物件时，物件和家具一样在它周围溶开（walls.ts 的 DISSOLVE），不然飘进摇椅里就是直接穿模（2026-10-28 第二次试玩）；
+// 物件和墙一样带屋里的底光（ROOM_FILL）、洞口压暗一圈；被挖开的物件不画幽光外壳（试玩 S1：门板全黑、洞口灰白碎条，第一眼像渲染坏了）
 // 机关（2026-10-28）：设下了的物件（armed > 0）表面结一层很薄的霜，只有玩家看得见的提示（见 FROST）
 // 第三人称的幽光（2026-10-30 美术分析 ART-5）：平时压淡、变细、降饱和，轮廓外缘淡到 0，不再是一圈亮绿细线（GLOW_GHOST）
 // 2026-10-30 严格玩家（eye S-5：被瞄准的物件被涂成一整块薄荷绿 / 描一圈薄荷绿，像游戏界面；按住设机关看不出在蓄力）：
@@ -12,7 +12,7 @@
 // - 按住左键设机关的那 0.5 秒（TRAP.holdToArm）：物件表面那层机关的霜从下往上长，长满就是设下了（stepCharge、canArm）。
 //   按没按着由鬼魂镜头发布（GhostUi.pressing），按住手势本身（够不够时间、准星移开就作废）还是拾取器管，这里照它的规则画
 import * as THREE from 'three/webgpu';
-import { abs, add, and, bool, dot, float, materialEmissive, mx_noise_float, normalLocal, normalView, normalWorld, positionGeometry, positionViewDirection, positionWorld, smoothstep, uniform, vec3 } from 'three/tsl';
+import { abs, add, and, bool, diffuseColor, dot, float, materialColor, materialEmissive, mix, mx_noise_float, normalLocal, normalView, normalWorld, positionGeometry, positionViewDirection, positionWorld, smoothstep, uniform, vec3 } from 'three/tsl';
 import { PROPS, propCenter, type PropPlacement } from '../config/house';
 import { TRAP } from '../config/visitors';
 import { ghostCamera, watchGhostUi } from '../engine/ghostRig';
@@ -29,7 +29,7 @@ import { createMirror } from './props/mirror';
 import { createMusicBox } from './props/musicBox';
 import { createPortrait } from './props/portrait';
 import { createRockingChair } from './props/rockingChair';
-import { DISSOLVE, dissolveAt, ghostDissolve, v3 } from './walls';
+import { DISSOLVE, ROOM_FILL, dissolveAt, ghostDissolve, holeTouchesBox, roomFillAt, v3 } from './walls';
 
 export type PropsView = Module & {
   /** 给拾取器用：每个物件一个不可见的碰撞盒，userData.propId = 物件 id */
@@ -219,6 +219,10 @@ interface Entry {
   phase: number;
   /** 物件中心（房屋坐标）：第三人称按它离鬼魂多远决定平时亮不亮 */
   c: { x: number; z: number };
+  /** 拾取盒在水平面上占的矩形（房屋坐标）：洞碰到它就算被挖开了 */
+  box: { x0: number; z0: number; x1: number; z1: number };
+  /** 没被挖开的程度（1 = 整个的，0 = 被挖开了：外壳不画，平滑量，不跳） */
+  whole: number;
 }
 
 /** 0..1 夹住再做一次 smoothstep */
@@ -237,15 +241,18 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
     if (dissolved.has(m) || !(m as THREE.NodeMaterial).isNodeMaterial) return;
     dissolved.add(m);
     const nm = m as THREE.NodeMaterial;
-    const d = dissolveAt(ghostDissolve, positionWorld.sub(houseOffset), normalWorld, DISSOLVE.furniture);
+    const P = positionWorld.sub(houseOffset);
+    const d = dissolveAt(ghostDissolve, P, normalWorld, DISSOLVE.furniture);
     nm.maskNode = nm.maskNode ? and(nm.maskNode as THREE.Node<'bool'>, d.keep) : d.keep;
     // 影子照旧：溶开的只是「看穿」
     nm.maskShadowNode = bool(true);
-    // 洞口一圈冷光、附近一点霜光（受光材质才有自发光；不受光的灯泡、外壳只挖洞）
-    if ((m as THREE.MeshStandardNodeMaterial).isMeshStandardNodeMaterial) {
+    // 受光的实物（不受光的灯泡、外壳，半透明的那层霜只挖洞）：和墙一样带屋里的底光（底色 × ROOM_FILL，diffuseColor 就是这个材质此刻的底色，
+    // 顶点色、贴图都算进去了），洞口一圈按自己的颜色压暗（DISSOLVE.cut）。带贴图的不动 colorNode：换了 alpha 通道就丢了
+    if ((m as THREE.MeshStandardNodeMaterial).isMeshStandardNodeMaterial && !m.transparent) {
       const sm = m as THREE.MeshStandardNodeMaterial;
+      if (!sm.map) sm.colorNode = ((sm.colorNode as THREE.Node<'vec3'> | null) ?? materialColor).mul(mix(float(1), float(DISSOLVE.cut.thinDark), d.cut));
       const edge = v3(DISSOLVE.rimGlow).mul(d.rim).add(v3(DISSOLVE.frostGlow).mul(d.frost));
-      sm.emissiveNode = add((sm.emissiveNode as THREE.Node<'vec3'> | null) ?? materialEmissive, edge);
+      sm.emissiveNode = add((sm.emissiveNode as THREE.Node<'vec3'> | null) ?? materialEmissive, edge.add(diffuseColor.rgb.mul(roomFillAt(P, ROOM_FILL.props))));
     }
     m.needsUpdate = true;
   };
@@ -295,7 +302,16 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
     // 模型的高低（root 就在地上、houseRoot 不升降：局部的 y 就是世界坐标的 y）
     const yb = new THREE.Box3().setFromObject(rig.model);
     const y0 = Number.isFinite(yb.min.y) ? yb.min.y : 0, y1 = Number.isFinite(yb.max.y) ? yb.max.y : 1;
-    return { p, root, rig, glow, shells, frostShells, hit, ready: 1, hover: 0, flash: 0, frost: 0, reveal: 0, charge: 0, y0, y1, phase: i * 1.7, c };
+    // 拾取盒的四个角转到房屋坐标（root 只绕 y 转），取水平面上的外接矩形
+    const cr = Math.cos(root.rotation.y), sr = Math.sin(root.rotation.y);
+    const box = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+    for (const sx of [-0.5, 0.5]) for (const sz of [-0.5, 0.5]) {
+      const lx = rig.hit.center[0] + sx * rig.hit.size[0], lz = rig.hit.center[2] + sz * rig.hit.size[2];
+      const x = c.x + cr * lx + sr * lz, z = c.z - sr * lx + cr * lz;
+      box.x0 = Math.min(box.x0, x); box.x1 = Math.max(box.x1, x);
+      box.z0 = Math.min(box.z0, z); box.z1 = Math.max(box.z1, z);
+    }
+    return { p, root, rig, glow, shells, frostShells, hit, ready: 1, hover: 0, flash: 0, frost: 0, reveal: 0, charge: 0, y0, y1, phase: i * 1.7, c, box, whole: 1 };
   });
   const byId = new Map(entries.map((e) => [e.p.id, e]));
   const targets = entries.map((e) => e.hit);
@@ -363,7 +379,10 @@ export function createPropsView(core: RenderCore, opts: PropsOptions = {}): Prop
         // 第三人称：平时的那点幽光只给够得着的（离鬼魂 AIM_RANGE 米内）；悬停本来就只有够得着的才有
         const reach = glow.soft > 0 && ghostAt ? 1 - smooth01((Math.hypot(e.c.x - ghostAt.x, e.c.z - ghostAt.z) - AIM_RANGE) / REACH_FADE) : 1;
         const amount = e.ready * ((glow.base + glow.breath * breath) * reach + glow.hover * e.hover) + glow.flash * e.flash * e.flash;
-        e.glow.amount.value = amount;
+        // 被洞碰到的物件不画外壳（见 walls.ts 的 holeTouchesBox）：很快淡掉（洞还差十几厘米才到），离开以后慢一点回来。只改亮度：外壳照样在场景里，不用现编管线
+        const cutOpen = ghostAt !== null && ghostCamera.active && holeTouchesBox(e.box, ghostAt, ghostCamera);
+        e.whole = approach(e.whole, cutOpen ? 0 : 1, cutOpen ? 30 : 6, dt);
+        e.glow.amount.value = amount * e.whole;
         // 粗细：娃娃屋按米；第三人称按屏幕像素（kit.ts 的 createGlow：thickness + px × pxM × 离镜头多远）
         e.glow.thickness.value = glow.px > 0 ? 0 : glow.thickness + (glow.hoverThickness - glow.thickness) * e.hover * e.ready + 0.018 * e.flash;
         e.glow.px.value = glow.px + (glow.hoverPx - glow.px) * e.hover * e.ready + glow.flashPx * e.flash;
