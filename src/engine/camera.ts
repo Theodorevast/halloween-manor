@@ -1,10 +1,13 @@
 // 正交斜俯视相机（娃娃屋视角：触屏设备、?dollhouse）：90° 旋转（缓入缓出、可连按）、滚轮缩放、开场下降镜头，
 // 再加吓跑时摄影师式地一抖（创伤值震动，只转不移）。
-// 画面始终按「整栋房子 + 边距」取景（横屏按高度、竖屏按宽度），缩放在这个基准上乘。
+// 画面按「整栋房子 + 边距」取景（横屏按高度），缩放在这个基准上乘。
+// 竖屏（宽度是瓶颈，2026-10-30 eye S-6、newbie S3：房子只占屏幕三成高、访客十来个像素）：横向不按整栋房子，按 9 个物件取景
+// （最外面那个物件离屏幕边还留 CONTENT_PAD 米）。斜着看房子是一个横躺的菱形，两头的尖角（墙角、床尾、厨房台面那一截）裁掉一点，
+// 房子撑满屏幕宽度，人大约大四分之一；四个方位转一圈物件都还在画面里。横屏、桌面本来就按高度取景，不变
 // 正交相机平移只是整张画平着滑，看不出纵深；只有小角度的转动能让前后的东西互相错开，所以震动只用旋转。
 // 2026-10-28 做减法：去掉了没人操作时的镜头「呼吸」和惊吓落下时的冲镜推近
 import * as THREE from 'three/webgpu';
-import { HOUSE_D, HOUSE_W, WALL_H } from '../config/house';
+import { HOUSE_D, HOUSE_W, PROPS, WALL_H, propCenter } from '../config/house';
 import type { CameraRig } from './types';
 
 const DEG = Math.PI / 180;
@@ -21,6 +24,23 @@ const ZOOM_MAX = 1.6;
 const ZOOM_RATE = 12;
 /** 取景边距：房子外接框每边多留的比例 */
 const MARGIN = 0.07;
+/** 竖屏横向按物件取景：离画面中线最远的那个物件中心外面再留这么多米（床那么大的物件也露出一大半，点得到） */
+const CONTENT_PAD = 0.6;
+/**
+ * 9 个物件的中心在视平面上离中线最远多少米（45°、135° 两种朝向取大的；另外两个是镜像）。
+ * 视平面横轴 = (dz, 0, −dx)，和高度、仰角无关，算一次就行
+ */
+const PROPS_HALF_WIDTH = (() => {
+  let m = 0;
+  for (const a of [Math.PI / 4, (3 * Math.PI) / 4]) {
+    const dx = Math.cos(a), dz = Math.sin(a);
+    for (const p of PROPS) {
+      const c = propCenter(p);
+      m = Math.max(m, Math.abs((c.x - HOUSE_W / 2) * dz - (c.z - HOUSE_D / 2) * dx));
+    }
+  }
+  return m;
+})();
 /** 相机离转动中心的距离：正交相机只影响裁剪面，够远就行 */
 const DIST = 40;
 /** 震动绕着转的点：房子中心、离地这么高（米），大致是物件、人的中部，地板和墙头朝相反方向错开 */
@@ -115,7 +135,8 @@ export function createCameraRig(canvas: HTMLCanvasElement): CameraRig {
         yMax = Math.max(yMax, vy);
       }
     }
-    let hw = xMax * (1 + MARGIN);
+    // 横向：整栋房子和「物件 + CONTENT_PAD」取小的（竖屏才用得上：横屏按高度取景，这个数会被下面换掉）
+    let hw = Math.min(xMax * (1 + MARGIN), PROPS_HALF_WIDTH + CONTENT_PAD);
     let hh = ((yMax - yMin) / 2) * (1 + MARGIN);
     const aspect = width / height;
     if (hw / hh > aspect) hh = hw / aspect; // 竖屏：宽度是瓶颈
