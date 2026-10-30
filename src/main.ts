@@ -249,6 +249,7 @@ async function boot() {
     newNight: (t0) => {
       registerView.newNight(t0);
       otherShadow.newNight();
+      hud.newNight();
     },
     reduced: () => reducedMotion.matches,
   }, nightTiming());

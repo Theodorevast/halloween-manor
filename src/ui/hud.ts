@@ -47,6 +47,11 @@ export interface Hud extends Module {
   say(text: string, tone?: 'quiet' | 'scare'): void;
   /** 一夜此刻在哪一段（main.ts 每帧给，只在变化时动 DOM）：收夜以后出门那一行不再问 Who's next?；光收回、登记簿时准星和冷却环淡掉 */
   setNightPhase(phase: NightPhase): void;
+  /**
+   * Keep haunting 开新的一夜（整体审查最后一轮的复审）：左上角的 Scared off tonight 从 0 重新数。
+   * 只在显示上减去这一刻的累计；模拟的 scaredOff 照旧累计（墙上影子的 afterScared 拿它当基准，清了会让它失效）
+   */
+  newNight(): void;
 }
 
 /**
@@ -506,11 +511,17 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
 
   // ── 计数 ────────────────────────────────────────────
   // 数字单独成一段，好让它在 exit 时像铅字压上纸面那样「印」一下
+  /** 这一夜开始时的累计（newNight）：显示的是 count − base */
+  let base = 0;
   const setCount = (n: number, stamp: boolean) => {
     if (n === count) return;
     count = n;
-    const s = STRINGS.counter(n);
-    const i = s.lastIndexOf(String(n));
+    showCount(stamp);
+  };
+  const showCount = (stamp: boolean) => {
+    const shown = count - base;
+    const s = STRINGS.counter(shown);
+    const i = s.lastIndexOf(String(shown));
     counterLabel.textContent = s.slice(0, i).trimEnd();
     counterNum.textContent = s.slice(i);
     if (stamp && !reduced.matches) {
@@ -593,6 +604,10 @@ export function createHud(root: HTMLElement, h: HudHandlers): Hud {
     setQuality: setQualityUi,
     say(text, tone = 'quiet') {
       push(sayLine(text, tone));
+    },
+    newNight() {
+      base = Math.max(0, count);
+      showCount(false);
     },
     setNightPhase(phase) {
       nightClosed = phase !== 'night';
