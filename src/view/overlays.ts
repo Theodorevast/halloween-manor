@@ -15,6 +15,9 @@
 // 试玩之后的打磨（2026-10-30 第一轮试玩 P1-1 建议 3：物件上的眼睛一次亮的时长中位数只有 0.65 秒，一闪一闪的）：
 // 眼睛亮起照旧，灭的时候用 WATCH_LINGER 秒淡掉（styles.css 的 .ov-eye）；标签第二行的「X is watching」同样留 WATCH_LINGER 秒再换
 // （createWatchLinger）。只是画面，模拟不变
+// 准星旁的 F 键帽（2026-10-30 用户试玩：「F 没有任何提示」，HT-3）：现身就绪、此刻在鬼魂所在处现身会吓到人
+// （reachOf 的现身那一种，和名牌上的小眼睛同一套规则）时，准星右边亮一个小小的 F 键帽；没人能被吓到时不出。
+// 灭的时候和小眼睛一样先留 WATCH_LINGER 秒（手电扫来扫去，不一闪一闪）；按了 F（不再就绪）马上收。只在指针锁着、准星在的时候有
 import { CHARACTER } from '../config/character';
 import { SCARES } from '../config/scares';
 import { STRINGS } from '../config/strings';
@@ -190,6 +193,13 @@ export function pendingAct(hover: string | null, ghost: Vec2 | null, m: Manifest
 }
 
 /**
+ * 准星旁的 F 键帽该不该亮（HT-3）：有鬼魂（第三人称）、现身就绪（idle、冷却为 0）、此刻现身会吓到人（reach：reachOf 的现身那一种）
+ */
+export function fKeyDue(ghost: Vec2 | null, m: ManifestState, reach: readonly number[]): boolean {
+  return ghost !== null && m.phase === 'idle' && m.cooldown <= 0 && reach.length > 0;
+}
+
+/**
  * 附身的结果（FEEL-3）：谁被吓到（惊吓类的 startle）、谁听见（引诱类的 heard），或者生效窗口结束都没人。
  * 用法同主循环：每个事件 onEvent，这一帧的事件都分发完以后 settle；current 给标签用。时间 now 是真实时间（秒）。
  * - 惊吓类「没人看见」直接用 OB 的 createMissWatch（生效窗口结束都没有这个物件的 startle；机关自己发作的那一下不算）
@@ -321,8 +331,11 @@ export function createOverlays(
   const grid = new Grid();
   /** 准星此刻对着的够不着的物件（FEEL-7，拾取器每帧发）；第三人称才有 */
   let farId: string | null = null;
+  /** 准星在不在（指针锁着、开场遮罩没挂着）：F 键帽跟着它 */
+  let aimShown = false;
   const unwatchUi = watchGhostUi((s) => {
     farId = s.aimFar;
+    aimShown = s.locked && !s.held;
   });
   /** 附身的结果（FEEL-3） */
   const outcomes = createOutcomeWatch();
@@ -438,6 +451,22 @@ export function createOverlays(
   /** 名牌内容的高度（像素），第一次 acquire 时量到 */
   let plateH = 26;
 
+  // ── 准星旁的 F 键帽（HT-3）──────────────────────────────────
+  const fKey = div('ov-fkey', root);
+  fKey.textContent = STRINGS.onboarding.fKey;
+  /** 现身此刻会吓到的访客 id（updateReach 里和小眼睛一起算）；键帽亮着没有；最近一次该亮的时刻（holdOn） */
+  let manifestIds: number[] = [];
+  let fKeyOn = false;
+  const fKeyHold = { at: -Infinity };
+  const updateFKey = (m: ManifestState) => {
+    const ready = ghost !== null && m.phase === 'idle' && m.cooldown <= 0;
+    const lit = holdOn(fKeyDue(ghost, m, manifestIds), now, fKeyHold);
+    const on = ready && lit && aimShown;
+    if (on === fKeyOn) return;
+    fKeyOn = on;
+    fKey.classList.toggle('is-on', on);
+  };
+
   // ── 名牌上的小眼睛（FEEL-1）：此刻待出手的动作会影响谁 ───────────────────
   /** 会被影响的访客 id；reachCool = 那个动作是附身一个还在冷却的物件（眼睛灰的） */
   let reachIds = new Set<number>();
@@ -453,6 +482,11 @@ export function createOverlays(
     const act = pendingAct(hoverId, ghost, state.manifest);
     reachIds = new Set(act ? reachOf(grid, state, act) : []);
     reachCool = act?.kind === 'object' && (state.objects.find((o) => o.id === act.id)?.cooldown ?? 0) > 0;
+    // F 键帽：在鬼魂所在处现身会吓到谁（没对着物件时就是上面那一份；对着物件时另算，F 不管准星对着什么）
+    const m = state.manifest;
+    if (!ghost || m.phase !== 'idle' || m.cooldown > 0) manifestIds = [];
+    else if (act?.kind === 'manifest') manifestIds = [...reachIds];
+    else manifestIds = reachOf(grid, state, { kind: 'manifest', at: { x: ghost.x, z: ghost.z } });
   };
   const placed: { x: number; y: number; w: number }[] = [];
   const pending: { p: Plate; x: number; y: number }[] = [];
@@ -627,6 +661,7 @@ export function createOverlays(
       now = time;
       outcomes.settle(state, time);
       updateReach(state, dt);
+      updateFKey(state.manifest);
       updatePlates(state.npcs, dt);
       updateMarks(state.objects);
       updateTip(state.objects, state.npcs);

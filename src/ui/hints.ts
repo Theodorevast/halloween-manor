@@ -19,7 +19,7 @@ import { STRINGS } from '../config/strings';
 import { TRAP } from '../config/visitors';
 import { watchGhostUi } from '../engine/ghostRig';
 import type { FrameCtx, Module } from '../engine/types';
-import type { ManifestPhase, ScareObjectState, ScareType, SimEvent, WorldState } from '../sim/types';
+import { GHOST_SOURCE, type ManifestPhase, type ScareObjectState, type ScareType, type SimEvent, type WorldState } from '../sim/types';
 
 /** 做不到时的原因（main.ts 按模拟的返回值和状态判断后传进来） */
 export type Refusal = 'manifestCooldown' | 'manifestWall' | 'trapsFull' | 'tooFar';
@@ -73,10 +73,14 @@ export const HINT = {
 
 type LineOwner = 'keys' | 'hint';
 let lineOwner: LineOwner | null = null;
+/** 谁在等这一行（request 记下，takeRequest 读完清掉） */
+let lineWanted: LineOwner | null = null;
 
 /**
  * 画面下方正中那一行同一时刻只放一句：开场的那一句（hud.ts：操作说明，触屏竖屏时是「把手机横过来」）记作 keys，
- * 情境提示记作 hint。谁先占着谁先说完，后来的等它淡完。一页只有一个界面，所以用模块级的状态（同 ghostRig 的 watchGhostUi）
+ * 情境提示记作 hint。谁先占着谁先说完，后来的等它淡完。一页只有一个界面，所以用模块级的状态（同 ghostRig 的 watchGhostUi）。
+ * 2026-10-30 起操作说明要留到第一次成功附身为止（newbie G1），一挂就是一两分钟：情境提示等着的时候 request 一声，
+ * 操作说明（hud.ts 的 createOpeningLine）每帧 takeRequest，说够了就让出来，提示说完再回来
  */
 export const bottomLine = {
   get owner(): LineOwner | null {
@@ -91,6 +95,16 @@ export const bottomLine = {
   /** 用完了（淡完了）还回去；不是自己占着的不动 */
   release(who: LineOwner): void {
     if (lineOwner === who) lineOwner = null;
+  },
+  /** 在等这一行（别人占着）：要一声。每帧等着的那一帧都要再要一次（读的那一方读完就清） */
+  request(who: LineOwner): void {
+    lineWanted = who;
+  },
+  /** 从上一次读到现在，有没有别人（不是 who）要过这一行；读完清掉 */
+  takeRequest(who: LineOwner): boolean {
+    const asked = lineWanted !== null && lineWanted !== who;
+    lineWanted = null;
+    return asked;
   },
 };
 
@@ -136,6 +150,66 @@ export function createMissWatch() {
         if (!w.hit) out.push({ object: id, type: w.type });
       }
       return out;
+    },
+  };
+}
+
+/**
+ * 落空的那一行（附身的 No one saw the lamp.、现身的 No one saw you. Stand in their light.）这一次说不说（2026-10-30 newbie S1）：
+ * 这一种第一次成功之前每次都说（原来附身落空只说头 3 次，第 4 次起一个字都没有，现身落空从来不说）；
+ * 成功过以后，一共说过的不到 MISSED_LINES 次才说（会了就不刷屏）
+ */
+export const MISSED_LINES = 3;
+export function missLineDue(said: number, succeeded: boolean): boolean {
+  return !succeeded || said < MISSED_LINES;
+}
+
+/**
+ * 玩家成功过没有（2026-10-30 newbie S1、G1）：
+ * - possession：附身的物件吓到了人（这个物件的 startle；机关发作的那一下也算，机关是玩家设的）。尖叫传染（object 为 null）、
+ *   鬼魂贴着后颈吹的那一口（GHOST_SOURCE）不算——那不是附身
+ * - manifest：现身吓到了人（manifest drop 的 scared 不空）
+ * 落空的播报（missLineDue）、开场的操作说明（hud.ts 的 createOpeningLine，留到 possession 为止）看它
+ */
+export function createSuccessWatch() {
+  let possession = false;
+  let manifest = false;
+  return {
+    onEvent(e: SimEvent): void {
+      if (e.type === 'startle' && e.object !== null && e.object !== GHOST_SOURCE) possession = true;
+      else if (e.type === 'manifest' && e.phase === 'drop' && e.scared.length > 0) manifest = true;
+    },
+    get possession(): boolean {
+      return possession;
+    },
+    get manifest(): boolean {
+      return manifest;
+    },
+  };
+}
+
+/**
+ * 三样动作各自用过没有（常驻的按键说明三样都用过以后缩成只剩 F，HT-2）：玩家附身过（trigger，机关发作紧跟着的那一下不算）、
+ * 设下过机关（trap armed）、现身过（manifest windup）。「用过」是这一下成了（附身了、设下了、现身了），不管吓没吓到人
+ */
+export function createUseWatch() {
+  const sprung = new Set<string>();
+  let possessed = false;
+  let trapped = false;
+  let appeared = false;
+  return {
+    onEvent(e: SimEvent): void {
+      if (e.type === 'trap') {
+        if (e.phase === 'sprung') sprung.add(e.object);
+        else if (e.phase === 'armed') trapped = true;
+      } else if (e.type === 'trigger') {
+        if (!sprung.delete(e.object)) possessed = true;
+      } else if (e.type === 'manifest' && e.phase === 'windup') {
+        appeared = true;
+      }
+    },
+    get all(): boolean {
+      return possessed && trapped && appeared;
     },
   };
 }
@@ -264,7 +338,12 @@ export function createHintCore() {
           queue.shift(); // 不算数了：不出，下一次碰到再说
           continue;
         }
-        if (env.paused || !bottomLine.claim('hint')) return null; // 暂停中、开场的那一句还挂着：等
+        if (env.paused) return null; // 暂停中：等
+        if (!bottomLine.claim('hint')) {
+          // 开场的那一句还挂着：等，同时要一声（它说够了就让出来，见 hud.ts 的 createOpeningLine）
+          bottomLine.request('hint');
+          return null;
+        }
         queue.shift();
         shown.add(q.key);
         cur = { key: q.key, since: now, until: now + HINT.hold, done: false };
