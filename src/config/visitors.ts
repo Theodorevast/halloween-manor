@@ -384,8 +384,11 @@ export const NIGHT_VISITS = {
   browse: { chance: 0.6, hold: [2, 3] as [number, number] },
 };
 
-/** 正式游戏 createWorld 的开关（NIGHT_VISITS）。closeAt：这一夜几秒收夜（NIGHT.length；?night 调过的按调过的，debug.ts 的 nightTiming） */
-export function nightWorld(closeAt: number): Pick<WorldOptions, 'target' | 'pairs' | 'late' | 'browse'> {
+/**
+ * 正式游戏 createWorld 的开关（NIGHT_VISITS）。closeAt：这一夜几秒收夜（NIGHT.length；?night 调过的按调过的，debug.ts 的 nightTiming）；
+ * paintings：这个视角有没有挂画（娃娃屋不建，访客不能对着空墙照）
+ */
+export function nightWorld(closeAt: number, paintings = true): Pick<WorldOptions, 'target' | 'pairs' | 'late' | 'browse'> {
   const v = NIGHT_VISITS;
-  return { target: v.target, pairs: { ...v.pairs, final: Math.max(0, closeAt - v.finalPair) }, late: { ...v.late }, browse: { ...v.browse } };
+  return { target: v.target, pairs: { ...v.pairs, final: Math.max(0, closeAt - v.finalPair) }, late: { ...v.late }, browse: { ...v.browse, paintings } };
 }

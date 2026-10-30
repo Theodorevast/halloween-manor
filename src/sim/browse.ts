@@ -69,7 +69,7 @@ export function createBrowse(grid: Grid, objects: readonly ScareObjectState[], o
     const range = Math.min(SCARES[o.type].range, VISION.range) - CLEAR;
     add(o.id, o.pos, BROWSE.weight[o.type], standsFor(grid, o.pos, Math.cos(o.facing), Math.sin(o.facing), range, (p) => facesToward(o, p)));
   }
-  for (const p of PAINTINGS) {
+  for (const p of opts.paintings === false ? [] : PAINTINGS) {
     const r = ROOMS[p.room];
     const nx = Math.round(Math.cos(p.facing)), nz = Math.round(Math.sin(p.facing));
     // 朝西的画挂在房间的东墙，朝南的挂在北墙（PaintingPlacement.facing）；along 是沿墙的米坐标

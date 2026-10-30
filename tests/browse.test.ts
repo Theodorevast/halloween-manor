@@ -231,8 +231,17 @@ describe('开关', () => {
     }
   });
 
-  test('正式游戏打开（nightWorld），机器人默认不开', () => {
-    expect(nightWorld(200).browse).toEqual(NIGHT_VISITS.browse);
+  test('娃娃屋（触屏）不建挂画（view/paintings.ts）：nightWorld(…, false) 只看画像、镜子，不会对着空墙照', () => {
+    expect(nightWorld(200, false).browse!.paintings).toBe(false);
+    expect(createBrowse(grid, objects(), { ...OPTS, paintings: false }).spots.map((s) => s.id).sort()).toEqual(['mirror', 'portrait']);
+    const w = createWorld({ seed: 13, autoSpawn: false, browse: { ...OPTS, paintings: false } });
+    const n = w.spawn({ pos: { x: 8, z: 6 }, personality: 'average', lookDir: 0 });
+    const ids = new Set(gazes(w, n, 90).map((g) => g.id));
+    expect([...ids].sort()).toEqual(['mirror', 'portrait']);
+  });
+
+  test('正式游戏打开（nightWorld，第三人称有挂画），机器人默认不开', () => {
+    expect(nightWorld(200).browse).toEqual({ ...NIGHT_VISITS.browse, paintings: true });
     expect(NIGHT_VISITS.browse.hold).toEqual([2, 3]);
     const r = runBot(1, 'idle', { seconds: 60 });
     expect(r.paintingStops).toBe(0);

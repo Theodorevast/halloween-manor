@@ -260,7 +260,7 @@ export interface WorldOptions {
   late?: { gain: number; decay: number };
   /**
    * 闲逛时被画像、镜子、挂画吸引（sim/browse.ts）：每次挑下一个去处时有 chance 的机会走到其中一处跟前，停下来照着看 hold 秒。
-   * 紧张的人不停。不给就没有（不多抽随机数）
+   * 紧张的人不停。不给就没有（不多抽随机数）。paintings = false：这个视角没有挂画（娃娃屋不建），只看画像、镜子
    */
-  browse?: { chance: number; hold: [number, number] };
+  browse?: { chance: number; hold: [number, number]; paintings?: boolean };
 }
