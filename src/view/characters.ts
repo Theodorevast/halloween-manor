@@ -114,6 +114,8 @@ const BOUNCE_LIGHT = 0.1;
 const HAND = { ahead: 0.06, side: 0.1 };
 /** 手电池子的大小：屋里常驻 SPAWN.target 人，再留一个给正在逃跑的人（灯的数量固定，避免材质重编译） */
 const TORCH_SLOTS = SPAWN.target + 1;
+/** 停下来看画像、镜子、挂画（NpcState.gazing）时抬手照上去、看完放下来用几秒 */
+const GAZE_LIFT = 0.4;
 
 export interface CharacterAsset {
   /** 归一化好的模板：身高 height、x / z 居中、脚底 y = 0、正面朝 +z（已抵消 facingOffset） */
@@ -306,6 +308,9 @@ const JOIN_FRAMES = 3;
 
 interface Visual {
   id: number;
+  /** 正停下来看东西（NpcState.gazing）；手电抬起来多少（0..1，平滑过的，见 TORCH.gazeY） */
+  gazing: boolean;
+  lift: number;
   /** 这个人穿的是哪一套：动画片段名、步频速率、手电高度都按它的配置 */
   outfit: Outfit;
   root: THREE.Group;
@@ -646,7 +651,7 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
     const torch = torches.find((t) => !owner.has(t)) ?? null;
     if (torch) owner.set(torch, npc.id);
     const v: Visual = {
-      id: npc.id, outfit, root, body, pose, parts, mixer, actions,
+      id: npc.id, gazing: !!npc.gazing, lift: 0, outfit, root, body, pose, parts, mixer, actions,
       weights: { idle: 1, walk: 0, run: 0, scared: 0, look: 0, afraid: 0, flee: 0, scared2: 0 },
       mix: { look: 0, afraid: 0, flee: 0 }, noticing: !!npc.notice, scaredCount: npc.id, scaredPick: null, loopT: 0,
       front, halfWidth, height, torch,
@@ -864,6 +869,7 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
       const reach = (Math.abs(Math.cos(rel)) * v.front + Math.abs(Math.sin(rel)) * v.halfWidth) * k + HAND.ahead;
       const lx = Math.cos(look), lz = Math.sin(look);
       const hand = (v.outfit.spec.flashlightHeight ?? FLASHLIGHT_HEIGHT) * Math.min(1, v.height / v.outfit.spec.targetHeight) * shrinkY;
+      v.lift = Math.max(0, Math.min(1, v.lift + (v.gazing ? dt : -dt) / GAZE_LIFT));
       const lean = hand * Math.sin(v.lean), hunch = hand * shear; // 逃跑前倾沿 heading，前探 / 后缩沿身体朝向
       v.torch.update({
         x: v.x + lx * reach - lz * HAND.side + Math.cos(heading) * lean + Math.cos(facing) * hunch,
@@ -872,6 +878,7 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
         dir: look,
         power: v.alpha,
         nervous: v.nervous,
+        lift: v.lift,
       }, dt, time);
     }
   };
@@ -1267,6 +1274,7 @@ export async function createCharactersView(core: RenderCore, first: Promise<Firs
         v.z = npc.pos.z;
         v.heading = npc.heading;
         v.look = npc.lookDir;
+        v.gazing = !!npc.gazing;
         v.speed = npc.speed;
         v.mode = npc.mode;
         v.nervous = npc.nervous;

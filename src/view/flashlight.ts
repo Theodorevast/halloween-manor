@@ -50,6 +50,11 @@ export const TORCH = {
   distance: VISION.range * 1.3,
   /** 照向：lookDir 方向这么远的地面 */
   aim: 3.5,
+  /**
+   * 停下来看画像、镜子、挂画时（TorchPose.lift = 1）光轴抬起来，对着 aim 米外这么高（米）的地方：手在 0.8 米高、站在 1.5–2.5 米外时，
+   * 光轴正好落在画布上（平时照地面，光锥上沿只擦到画框底下，playtest.md S2）。tests/browse.test.ts 按 PAINTINGS 核对
+   */
+  gazeY: 1.85,
   shadow: {
     size: { high: 1024, low: 512 } as Record<Quality, number>,
     near: 0.1,
@@ -92,6 +97,8 @@ export interface TorchPose {
   /** 0..1：访客淡入淡出时跟着变 */
   power: number;
   nervous: boolean;
+  /** 0..1：抬手照墙上的东西（见 TORCH.gazeY），不给就是 0（照地面） */
+  lift?: number;
 }
 
 export interface Flashlight {
@@ -312,11 +319,12 @@ export function createFlashlight(parent: THREE.Object3D, quality: Quality, seed 
       halo.position.set(p.x, p.y, p.z);
       core.position.copy(halo.position);
       const tx = p.x + Math.cos(dir) * TORCH.aim, tz = p.z + Math.sin(dir) * TORCH.aim;
-      target.position.set(tx, 0, tz);
+      const ty = TORCH.gazeY * (p.lift ?? 0);
+      target.position.set(tx, ty, tz);
       target.updateMatrixWorld();
 
       hand.position.copy(halo.position);
-      dirV.set(tx - p.x, -p.y, tz - p.z).normalize();
+      dirV.set(tx - p.x, ty - p.y, tz - p.z).normalize();
       hand.quaternion.setFromUnitVectors(fwd, dirV);
       // 光锥在墙那里截断（按水平距离算，再折回到沿光轴的长度）
       const horiz = Math.hypot(dirV.x, dirV.z) || 1;

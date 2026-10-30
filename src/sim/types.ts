@@ -69,6 +69,11 @@ export interface NpcState {
    * 画面、调试用（身体和手电的朝向本来就在 heading / lookDir 里）。可选的理由同 uneasy
    */
   notice?: NoticeState | null;
+  /**
+   * 正停在画像、镜子或挂画跟前看（WorldOptions.browse，sim/browse.ts）：物件或挂画的 id；没在看时 null 或没有这个键。
+   * 画面、调试、机器人统计用（身体和手电的朝向本来就在 heading / lookDir 里）
+   */
+  gazing?: string | null;
 }
 
 export type ScareKind = 'lure' | 'sight';
@@ -253,4 +258,9 @@ export interface WorldOptions {
    * 回落的速度 × decay。不给就和平常一样
    */
   late?: { gain: number; decay: number };
+  /**
+   * 闲逛时被画像、镜子、挂画吸引（sim/browse.ts）：每次挑下一个去处时有 chance 的机会走到其中一处跟前，停下来照着看 hold 秒。
+   * 紧张的人不停。不给就没有（不多抽随机数）
+   */
+  browse?: { chance: number; hold: [number, number] };
 }
