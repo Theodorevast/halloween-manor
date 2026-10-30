@@ -323,7 +323,7 @@ describe('一夜的状态机（src/night.ts）', () => {
     const second = reg.page(t.state.time);
     expect(second.lines.map((l) => l.name)).toEqual(['Theo']);
     expect(clockAt(min(12))).toMatch(/^9:12 /);
-    expect(second.lines[0].story).toBe(`${STRINGS.register.cameIn(clockAt(min(12)))}; ${STRINGS.register.scream(clockAt(min(30), false))}`);
+    expect(second.lines[0].story).toBe(`${STRINGS.register.cameIn(clockAt(min(12)))}; ${STRINGS.register.scream(clockAt(min(30)))}`);
     // 页脚只数这一夜的：一个进来、一个跑了；不带上一夜墙上多一个影子那一句
     expect(second.footer[0]).toBe(STRINGS.register.footer.cameRan(inWords(1, true), inWords(1, true)));
     expect(second.footer.length).toBeLessThanOrEqual(REGISTER.footer);

@@ -61,7 +61,8 @@ export const SCARES: Record<ScareType, ScareSpec> = {
   // 床：被子下面慢慢鼓起一个人形、起伏，2.6 秒时一下子塌平（设计文档 4.1）；蓄势这 2.6 秒里看见它的人被定住盯着
   lamp: { kind: 'sight', range: 6, fear: 18, cooldown: 8, active: 1.5, broken: 6, hitAt: 0 },
   rockingChair: { kind: 'sight', range: 6, fear: 22, cooldown: 10, active: 3, broken: 0, hitAt: 0.25 },
-  portrait: { kind: 'sight', range: 6, fear: 32, cooldown: 16, active: 1.8, broken: 10, hitAt: 0.94 },
+  // active 1.8 → 2.4（2026-10-30）：IMG 把画像倒下挪到 2.44 秒，换脸一直挂到那时；1.8–2.44 秒转头看过来的人看见了脸却没反应。默认世界的机器人数字几乎没变（种子 1–10 一位不差；61–110 只有先引诱再附身 7.28 → 7.30）
+  portrait: { kind: 'sight', range: 6, fear: 32, cooldown: 16, active: 2.4, broken: 10, hitAt: 0.94 },
   mirror: { kind: 'sight', range: 2.5, fear: 48, cooldown: 20, active: 1.5, broken: 0, hitAt: 0.6 },
   bed: { kind: 'sight', range: 5, fear: 26, cooldown: 14, active: 3.2, broken: 0, hitAt: 2.6 },
   // 衣柜（2026-10-29，设计文档 4.3、调研 3.3）：门自己开一条缝、停住，2.2 秒时被从里面猛地拉上。按机器人测（lane Q1）：

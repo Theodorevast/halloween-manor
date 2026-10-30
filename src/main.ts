@@ -126,7 +126,7 @@ hud.setReady(false);
 progress({});
 
 // 一夜（2026-10-30）：正式游戏给开局间隔（第一个人独自进来，过一会儿才有第二个敲门）。机器人、平衡测试不给，数字不变
-const world = createWorld({ seed: Date.now() % 2147483647, openingGaps: NIGHT.openingGaps, ...nightWorld(nightTiming().length) });
+const world = createWorld({ seed: Date.now() % 2147483647, openingGaps: NIGHT.openingGaps, ...nightWorld(nightTiming().length, ghostMode) });
 const control = { timeScale: 1 };
 const dispatch = (evs: SimEvent[]) => {
   for (const e of evs) for (const m of modules) m.onEvent?.(e, world.state);

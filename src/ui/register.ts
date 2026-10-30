@@ -43,16 +43,12 @@ function minuteOf(t: number): number {
   return Math.floor(start * 60 + (t * hours * 60) / NIGHT.dawn + 1e-6);
 }
 
-/** 模拟时间 → 钟点（"9:12 pm"）。meridiem = false 时不带 am / pm（一行里第二个钟点和第一个同在上午或下午时） */
-export function clockAt(t: number, meridiem = true): string {
+/** 模拟时间 → 钟点（"9:12 pm"）。一行里的第二个钟点也写 am / pm（2026-10-30 试玩：原来同在上午或下午时省略，"ran at 11:55" 看着像漏写） */
+export function clockAt(t: number): string {
   const m = ((minuteOf(t) % DAY) + DAY) % DAY;
   const h = Math.floor(m / 60);
-  const text = `${h % 12 || 12}:${String(m % 60).padStart(2, '0')}`;
-  return meridiem ? `${text} ${h < 12 ? R.meridiem.am : R.meridiem.pm}` : text;
+  return `${h % 12 || 12}:${String(m % 60).padStart(2, '0')} ${h < 12 ? R.meridiem.am : R.meridiem.pm}`;
 }
-
-/** 两个时刻在同一天的同一个半天（都是上午或都是下午） */
-const sameHalf = (a: number, b: number) => Math.floor(minuteOf(a) / 720) === Math.floor(minuteOf(b) / 720);
 
 // ── 数字、造型的名字 ─────────────────────────────────────
 
@@ -186,7 +182,7 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
   let otherOne = false;
   /** 这一夜从模拟时间几秒开始（开局 0；Keep haunting 以后是点下去的那一刻）：钟点按离它多久算 */
   let origin = 0;
-  const clock = (t: number, meridiem = true) => clockAt(t - origin, meridiem);
+  const clock = (t: number) => clockAt(t - origin);
 
   /** 找这个访客；没记过就从 state.npcs 里记下（cameAt：spawn 那一刻，别的事件先到时为 null）。state 里也没有就记不下 */
   const ensure = (id: number, state: Readonly<WorldState>, cameAt: number | null = null): Visitor | null => {
@@ -231,21 +227,20 @@ export function createRegister(outfitOf: (npcId: number) => string | undefined =
     return o ? SCARES[o.type].fear : 0;
   };
 
-  /** 第二行：几点进来、怎么走的。第二个钟点和进门那个同在上午或下午时不再写 am / pm（"came in at 9:12 pm; ran from the wardrobe at 9:18"） */
+  /** 第二行：几点进来、怎么走的（"came in at 9:12 pm; ran from the wardrobe at 9:18 pm"） */
   const story = (v: Visitor): string => {
     const came = v.cameAt;
-    const at = (t: number) => clock(t, came === null || !sameHalf(came - origin, t - origin));
     const parts: string[] = [];
     if (came !== null) parts.push(R.cameIn(clock(came)));
     if (v.ranAt !== null) {
-      const time = at(v.ranAt);
+      const time = clock(v.ranAt);
       const c = mainCause(v);
       if (c?.kind === 'prop') parts.push(c.trap ? R.trap(STRINGS.propName[c.prop], time) : R.ranFrom(STRINGS.propName[c.prop], time));
       else if (c?.kind === 'sawYou') parts.push(R.sawYou(time));
       else if (c?.kind === 'coldBreath') parts.push(R.coldBreath(time));
       else if (c?.kind === 'scream') parts.push(R.scream(time));
       // 没记到是什么（调试时直接改了恐惧值）：只写几点进来
-    } else if (v.calmAt !== null) parts.push(R.leftAtDawn(at(v.calmAt)));
+    } else if (v.calmAt !== null) parts.push(R.leftAtDawn(clock(v.calmAt)));
     else parts.push(R.stillInside);
     return parts.join('; ');
   };

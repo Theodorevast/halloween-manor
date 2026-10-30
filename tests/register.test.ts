@@ -81,11 +81,6 @@ describe('钟点：0 秒是 NIGHT.clock.start（晚 9 点），NIGHT.dawn 秒是
     expect(clockAt(min(900))).toBe('12:00 pm');
     expect(clockAt(min(1440 + 75))).toBe('10:15 pm');
   });
-
-  test('meridiem = false 时不带 am / pm', () => {
-    expect(clockAt(min(18), false)).toBe('9:18');
-    expect(clockAt(min(200), false)).toBe('12:20');
-  });
 });
 
 describe('数字写成英文单词', () => {
@@ -122,11 +117,11 @@ describe('数字写成英文单词', () => {
 });
 
 describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来源（只有一类时就是它）', () => {
-  test('物件的 startle → ranFrom（物件名小写），钟点是逃跑那一刻；和进门同在 pm 时第二个钟点不再写 pm', () => {
+  test('物件的 startle → ranFrom（物件名小写），钟点是逃跑那一刻；第二个钟点也写 am / pm（playtest：原来同在 pm 时省略，看着像漏写）', () => {
     const n = night();
     const mia = n.come(min(12), 'Mia', 'timid');
     n.scare(min(18), mia, 'wardrobe');
-    expect(n.story(mia)).toBe('came in at 9:12 pm; ran from the wardrobe at 9:18');
+    expect(n.story(mia)).toBe('came in at 9:12 pm; ran from the wardrobe at 9:18 pm');
     // 跨过午夜：am / pm 不一样了就写上
     const theo = n.come(min(170), 'Theo');
     n.scare(min(185), theo, 'lamp-bedroom');
@@ -140,12 +135,12 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
     n.emit(min(30), { type: 'trap', object: 'portrait', phase: 'sprung' }, { type: 'trigger', object: 'portrait', scareType: 'portrait' });
     // 惊吓类要蓄势一会儿才落下：startle 在后面几步
     n.scare(min(32), a, 'portrait');
-    expect(n.story(a)).toBe(`${R.cameIn(clockAt(min(10)))}; ${R.trap(STRINGS.propName.portrait, clockAt(min(32), false))}`);
-    expect(n.story(a)).toBe('came in at 9:10 pm; the portrait was waiting for them at 9:32');
+    expect(n.story(a)).toBe(`${R.cameIn(clockAt(min(10)))}; ${R.trap(STRINGS.propName.portrait, clockAt(min(32)))}`);
+    expect(n.story(a)).toBe('came in at 9:10 pm; the portrait was waiting for them at 9:32 pm');
     // 冷却过后玩家自己附身（前面没有 trap sprung）
     n.emit(min(80), { type: 'trigger', object: 'portrait', scareType: 'portrait' });
     n.scare(min(82), b, 'portrait');
-    expect(n.story(b)).toBe(`${R.cameIn(clockAt(min(20)))}; ${R.ranFrom(STRINGS.propName.portrait, clockAt(min(82), false))}`);
+    expect(n.story(b)).toBe(`${R.cameIn(clockAt(min(20)))}; ${R.ranFrom(STRINGS.propName.portrait, clockAt(min(82)))}`);
   });
 
   test('同一步里玩家附身一件、另一件的机关发作：各算各的', () => {
@@ -160,15 +155,15 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
     );
     n.scare(min(31), a, 'mirror');
     n.scare(min(36), b, 'bed');
-    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.mirror, clockAt(min(31), false)));
-    expect(n.story(b)).toContain(R.trap(STRINGS.propName.bed, clockAt(min(36), false)));
+    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.mirror, clockAt(min(31))));
+    expect(n.story(b)).toContain(R.trap(STRINGS.propName.bed, clockAt(min(36))));
   });
 
   test('引诱类（heard，听见了也涨恐惧值）也算物件：ran from the music box；机关设的厨房门 → trap', () => {
     const n = night();
     const a = n.come(min(10), 'Nora', 'timid');
     n.emit(min(40), { type: 'trigger', object: 'music-box', scareType: 'musicBox' }, { type: 'heard', npc: a, object: 'music-box' }, { type: 'flee', npc: a });
-    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.musicBox, clockAt(min(40), false)));
+    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.musicBox, clockAt(min(40))));
     const b = n.come(min(50), 'Otis', 'timid');
     n.emit(
       min(60),
@@ -177,7 +172,7 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
       { type: 'heard', npc: b, object: 'kitchen-door' },
       { type: 'flee', npc: b },
     );
-    expect(n.story(b)).toContain(R.trap(STRINGS.propName.door, clockAt(min(60), false)));
+    expect(n.story(b)).toContain(R.trap(STRINGS.propName.door, clockAt(min(60))));
   });
 
   test('现身（manifest drop 的 scared）→ sawYou；同一步 object = GHOST_SOURCE 的 startle 不改它', () => {
@@ -189,26 +184,26 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
       { type: 'startle', npc: a, object: GHOST_SOURCE, amount: 30, scream: true },
       { type: 'flee', npc: a },
     );
-    expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.sawYou('9:44')}`);
+    expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.sawYou('9:44 pm')}`);
   });
 
   test('后颈一凉（chill neck + 同一步 GHOST_SOURCE 的 startle）→ coldBreath；慢慢发毛（chill）涨满 → 也是 coldBreath', () => {
     const n = night();
     const a = n.come(min(10), 'Ezra');
     n.emit(min(50), { type: 'chill', npc: a, amount: 18, neck: true }, { type: 'startle', npc: a, object: GHOST_SOURCE, amount: 18, scream: false }, { type: 'flee', npc: a });
-    expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.coldBreath('9:50')}`);
+    expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.coldBreath('9:50 pm')}`);
     const b = n.come(min(60), 'Lena');
     n.emit(min(70), { type: 'chill', npc: b, amount: 3, neck: false }, { type: 'flee', npc: b });
-    expect(n.story(b)).toContain(R.coldBreath(clockAt(min(70), false)));
+    expect(n.story(b)).toContain(R.coldBreath(clockAt(min(70))));
   });
 
   test('被别人的尖叫吓到（startle 的 object 为 null）→ scream', () => {
     const n = night();
     const a = n.come(min(10), 'Sam');
     n.emit(min(64), { type: 'startle', npc: a, object: null, amount: 12, scream: false }, { type: 'flee', npc: a });
-    expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.scream('10:04')}`);
+    expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.scream('10:04 pm')}`);
     // 整句读一遍（集成时改的措辞：原来 "ran when someone screamed, at 10:04" 的逗号读着断）
-    expect(n.story(a)).toBe('came in at 9:10 pm; ran at 10:04 when someone screamed');
+    expect(n.story(a)).toBe('came in at 9:10 pm; ran at 10:04 pm when someone screamed');
   });
 
   /** 现身落下吓到 id、涨了 amount（模拟里同一步紧跟着一个 object = GHOST_SOURCE 的 startle） */
@@ -224,7 +219,7 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
     n.emit(min(27), ...drop(june, 38));
     n.emit(min(30), { type: 'chill', npc: june, amount: 0.8, neck: false });
     n.emit(min(34), { type: 'chill', npc: june, amount: 12, neck: true }, { type: 'startle', npc: june, object: GHOST_SOURCE, amount: 12, scream: false }, { type: 'flee', npc: june });
-    expect(n.story(june)).toBe(`${R.cameIn('9:02 pm')}; ${R.sawYou('9:34')}`);
+    expect(n.story(june)).toBe(`${R.cameIn('9:02 pm')}; ${R.sawYou('9:34 pm')}`);
   });
 
   test('物件的各件加在一起算一类，写其中涨得最多的那一件：摇椅 22 + 肖像 32（物件 54）比现身 40 多 → ran from the portrait', () => {
@@ -233,14 +228,14 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
     n.emit(min(20), { type: 'startle', npc: a, object: 'rocking-chair', amount: 22, scream: false });
     n.emit(min(25), { type: 'startle', npc: a, object: 'portrait', amount: 32, scream: true });
     n.emit(min(30), ...drop(a, 40), { type: 'flee', npc: a });
-    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.portrait, clockAt(min(30), false)));
+    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.portrait, clockAt(min(30))));
     // 对照：现身那一下更大（60 > 54）→ saw you
     const m = night();
     const b = m.come(min(10), 'Theo');
     m.emit(min(20), { type: 'startle', npc: b, object: 'rocking-chair', amount: 22, scream: false });
     m.emit(min(25), { type: 'startle', npc: b, object: 'portrait', amount: 32, scream: true });
     m.emit(min(30), ...drop(b, 60), { type: 'flee', npc: b });
-    expect(m.story(b)).toContain(R.sawYou(clockAt(min(30), false)));
+    expect(m.story(b)).toContain(R.sawYou(clockAt(min(30))));
   });
 
   test('先被衣柜吓到（30）、后来听见尖叫（12）才跑 → 还是衣柜；尖叫传染加起来更多（3 × 12）→ scream', () => {
@@ -248,12 +243,12 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
     const a = n.come(min(10), 'June');
     n.emit(min(20), { type: 'startle', npc: a, object: 'wardrobe', amount: 30, scream: true });
     n.emit(min(30), { type: 'startle', npc: a, object: null, amount: 12, scream: false }, { type: 'flee', npc: a });
-    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.wardrobe, clockAt(min(30), false)));
+    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.wardrobe, clockAt(min(30))));
     const b = n.come(min(40), 'Sam');
     n.emit(min(42), { type: 'startle', npc: b, object: 'wardrobe', amount: 30, scream: true });
     for (const t of [44, 46, 48]) n.emit(min(t), { type: 'startle', npc: b, object: null, amount: 12, scream: false });
     n.emit(min(48), { type: 'flee', npc: b });
-    expect(n.story(b)).toContain(R.scream(clockAt(min(48), false)));
+    expect(n.story(b)).toContain(R.scream(clockAt(min(48))));
   });
 
   test('一样多时最近涨过的那一类算：床 20、后颈一凉 20 → cold breath；倒过来 → bed', () => {
@@ -261,11 +256,11 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
     const a = n.come(min(10), 'Ada');
     n.emit(min(20), { type: 'startle', npc: a, object: 'bed', amount: 20, scream: false });
     n.emit(min(25), { type: 'chill', npc: a, amount: 20, neck: true }, { type: 'startle', npc: a, object: GHOST_SOURCE, amount: 20, scream: false }, { type: 'flee', npc: a });
-    expect(n.story(a)).toContain(R.coldBreath(clockAt(min(25), false)));
+    expect(n.story(a)).toContain(R.coldBreath(clockAt(min(25))));
     const b = n.come(min(30), 'Leo');
     n.emit(min(35), { type: 'chill', npc: b, amount: 20, neck: true }, { type: 'startle', npc: b, object: GHOST_SOURCE, amount: 20, scream: false });
     n.emit(min(40), { type: 'startle', npc: b, object: 'bed', amount: 20, scream: false }, { type: 'flee', npc: b });
-    expect(n.story(b)).toContain(R.ranFrom(STRINGS.propName.bed, clockAt(min(40), false)));
+    expect(n.story(b)).toContain(R.ranFrom(STRINGS.propName.bed, clockAt(min(40))));
   });
 
   test('同一步里先现身（30）、再后颈一凉（18）：两笔各记各的（后颈一凉那个 GHOST_SOURCE startle 不重复加）→ saw you', () => {
@@ -278,12 +273,12 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
       { type: 'startle', npc: b, object: GHOST_SOURCE, amount: 18, scream: false },
       { type: 'flee', npc: b },
     );
-    expect(n.story(b)).toContain(R.sawYou(clockAt(min(50), false)));
+    expect(n.story(b)).toContain(R.sawYou(clockAt(min(50))));
     // 后颈一凉（18）只算一次：再加一次现身以外的 13 就够超过它（18 + 13 > 30 才会变）
     const c = n.come(min(60), 'Iris');
     n.emit(min(70), ...drop(c, 30), { type: 'chill', npc: c, amount: 18, neck: true }, { type: 'startle', npc: c, object: GHOST_SOURCE, amount: 18, scream: false });
     n.emit(min(72), { type: 'chill', npc: c, amount: 11, neck: false }, { type: 'flee', npc: c });
-    expect(n.story(c)).toContain(R.sawYou(clockAt(min(72), false)));
+    expect(n.story(c)).toContain(R.sawYou(clockAt(min(72))));
   });
 
   test('引诱类的 heard 按事件里的 amount 算进那件物件；手写的没有 amount 时按物件的基础恐惧值（SCARES）', () => {
@@ -292,12 +287,12 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
     // 厨房门 3 次各 10（30）比一次尖叫 25 多
     for (const t of [20, 30, 40]) n.emit(min(t), { type: 'trigger', object: 'kitchen-door', scareType: 'door' }, { type: 'heard', npc: a, object: 'kitchen-door', amount: 10 });
     n.emit(min(41), { type: 'startle', npc: a, object: null, amount: 25, scream: false }, { type: 'flee', npc: a });
-    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.door, clockAt(min(41), false)));
+    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.door, clockAt(min(41))));
     // 没有 amount：八音盒按 SCARES.musicBox.fear（4）算，比尖叫 7 少
     const b = n.come(min(50), 'Otis');
     n.emit(min(55), { type: 'heard', npc: b, object: 'music-box' });
     n.emit(min(56), { type: 'startle', npc: b, object: null, amount: 7, scream: false }, { type: 'flee', npc: b });
-    expect(n.story(b)).toContain(R.scream(clockAt(min(56), false)));
+    expect(n.story(b)).toContain(R.scream(clockAt(min(56))));
   });
 
   test('同一件物件，机关发作的和自己附身的分开算，哪一笔多写哪一种', () => {
@@ -307,7 +302,7 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
     n.emit(min(21), { type: 'startle', npc: a, object: 'wardrobe', amount: 30, scream: true });
     n.emit(min(60), { type: 'trigger', object: 'wardrobe', scareType: 'wardrobe' });
     n.emit(min(61), { type: 'startle', npc: a, object: 'wardrobe', amount: 15, scream: false }, { type: 'flee', npc: a });
-    expect(n.story(a)).toContain(R.trap(STRINGS.propName.wardrobe, clockAt(min(61), false)));
+    expect(n.story(a)).toContain(R.trap(STRINGS.propName.wardrobe, clockAt(min(61))));
   });
 
   test('逃跑那一刻就定下来：之后的事件（别人的尖叫之类）不改，exit 也不改钟点', () => {
@@ -316,7 +311,7 @@ describe('怎么走的：逃跑之前让他恐惧值涨得最多的那一类来�
     n.scare(min(20), a, 'mirror');
     n.emit(min(21), { type: 'startle', npc: a, object: null, amount: 12, scream: false });
     n.out(min(26), a);
-    expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.ranFrom(STRINGS.propName.mirror, '9:20')}`);
+    expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.ranFrom(STRINGS.propName.mirror, '9:20 pm')}`);
   });
 });
 
@@ -332,7 +327,7 @@ describe('天亮自己走的（exit 带 calm）', () => {
     n.out(NIGHT.dawn + min(10), leo, true);
     // 不评价恐惧（原来写 "unafraid"：被吓过一下、只是没跑的人也这么写，不准），只写天色
     expect(n.story(ada)).toBe('came in at 9:04 pm; walked out at 6:04 am, as the sky paled');
-    expect(n.story(leo)).toBe(`${R.cameIn('2:00 am')}; ${R.leftAtDawn('6:10')}`);
+    expect(n.story(leo)).toBe(`${R.cameIn('2:00 am')}; ${R.leftAtDawn('6:10 am')}`);
     const p = n.page();
     expect(p.footer[0]).toBe(F.cameRan('Three', 'One'));
     expect(p.footer).toContain(F.neverRan('Two'));
@@ -343,7 +338,7 @@ describe('天亮自己走的（exit 带 calm）', () => {
     const a = n.come(min(100), 'Otis');
     n.scare(NIGHT.dawn + min(3), a, 'lamp-living');
     n.out(NIGHT.dawn + min(6), a);
-    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.lamp, clockAt(NIGHT.dawn + min(3), false)));
+    expect(n.story(a)).toContain(R.ranFrom(STRINGS.propName.lamp, clockAt(NIGHT.dawn + min(3))));
     expect(n.page().footer[0]).toBe(F.cameRan('One', 'One'));
     expect(n.page().footer).not.toContain(F.neverRan('One'));
   });
@@ -362,8 +357,8 @@ describe('重名、还在屋里', () => {
       ['Mia', STRINGS.personalityTag.timid],
       ['Mia', STRINGS.personalityTag.brave],
     ]);
-    expect(lines[0].story).toContain(R.ranFrom(STRINGS.propName.wardrobe, clockAt(min(30), false)));
-    expect(lines[1].story).toContain(R.coldBreath(clockAt(min(80), false)));
+    expect(lines[0].story).toContain(R.ranFrom(STRINGS.propName.wardrobe, clockAt(min(30))));
+    expect(lines[1].story).toContain(R.coldBreath(clockAt(min(80))));
   });
 
   test('还在屋里的写 stillInside；逃跑了还没出门的照样写怎么走的', () => {
@@ -372,7 +367,7 @@ describe('重名、还在屋里', () => {
     const b = n.come(min(20), 'Hugo');
     n.scare(min(40), b, 'rocking-chair');
     expect(n.story(a)).toBe(`${R.cameIn('9:10 pm')}; ${R.stillInside}`);
-    expect(n.story(b)).toBe(`${R.cameIn('9:20 pm')}; ${R.ranFrom(STRINGS.propName.rockingChair, '9:40')}`);
+    expect(n.story(b)).toBe(`${R.cameIn('9:20 pm')}; ${R.ranFrom(STRINGS.propName.rockingChair, '9:40 pm')}`);
   });
 
   test('一行按进门的先后排；没见过 spawn 的人（登记簿建得晚）：照样记下，不写几点进来', () => {
@@ -663,7 +658,7 @@ describe('真的模拟跑一遍：事件的先后和这里的归因对得上', (
     expect(w.trigger('portrait')).toBe(true);
     expect(drive(w, reg, 3, () => n.mode === 'fleeing', () => { n.lookDir = bearingTo(n.pos, prop('portrait')); })).toBe(true);
     fledAt = w.state.time;
-    expect(storyOf(reg, w, n.id)).toContain(R.ranFrom(STRINGS.propName.portrait, clockAt(fledAt, false)));
+    expect(storyOf(reg, w, n.id)).toContain(R.ranFrom(STRINGS.propName.portrait, clockAt(fledAt)));
   });
 
   test('设在肖像上的机关：手电扫到时发作 → the portrait was waiting for them', () => {
@@ -674,7 +669,7 @@ describe('真的模拟跑一遍：事件的先后和这里的归因对得上', (
     n.fear = 80;
     expect(w.arm('portrait')).toBe(true);
     expect(drive(w, reg, 5, () => n.mode === 'fleeing')).toBe(true);
-    expect(storyOf(reg, w, n.id)).toContain(R.trap(STRINGS.propName.portrait, clockAt(w.state.time, false)));
+    expect(storyOf(reg, w, n.id)).toContain(R.trap(STRINGS.propName.portrait, clockAt(w.state.time)));
   });
 
   test('现身落下、当场吓破胆 → saw you in the dark, and ran（同一步的 GHOST_SOURCE startle 不改）', () => {
@@ -687,7 +682,7 @@ describe('真的模拟跑一遍：事件的先后和这里的归因对得上', (
     w.setGhost(spot);
     expect(w.manifest()).toBe(true);
     expect(drive(w, reg, 5, () => a.mode === 'fleeing')).toBe(true);
-    expect(storyOf(reg, w, a.id)).toContain(R.sawYou(clockAt(w.state.time, false)));
+    expect(storyOf(reg, w, a.id)).toContain(R.sawYou(clockAt(w.state.time)));
     expect(reg.page(w.state.time).footer).toContain(F.someSaw('One'));
   });
 
@@ -699,6 +694,6 @@ describe('真的模拟跑一遍：事件的先后和这里的归因对得上', (
     a.fear = 92;
     const behind = () => ({ x: a.pos.x - Math.cos(a.heading) * 0.3, z: a.pos.z - Math.sin(a.heading) * 0.3 });
     expect(drive(w, reg, GHOST.neckDwell + 2, () => a.mode === 'fleeing', () => w.setGhost(behind()))).toBe(true);
-    expect(storyOf(reg, w, a.id)).toContain(R.coldBreath(clockAt(w.state.time, false)));
+    expect(storyOf(reg, w, a.id)).toContain(R.coldBreath(clockAt(w.state.time)));
   });
 });

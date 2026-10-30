@@ -24,6 +24,7 @@ import { createWorld } from '../src/sim/world';
 import { createRng } from '../src/sim/rng';
 import type { Rng } from '../src/sim/rng';
 import { Grid } from '../src/sim/grid';
+import { createBrowse } from '../src/sim/browse';
 import { alertPath, investigateDist, scanStops } from '../src/sim/npc';
 import { canHear, canSee } from '../src/sim/perception';
 import { reachOf } from '../src/sim/reach';
@@ -105,6 +106,11 @@ export interface BotRun {
   /** 物件（惊吓类、引诱类，含机关）让人涨的恐惧值、现身让人涨的恐惧值（几局对照「谁干了活」） */
   propFear: number;
   manifestFear: number;
+  /** 画像、镜子被人看着（seenBy 不空）：几次（连续看够 LOOK_MIN 秒才算一次）、一共几秒 */
+  looks: Record<'portrait' | 'mirror', { n: number; seconds: number }>;
+  /** 六幅挂画：有人停下来、手电照着看（NpcState.gazing + canSee）了几次；每幅几次 */
+  paintingStops: number;
+  paintings: Record<string, number>;
 }
 
 export interface RunOptions {
@@ -174,6 +180,7 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
   const lastHeard = new Map<number, number>();
   /** 这一步的现身落下吓到了谁（同一步紧跟着的 GHOST_SOURCE startle 算现身的，不算后颈一凉） */
   let dropAt = -1, dropped = new Set<number>();
+  const looks = lookLog(w);
   const lurer = kind === 'lurer';
   const ghost: GhostBot | null =
     lurer || opts.ghost === 'hover' || opts.ghost === 'manifest' || opts.ghost === 'spam' || opts.ghost === 'hug'
@@ -237,12 +244,51 @@ export function runBot(seed: number, kind: BotKind, opts: RunOptions = {}): BotR
       const v = visitors.get(n.id);
       if (v && n.mode !== 'fleeing') v.peakFear = Math.max(v.peakFear, n.fear);
     }
+    looks.observe();
   }
   const list = [...visitors.values()];
   const lifetimes = list.filter((v) => v.exitedAt !== null).map((v) => v.exitedAt! - v.spawnedAt);
   return {
     seed, kind, seconds, visitors: list, exits: lifetimes.length, lifetimes, maxSingleScare, lureLedScares, landing: land.landing,
-    chills, necks, ghostFear, maxNeck, manifests, manifestScares, wallPasses: ghost?.passes ?? 0, calm, propFear, manifestFear,
+    chills, necks, ghostFear, maxNeck, manifests, manifestScares, wallPasses: ghost?.passes ?? 0, calm, propFear, manifestFear, ...looks.result(),
+  };
+}
+
+/** 看够多少秒才算「看了一次」：手电扫过去那一下不算 */
+const LOOK_MIN = 1;
+
+/** 画像、镜子被看了几次几秒，挂画被停下来照着看了几次（BotRun 的 looks、paintingStops、paintings）。每步 observe 一次 */
+function lookLog(w: World) {
+  const spots = new Map(createBrowse(grid, w.state.objects, { chance: 0, hold: [0, 0] }).spots.map((s) => [s.id, s]));
+  const looks = { portrait: { n: 0, seconds: 0 }, mirror: { n: 0, seconds: 0 } };
+  const run = { portrait: 0, mirror: 0 };
+  const paintings: Record<string, number> = {};
+  /** 这个人这一次停下来看（看的是哪一处），已经记过照着看了 */
+  const counted = new Map<number, string>();
+  return {
+    observe() {
+      for (const id of ['portrait', 'mirror'] as const) {
+        if (w.state.objects.find((o) => o.id === id)!.seenBy.length > 0) {
+          looks[id].seconds += DT;
+          run[id] += DT;
+          if (run[id] >= LOOK_MIN && run[id] - DT < LOOK_MIN) looks[id].n++;
+        } else run[id] = 0;
+      }
+      for (const n of w.state.npcs) {
+        const id = n.gazing ?? null;
+        if (!id) {
+          counted.delete(n.id);
+          continue;
+        }
+        const s = spots.get(id);
+        if (!s || id === 'portrait' || id === 'mirror' || counted.get(n.id) === id || !canSee(grid, n, s.pos, VISION.range)) continue;
+        counted.set(n.id, id);
+        paintings[id] = (paintings[id] ?? 0) + 1;
+      }
+    },
+    result() {
+      return { looks, paintings, paintingStops: Object.values(paintings).reduce((a, b) => a + b, 0) };
+    },
   };
 }
 

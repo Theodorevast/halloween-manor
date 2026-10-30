@@ -15,11 +15,14 @@
 // 2026-10-30 用户试玩以后（路 GP）：
 // - 被引诱的人走到声源旁以后，先盯着声源，再用手电把四周扫一圈，扫过看得见的惊吓物件时停一下（SCAN，见 startInvestigate）
 // - 收夜以后更容易被吓（WorldOptions.late）：world.ts 在 NpcCtx 里给 gain / decay，涨的每一下乘 gain（boost），回落乘 decay
+// - 闲逛时被画像、镜子、挂画吸引（WorldOptions.browse，sim/browse.ts）：走到跟前、面朝它、手电照着看一会儿（startBrowse、startGaze）；紧张的人不停
 import { CELL, cellCenter, cellOf, FRONT_DOOR, GRID_H, idx, inGrid, ROOMS, roomAt, Tile } from '../config/house';
 import type { RoomId } from '../config/house';
 import { SCARES } from '../config/scares';
-import { BEHAVIOR, CROWD, FEAR, GHOST, MOTION, NOTICE, PERSONALITIES, SCAN, SPEED, TRAITS, VISION } from '../config/visitors';
+import { BEHAVIOR, BROWSE, CROWD, FEAR, GHOST, MOTION, NOTICE, PERSONALITIES, SCAN, SPEED, TRAITS, VISION } from '../config/visitors';
 import { angleOf, wrapAngle } from '../lib/angle';
+import { pickSpot } from './browse';
+import type { Browse, BrowseSpot } from './browse';
 import { Grid } from './grid';
 import { findPath, inZones } from './pathfind';
 import type { Rng } from './rng';
@@ -135,6 +138,8 @@ export interface NpcCtx {
   avoid?: readonly AvoidZone[];
   /** 屋里的物件（WorldState.objects）：被引诱的人查看时扫一圈，在看得见的惊吓物件上停一下（SCAN）。不给就是没有物件 */
   props?: readonly ScareObjectState[];
+  /** 闲逛时被画像、镜子、挂画吸引（WorldOptions.browse）。不给就没有 */
+  browse?: Browse;
   /** 收夜以后（WorldOptions.late）：涨的每一下乘 gain、回落的速度乘 decay（见 boost、updateNpc）。不给就是 1 */
   gain?: number;
   decay?: number;
@@ -278,6 +283,9 @@ export interface Npc {
   calm: boolean;
   /** 最近一次查看的声源、开始查看的时刻（SCAN.again 秒内同一个地方再响，只回头看一眼，不再走过去）；没查看过为 null */
   checked: { src: Vec2; at: number } | null;
+  /** 正走过去要看的那一处（WorldOptions.browse）；正停下来看的那一处（s.gazing 是它的 id）。放下这件事见 dropBrowse */
+  browseTo: BrowseSpot | null;
+  gaze: BrowseSpot | null;
 }
 
 export interface NpcInit {
@@ -358,6 +366,8 @@ export function createNpc(o: NpcInit, ctx: Pick<NpcCtx, 'rng'> & Partial<Pick<Np
     wallReadyAt: -Infinity,
     calm: false,
     checked: null,
+    browseTo: null,
+    gaze: null,
   };
   if (o.mode === 'entering') {
     const inside = { x: FRONT_DOOR.inside.x, z: FRONT_DOOR.inside.z };
@@ -430,6 +440,7 @@ export function startle(npc: Npc, ctx: NpcCtx, objectId: string, type: ScareType
  */
 export function startleWith(npc: Npc, ctx: NpcCtx, objectId: string, amount: number, srcPos: Vec2): void {
   const s = npc.s;
+  stopGazing(npc); // 吓到了就不再盯着看；还在走过去的，僵住完接着走
   addFear(npc, amount, ctx.now);
   npc.lastScareSrc = null; // 物件的 startle 回头再记（见 startle）
   const scream = amount >= FEAR.screamAt || (FEAR.screamDread && s.fear >= FEAR.dread);
@@ -718,6 +729,7 @@ const RETREAT_SAMPLE = 0.1;
 export function retreat(npc: Npc, ctx: NpcCtx, from: Vec2, dist: number): void {
   const s = npc.s;
   if (!canBeScared(npc) || leavingNow(npc)) return; // 天亮要走的人不后退，吓完接着往外走
+  dropBrowse(npc);
   if (s.mode === 'startled') {
     npc.pendingRetreat = { from: { x: from.x, z: from.z }, dist };
     return;
@@ -818,15 +830,19 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
         const back = npc.retreatFrom && bearing(s.pos, npc.retreatFrom);
         if (back !== null && back !== undefined) lookToward(npc, dt, back);
         else walkSweep(npc, dt);
-        if (r === 'arrived') lookAround(npc, ctx);
+        if (r === 'arrived') arrive(npc, ctx);
         else if (r === 'stuck') unstick(npc, ctx);
       } else {
         stand(npc, ctx);
         npc.lookT += dt;
         npc.lookLeft -= dt;
         turnBack(npc, dt);
-        lookToward(npc, dt, npc.lookBase + BEHAVIOR.sweepAmp * Math.sin((TAU * npc.lookT) / BEHAVIOR.sweepPeriod));
-        if (npc.lookLeft <= 0) moveOn(npc, ctx);
+        // 停在画像、镜子、挂画跟前看：手电一直照着它（只小幅晃动）；看到一半紧张起来就不看了，接着走
+        lookToward(npc, dt, npc.lookBase + (npc.gaze ? BROWSE.sway : BEHAVIOR.sweepAmp) * Math.sin((TAU * npc.lookT) / BEHAVIOR.sweepPeriod));
+        if (npc.lookLeft <= 0 || (npc.gaze && s.nervous)) {
+          stopGazing(npc);
+          moveOn(npc, ctx);
+        }
       }
       break;
     }
@@ -888,13 +904,16 @@ export function updateNpc(npc: Npc, ctx: NpcCtx): void {
  * 闲逛：随机挑一个别的房间里的可走格（优先不贴墙的）寻路过去；寻路失败换目标，都失败就原地再照一会儿。
  * 要绕开的圆里的格子不挑（算一次没挑中）
  */
-export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'> & Partial<Pick<NpcCtx, 'avoid' | 'now'>>): void {
+export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'> & Partial<Pick<NpcCtx, 'avoid' | 'now' | 'browse'>>): void {
   const s = npc.s;
   s.mode = 'wander';
   s.modeTime = 0;
   npc.source = null;
   npc.retreatFrom = null;
   npc.afterRetreat = null;
+  dropBrowse(npc);
+  // 被画像、镜子、挂画吸引（WorldOptions.browse；不给时这里什么都不做，不多抽随机数）。紧张的人不去看
+  if (ctx.browse && !s.nervous && ctx.rng.next() < ctx.browse.chance && startBrowse(npc, ctx)) return;
   const [ci, cj] = cellOf(s.pos.x, s.pos.z);
   const here = roomAt(ci, cj);
   const choices = ROOM_IDS.filter((r) => r !== here);
@@ -915,6 +934,75 @@ export function beginWander(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'> & Partial
   startLook(npc, ctx, s.heading);
 }
 
+/** 走去看一处（sim/browse.ts 的 pickSpot 挑的）：站的地方随机挑一个，要绕开的圈里的不去。走不了返回 false，照常闲逛 */
+function startBrowse(npc: Npc, ctx: Pick<NpcCtx, 'nav' | 'rng'> & Partial<Pick<NpcCtx, 'avoid' | 'now' | 'browse'>>): boolean {
+  const now = ctx.now ?? 0;
+  const spot = pickSpot(ctx.browse!, ctx.rng, now);
+  if (!spot) return false;
+  const stand = ctx.rng.pick(spot.stands);
+  if (avoided(npc, ctx, stand)) return false;
+  const path = pathFor(npc, ctx, stand);
+  if (!path || path.length === 0) return false;
+  setPath(npc, path);
+  npc.act = 'walk';
+  npc.browseTo = spot;
+  spot.claimUntil = now + BROWSE.claim;
+  return true;
+}
+
+/**
+ * 闲逛走到了：要看的那一处（browseTo）到了就停下来看，紧张了就不停、接着走；别的时候和原来一样原地左右照。
+ * 被挡住提前算到了（unstick）也走这里：从那里看不见它就不看了
+ */
+function arrive(npc: Npc, ctx: NpcCtx) {
+  const spot = npc.browseTo;
+  if (spot && npc.s.nervous) {
+    dropBrowse(npc);
+    moveOn(npc, ctx);
+    return;
+  }
+  if (spot && startGaze(npc, ctx, spot)) {
+    npc.browseTo = null;
+    return;
+  }
+  dropBrowse(npc);
+  lookAround(npc, ctx);
+}
+
+/**
+ * 停下来看：身体转过去（noticeHome）、手电照着它（lookBase），看 browse.hold 秒——转过去的那一点时间另算，手电照上以后实打实看这么久。
+ * 这段时间里物件的眼睛亮着（seenBy），玩家有时间出手
+ */
+function startGaze(npc: Npc, ctx: NpcCtx, spot: BrowseSpot): boolean {
+  const s = npc.s, b = ctx.browse;
+  const to = bearing(s.pos, spot.pos);
+  if (!b || to === null || !ctx.nav.grid.lineOfSight(s.pos, spot.pos)) return false;
+  startLook(npc, ctx, to);
+  npc.lookLeft = ctx.rng.range(b.hold[0], b.hold[1]) + Math.abs(wrapAngle(to - s.lookDir)) / BEHAVIOR.turnRate;
+  npc.noticeHome = { heading: to };
+  npc.gaze = spot;
+  s.gazing = spot.id;
+  spot.seen += 1;
+  spot.lastAt = ctx.now;
+  spot.claimUntil = ctx.now + npc.lookLeft;
+  b.last = spot;
+  return true;
+}
+
+/** 不再盯着看（看完了、被吓到了、有别的事了）。手电回到平常的左右照 */
+function stopGazing(npc: Npc) {
+  if (!npc.gaze) return;
+  npc.gaze = null;
+  npc.s.gazing = null;
+}
+
+/** 手上要看的这件事整个放下（听见声音、逃跑、后退、换了去处…）：走过去的、正在看的都不算了；没走到的那一处放开，下一个人接着去 */
+function dropBrowse(npc: Npc) {
+  if (npc.browseTo) npc.browseTo.claimUntil = -Infinity;
+  npc.browseTo = null;
+  stopGazing(npc);
+}
+
 /** 测试和调试用（world.spawn 的 goal）：转入闲逛，寻路走到 goal，到了再左右照。到不了返回 false（原状态不变） */
 export function walkTo(npc: Npc, ctx: PathCtx, goal: Vec2): boolean {
   const path = pathFor(npc, ctx, goal);
@@ -923,6 +1011,7 @@ export function walkTo(npc: Npc, ctx: PathCtx, goal: Vec2): boolean {
   npc.s.modeTime = 0;
   npc.source = null;
   npc.retreatFrom = null;
+  dropBrowse(npc);
   setPath(npc, path);
   npc.act = 'walk';
   return true;
@@ -995,6 +1084,7 @@ function resumeEntering(npc: Npc, ctx: NpcCtx, goal: Vec2): boolean {
 /** 警觉：按 alertPath 走过去（走到多近看 investigateDist：按性格，门要站进门洞）；已经在查看位置或寻路失败就原地查看 */
 function beginAlert(npc: Npc, ctx: NpcCtx, source: Vec2) {
   const s = npc.s;
+  dropBrowse(npc);
   s.mode = 'alert';
   s.modeTime = 0;
   npc.source = { x: source.x, z: source.z };
@@ -1123,6 +1213,7 @@ export function scanAt(frames: readonly ScanFrame[], t: number): number {
 /** 逃跑：寻路到前门两格中间，再直线走到门外；还在门外（进门途中）就直接回头 */
 function beginFlee(npc: Npc, ctx: NpcCtx) {
   const s = npc.s;
+  dropBrowse(npc);
   s.mode = 'fleeing';
   s.modeTime = 0;
   s.fear = FEAR.max;
@@ -1158,6 +1249,7 @@ export function beginLeave(npc: Npc, ctx: NpcCtx): void {
   const s = npc.s;
   if (s.mode === 'fleeing' || s.mode === 'gone' || s.mode === 'leaving') return;
   // 正在受惊僵住的（FEAR.startleTime 很短，速度早就清零了）也算：不让他僵完再走，天亮这一刻谁都往外走
+  dropBrowse(npc);
   s.mode = 'leaving';
   s.modeTime = 0;
   npc.resume = null;
@@ -1766,7 +1858,7 @@ function unstick(npc: Npc, ctx: NpcCtx): void {
   npc.stuckL = Infinity;
   if (s.mode !== 'fleeing' && remaining(s.pos.x, s.pos.z, s.path) <= CROWD.closeEnough) {
     s.path = [];
-    if (s.mode === 'wander') lookAround(npc, ctx);
+    if (s.mode === 'wander') arrive(npc, ctx);
     else if (s.mode === 'alert') startInvestigate(npc, ctx);
     else if (s.mode === 'entering') beginWander(npc, ctx);
     return;

@@ -354,22 +354,41 @@ export const SPAWN = {
 export const HIT_STOP = 0.15;
 
 /**
+ * 闲逛时走到画像、镜子、挂画跟前看（2026-10-30，路 GP，playtest.md S2；规则见 sim/browse.ts，机会和时长见 NIGHT_VISITS.browse）：
+ * dist：站在它正面多远（米）；side：站的地方偏离正前方最多多少米；sway：看的时候手电小幅晃动的幅度（弧度，比光锥半角小得多，一直照着它）；
+ * weight：多被看几倍，比挂画（1）多的是能附身的（有「出手的窗口」）：镜子最高，它只有 2.5 米的范围，路过看不到，只能靠走过去；
+ * claim：有人奔着一处去以后，这么多秒内别人不挑它（走过去最长约 20 秒；他半路被别的事叫走就马上放开）
+ */
+export const BROWSE = {
+  dist: [1.5, 2.5] as [number, number],
+  side: 0.6,
+  sway: 0.1,
+  weight: { portrait: 2, mirror: 4 },
+  claim: 25,
+};
+
+/**
  * 正式游戏的一夜（2026-10-30 用户试玩以后，路 GP；用户：人太少；critic S-3、newbie G4：收夜以后最后一分多钟没事干）。
  * 只有 main.ts 的 createWorld 给（nightWorld），机器人、平衡测试都不给（WorldOptions 的 target、pairs、late 默认关）：
  * - target：屋里同时最多 4 人（用户定；SPAWN.target 还是 3，机器人照旧）
  * - pairs：开局以后，轮到有人进门、屋里容得下两个时，三分之一的机会两人结伴，第二个人隔 2 秒跟进
  * - finalPair：收夜前这么多秒起，进门的都是两人结伴（等屋里容得下两个再来）——收夜前最后来的一批是两个人，最后一段有新面孔可吓
  * - late：收夜以后恐惧值每一下涨得快一点（× gain）、回落得慢一点（× decay）——剩下的 skeptic 在天亮前也推得动
+ * - browse：每次挑下一个去处时有 chance 的机会走到画像、镜子或挂画跟前，照着看 hold 秒（见 BROWSE）
  */
 export const NIGHT_VISITS = {
   target: 4,
   pairs: { chance: 1 / 3, gap: 2 },
   finalPair: 50,
   late: { gain: 1.25, decay: 0.5 },
+  browse: { chance: 0.6, hold: [2, 3] as [number, number] },
 };
 
-/** 正式游戏 createWorld 的开关（NIGHT_VISITS）。closeAt：这一夜几秒收夜（NIGHT.length；?night 调过的按调过的，debug.ts 的 nightTiming） */
-export function nightWorld(closeAt: number): Pick<WorldOptions, 'target' | 'pairs' | 'late'> {
+/**
+ * 正式游戏 createWorld 的开关（NIGHT_VISITS）。closeAt：这一夜几秒收夜（NIGHT.length；?night 调过的按调过的，debug.ts 的 nightTiming）；
+ * paintings：这个视角有没有挂画（娃娃屋不建，访客不能对着空墙照）
+ */
+export function nightWorld(closeAt: number, paintings = true): Pick<WorldOptions, 'target' | 'pairs' | 'late' | 'browse'> {
   const v = NIGHT_VISITS;
-  return { target: v.target, pairs: { ...v.pairs, final: Math.max(0, closeAt - v.finalPair) }, late: { ...v.late } };
+  return { target: v.target, pairs: { ...v.pairs, final: Math.max(0, closeAt - v.finalPair) }, late: { ...v.late }, browse: { ...v.browse, paintings } };
 }

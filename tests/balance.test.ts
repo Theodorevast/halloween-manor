@@ -121,6 +121,11 @@ beforeAll(() => {
   if (env?.BALANCE_REPORT) console.log(report());
 }, RUN_ALL_TIMEOUT);
 
+/** 画像或镜子平均每夜被看几次；两样合起来平均每夜被看几秒；有几夜达标（各至少 2 次、合起来至少 10 秒，playtest.md S2 的验收） */
+const avgLook = (runs: BotRun[], id: 'portrait' | 'mirror') => runs.reduce((a, r) => a + r.looks[id].n, 0) / runs.length;
+const avgLookSeconds = (runs: BotRun[]) => runs.reduce((a, r) => a + r.looks.portrait.seconds + r.looks.mirror.seconds, 0) / runs.length;
+const goodNights = (runs: BotRun[]) => runs.filter((r) => r.looks.portrait.n >= 2 && r.looks.mirror.n >= 2 && r.looks.portrait.seconds + r.looks.mirror.seconds >= 10).length;
+
 function report(): string {
   const row = (r: BotRun) => {
     const brave = r.visitors.filter((v) => v.personality === 'brave');
@@ -149,6 +154,10 @@ function report(): string {
     `games: skilled ${games(skilled)}; skilled + ghost ${games(skilledGhost)}; third person (ghost, reach ${REACH} m) ${games(skilledReach)}`,
     `manifest only, lone brave (s to exit, ${MANIFEST_SECONDS} s cap): ${times(manifestLone)} (drops that scared ${manifestLone.map((r) => `${r.manifestScares}/${r.manifests}`).join(' ')})`,
     `skilled + manifest, lone brave: ${times(skilledManifestLone)}`,
+    `looks (official night, per night): ` +
+      (Object.entries(styles.night) as [Style, BotRun[]][])
+        .map(([name, runs]) => `${name} portrait ${avgLook(runs, 'portrait').toFixed(1)} mirror ${avgLook(runs, 'mirror').toFixed(1)} seconds ${avgLookSeconds(runs).toFixed(0)} paintings ${(runs.reduce((a, r) => a + r.paintingStops, 0) / runs.length).toFixed(1)} ok ${goodNights(runs)}/${runs.length}`)
+        .join('; '),
     ...(['default', 'night'] as const).map(
       (k) =>
         `playstyles (${k === 'default' ? 'default world' : 'official night'}, ${STYLE_SEEDS.length} seeds): ` +
@@ -294,6 +303,18 @@ describe('数值平衡（固定种子，无界面）', () => {
       expect(avgExits(r.spamF)).toBeGreaterThanOrEqual(3);
       expect(avgExits(r.aimedF)).toBeGreaterThanOrEqual(3);
     }
+  });
+
+  test('正式游戏的一夜：画像、镜子真的有人看（playtest.md S2）——各种打法平均每夜各至少 2 次、合起来至少 10 秒，六幅挂画也有人停下来照着看；默认世界一次都不停', () => {
+    for (const [name, runs] of Object.entries(styles.night) as [Style, BotRun[]][]) {
+      expect(avgLook(runs, 'portrait'), name).toBeGreaterThanOrEqual(2);
+      expect(avgLook(runs, 'mirror'), name).toBeGreaterThanOrEqual(2);
+      expect(avgLookSeconds(runs), name).toBeGreaterThanOrEqual(10);
+      expect(runs.reduce((a, r) => a + r.paintingStops, 0) / runs.length, name).toBeGreaterThanOrEqual(3);
+      // 大多数夜达标（10 夜至少 7 夜）；打得快的打法屋里人少、又常常紧张，不是每夜都有
+      expect(goodNights(runs), name).toBeGreaterThanOrEqual(7);
+    }
+    for (const runs of Object.values(styles.default)) expect(runs.reduce((a, r) => a + r.paintingStops, 0)).toBe(0);
   });
 
   test('正式游戏的一夜（收夜以后恐惧值 × late.gain）：单独一下也吓不跑恐惧值为 0 的人（算式，加上机器人实测）', () => {

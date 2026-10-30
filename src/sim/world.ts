@@ -8,13 +8,15 @@
 // close() 收夜（不再进人，屋里没人就最后再放一位）、reopen() 又开门（照常补人）、dawn() 天亮（先收夜但不补那一位，屋里的人自己走出去）。
 // 开局的间隔另给在 WorldOptions.openingGaps。
 // 用户试玩以后（2026-10-30，路 GP）又有三个开关，也是只有正式游戏给（config/visitors.ts 的 nightWorld）：屋里最多几人（target）、
-// 结伴进门（pairs，见 spawner.ts）、收夜以后更容易被吓（late：close / dawn 以后 NpcCtx 带 gain、decay，reopen 撤掉）。
+// 结伴进门（pairs，见 spawner.ts）、收夜以后更容易被吓（late：close / dawn 以后 NpcCtx 带 gain、decay，reopen 撤掉）、
+// 闲逛时被画像、镜子、挂画吸引（browse，见 browse.ts）。
 // 同一次还改了两条规则（对所有人，机器人也一样）：现身蓄力只让「手电照着那里的」和「已经紧张（FEAR.nervous）、看得见那里的」人转过来（manifest.ts 的
 // sensesManifest），吓多少按恐惧值加成；被引诱的人查看时把四周扫一圈、在惊吓物件上停一下（npc.ts 的 SCAN）
 import { cellOf, FRONT_DOOR } from '../config/house';
 import { FEAR, GHOST, HIT_STOP, MANIFEST, TRAP, VISION } from '../config/visitors';
 import { angleOf } from '../lib/angle';
 import { Grid } from './grid';
+import { createBrowse } from './browse';
 import { createManifest, idleManifest, manifestFear, sensesManifest } from './manifest';
 import { beginLeave, boost, canBeScared, createNav, createNpc, exposure, feelGhost, hear, hearGhostWall, notice, retreat, separate, startle, startleWith, updateNpc, walkTo } from './npc';
 import type { Npc, NpcCtx } from './npc';
@@ -100,6 +102,7 @@ export function createWorld(opts: WorldOptions): World {
     ghost: null,
     avoid: state.avoid,
     props: state.objects,
+    browse: opts.browse ? createBrowse(grid, state.objects, opts.browse) : undefined,
   };
 
   /** 收夜以后更容易被吓（WorldOptions.late）：close / dawn 时打开，reopen 时撤掉；不给 late 就什么都不做 */
