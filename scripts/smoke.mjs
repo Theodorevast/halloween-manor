@@ -136,7 +136,9 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const errors = watchErrors(page);
 
-  await page.goto(`${BASE}?debug&dollhouse${QS}`, { waitUntil: 'networkidle' });
+  // night=600：这一页、下面第三人称那一页用 step 一口气快进好几分钟（等冷却），不加的话会跨过 3 分 20 秒收夜、屋里吓空了就进收尾，
+  // 收尾时不收附身、机关（最后一轮修复 M-1），后面的检查就点不动了。一夜的流程另在 np、phone 两页用默认夜长测
+  await page.goto(`${BASE}?debug&dollhouse&night=600${QS}`, { waitUntil: 'networkidle' });
   await page.locator('[data-start]').waitFor({ timeout: 15000 });
   await page.screenshot({ path: 'shots/smoke-0-start.png' });
   await waitReady(page);
@@ -201,7 +203,7 @@ try {
   // 无头 Chrome 里指针锁定一般锁得上，但不保证：先按真实情况检查界面，之后用 ghost.fakeLock(true) 走同一条路，不依赖它
   const gp = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const gErrors = watchErrors(gp);
-  await gp.goto(`${BASE}?debug${QS}`, { waitUntil: 'networkidle' });
+  await gp.goto(`${BASE}?debug&night=600${QS}`, { waitUntil: 'networkidle' });
   await waitReady(gp);
   check('桌面默认走第三人称', await gp.evaluate(() => window.__haunt.ghost !== null));
   // 鼠标放在画面正中，之后的点击都原地按下：锁定指针后移动鼠标就是转镜头
